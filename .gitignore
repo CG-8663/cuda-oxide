@@ -1,0 +1,36 @@
+target/
+*.ptx
+*.ltoir
+.ltoir_arch
+*.ll
+*.bc
+.DS_Store
+*.tar.gz
+.cursor/
+
+# Internal documentation (lives in docs/, not tracked -- see cuda-oxide-book/ for the book)
+/docs/
+DESIGN.md
+test.mlir
+/debug/
+/tests/
+
+# Removed from codebase but may still exist locally
+crates/ltoir-backend/
+crates/dialect-mir/src/passes/
+
+# Rust compiler long type name files (generated for overly complex generic types)
+**/*.long-type-*.txt
+
+# GPU compilation artifacts
+*.cubin
+*.gpu
+*.fatbin
+vendor/
+
+# Python virtual environments and caches
+.venv/
+bench/venv/
+__pycache__/
+**/__pycache__/
+*.pyc

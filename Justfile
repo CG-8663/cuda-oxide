@@ -1,0 +1,44 @@
+# Use PowerShell on Windows
+set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
+
+# Use Bash on Unix
+set shell := ["bash", "-c"]
+
+# Format all Rust code (root, codegen, examples)
+fmt:
+    cargo oxide fmt
+
+# Check formatting without modifying files
+fmt-check:
+    cargo oxide fmt --check
+
+# Run clippy with warnings as errors
+clippy:
+    cargo clippy --all-targets --lib --tests -- -D warnings
+
+# Run clippy and auto-fix warnings
+clippy-fix:
+    cargo clippy --all-targets --lib --tests --fix --allow-dirty --allow-staged
+
+# Run unit tests (excludes rustc_private and device-only crates)
+test:
+    cargo test -p cuda-host -p cuda-macros -p dialect-llvm -p dialect-mir -p dialect-nvvm -p hematite-tensors -p hematite-tensors-host --lib --tests
+
+# Run all checks (fmt + clippy + test)
+check: fmt-check clippy test
+
+# Build an example (compile only)
+build example:
+    cargo oxide build {{example}}
+
+# Build and run an example
+run example:
+    cargo oxide run {{example}}
+
+# Show full compilation pipeline with verbose output
+pipeline example:
+    cargo oxide pipeline {{example}}
+
+# Run every example with GPU-aware gating (see scripts/smoketest.sh --help)
+smoketest *args:
+    scripts/smoketest.sh {{args}}

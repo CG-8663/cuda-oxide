@@ -1,0 +1,155 @@
+# cuda-macros
+
+Procedural macros for writing CUDA kernels in Rust. Provides `#[kernel]`, `#[device]`, `#[launch_bounds]`, `#[cluster_launch]`, `gpu_printf!`, `cuda_launch!`, and `cuda_launch_async!` -- the primary user-facing compilation and launch API for cuda-oxide.
+
+## Attributes
+
+### `#[kernel]` -- GPU Kernel Entry Point
+
+Marks a function as a CUDA kernel. Generates:
+1. A `cuda_oxide_kernel_<name>` entry point (with `#[no_mangle]`) for the codegen backend to collect
+2. A `__<name>_CudaKernel` marker struct implementing `CudaKernel` (or `GenericCudaKernel` for generics)
+
+```rust
+use cuda_device::{kernel, thread, DisjointSlice};
+
+#[kernel]
+pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
+    let idx = thread::index_1d();
+    if let Some(c_elem) = c.get_mut(idx) {
+        *c_elem = a[idx.get()] + b[idx.get()];
+    }
+}
+```
+
+**Generic kernels** work in two modes:
+
+```rust
+// Mode 1: call-site instantiation (PTX name from type_name)
+#[kernel]
+pub fn scale<T: Copy + Mul<Output = T>>(factor: T, input: &[T], mut out: DisjointSlice<T>) { ... }
+// Launch: cuda_launch! { kernel: scale::<f32>, ... }
+
+// Mode 2: explicit instantiation list
+#[kernel(f32, i32)]
+pub fn scale<T: Copy + Mul<Output = T>>(factor: T, input: &[T], mut out: DisjointSlice<T>) { ... }
+// Generates named entry points: scale_f32, scale_i32
+```
+
+### `#[device]` -- Device Helper Functions and Externs
+
+Device functions run on GPU but are not entry points. Works on both regular functions and `extern "C"` blocks:
+
+```rust
+#[device]
+pub fn magnitude(x: f32, y: f32) -> f32 {
+    (x * x + y * y).sqrt()
+}
+
+// Extern device functions (e.g. from libdevice or cuBLASDx)
+#[device]
+extern "C" {
+    fn __nv_expf(x: f32) -> f32;
+}
+```
+
+| Feature              | `#[kernel]`          | `#[device]`          |
+|----------------------|----------------------|----------------------|
+| Entry point          | Yes (PTX `.entry`)   | No (PTX `.func`)     |
+| Can return values    | No (must be `()`)    | Yes                  |
+| Callable from host   | Via `cuda_launch!`   | No                   |
+| Callable from device | Yes                  | Yes                  |
+
+### `#[launch_bounds(max_threads, min_blocks)]`
+
+Occupancy hints for register allocation. Must come **after** `#[kernel]`.
+
+```rust
+#[kernel]
+#[launch_bounds(256, 2)]  // max 256 threads, min 2 blocks per SM
+pub fn optimized(out: DisjointSlice<f32>) { ... }
+// PTX: .entry optimized .maxntid 256 .minnctapersm 2 { ... }
+```
+
+### `#[cluster_launch(x, y, z)]`
+
+Compile-time thread block cluster dimensions (Hopper+). Must come **after** `#[kernel]`.
+
+```rust
+#[kernel]
+#[cluster_launch(4, 1, 1)]  // 4 blocks per cluster
+pub fn cluster_kernel(out: DisjointSlice<u32>) { ... }
+// PTX: .entry cluster_kernel .reqnctapercluster 4, 1, 1 { ... }
+```
+
+### `#[convergent]`, `#[pure]`, `#[readonly]`
+
+Semantic markers for the codegen backend (pass-through -- no code transformation).
+
+## `cuda_launch!` -- Synchronous Kernel Launch
+
+```rust
+cuda_launch! {
+    kernel: vecadd,                                  // or scale::<f32> for generics
+    stream: stream,
+    module: module,
+    config: LaunchConfig::for_num_elems(N as u32),
+    cluster_dim: (4, 1, 1),                          // optional, uses launch_kernel_ex
+    args: [slice(a_dev), slice(b_dev), slice_mut(c_dev)]
+}
+```
+
+### Argument Forms
+
+| Syntax                | Kernel Parameter    | Marshalling                         |
+|-----------------------|---------------------|-------------------------------------|
+| `expr`                | `T` (scalar)        | `&mut value` as `*mut c_void`       |
+| `slice(buf)`          | `&[T]`              | Device pointer + length (two args)  |
+| `slice_mut(buf)`      | `DisjointSlice<T>`  | Device pointer + length (two args)  |
+| `move \|..\| body`    | Closure `F`         | Each capture by value               |
+| `\|..\| body`         | Closure `F`         | Pointers to captures (HMM)          |
+
+### PTX Name Resolution
+
+| Kernel Kind    | PTX Name                                          |
+|----------------|---------------------------------------------------|
+| Non-generic    | Original function name (`vecadd`)                 |
+| Generic        | `{name}__{sanitized_types}` via `type_name::<T>`  |
+| Closure        | `{name}_L{line}C{col}` via source location        |
+
+For generics, the macro forces monomorphization with a volatile pointer trick so the kernel appears in the codegen unit even without a host-side call.
+
+## `cuda_launch_async!` -- Async Kernel Launch
+
+Returns an `AsyncKernelLaunch` implementing `DeviceOperation` for `cuda-async` scheduling. Same argument forms as `cuda_launch!` but no `stream:` or `cluster_dim:` fields.
+
+```rust
+let op = cuda_launch_async! {
+    kernel: vecadd,
+    module: module,
+    config: LaunchConfig::for_num_elems(N as u32),
+    args: [slice(a_dev), slice(b_dev), slice_mut(c_dev)]
+};
+```
+
+## `gpu_printf!` -- Device-Side Printf
+
+Compiles to CUDA's `vprintf` with C vararg promotion rules. Format string must use C-style specifiers.
+
+```rust
+gpu_printf!("thread %d: val = %f\n", tid as i32, val as f64);
+```
+
+## Source Layout
+
+```text
+src/
+├── lib.rs       # All proc-macro definitions (kernel, device, launch, etc.)
+└── printf.rs    # gpu_printf! implementation
+```
+
+## Further Reading
+
+- [cuda-device](../cuda-device/) -- re-exports these macros for convenience
+- [cuda-host](../cuda-host/) -- `CudaKernel` / `GenericCudaKernel` traits used by generated code
+- [cuda-core](../cuda-core/) -- `launch_kernel` / `launch_kernel_ex` called by generated code

@@ -1,0 +1,278 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+// Index-based loops are used intentionally for parallel array iteration patterns
+#![allow(clippy::needless_range_loop)]
+
+//! # `dialect-mir` → `dialect-llvm` Lowering
+//!
+//! This crate implements the lowering pass that converts
+//! [`dialect-mir`][dialect_mir] operations into
+//! [`dialect-llvm`][dialect_llvm] operations, with GPU-specific operations
+//! lowered to inline PTX assembly or NVVM intrinsic calls.
+//!
+//! ## Overview
+//!
+//! `mir-lower` bridges cuda-oxide's Rust-semantic dialect (`dialect-mir`)
+//! to its LLVM-shaped dialect (`dialect-llvm`). After lowering,
+//! `dialect-llvm` is exported to textual LLVM IR and fed to `llc` for PTX.
+//!
+//! ## Compilation Pipeline Position
+//!
+//! ```text
+//! Rust Source Code
+//!        │
+//!        ▼
+//! ┌──────────────┐
+//! │   rustc      │  (extracts Stable MIR)
+//! └──────┬───────┘
+//!        │
+//!        ▼
+//! ┌──────────────┐
+//! │ mir-importer │  (Stable MIR → dialect-mir, then mem2reg)
+//! └──────┬───────┘
+//!        │
+//!        ▼
+//! ┌──────────────┐
+//! │  mir-lower   │  ◄── THIS CRATE (dialect-mir → dialect-llvm)
+//! └──────┬───────┘
+//!        │
+//!        ▼
+//! ┌──────────────┐
+//! │ dialect-llvm │  (exports to LLVM IR)
+//! └──────┬───────┘
+//!        │
+//!        ▼
+//! ┌──────────────┐
+//! │     llc      │  (LLVM IR → PTX)
+//! └──────────────┘
+//! ```
+//!
+//! ## Architecture
+//!
+//! The crate uses pliron's `DialectConversion` framework for the lowering
+//! pass. The framework handles IR walking, def-before-use ordering, type
+//! conversion, and block argument patching automatically. Each
+//! `dialect-mir` / `dialect-nvvm` op declares its own conversion via the
+//! `MirToLlvmConversion` op interface.
+//!
+//! ### Core Modules
+//!
+//! - **[`conversion_interface`]**: The `MirToLlvmConversion` op interface
+//!   trait. Each `dialect-mir` / `dialect-nvvm` op implements this to
+//!   declare how it lowers to `dialect-llvm`.
+//!
+//! - **[`context`]**: CUDA-specific state maps (`SharedGlobalsMap`,
+//!   `DynamicSmemAlignmentMap`) used during conversion.
+//!
+//! - **[`helpers`]**: Utility functions for creating `dialect-llvm`
+//!   constants, declaring intrinsics, and navigating the IR hierarchy.
+//!
+//! ### Conversion Modules ([`convert`])
+//!
+//! - **[`convert::types`]**: Type conversion from `dialect-mir` types to
+//!   `dialect-llvm` types.
+//!
+//! - **[`convert::ops`]**: Operation converters organized by semantic category:
+//!   - `arithmetic` - Binary/unary math operations
+//!   - `memory` - Load, store, alloca, pointer arithmetic
+//!   - `control_flow` - Branch, return, assert
+//!   - `constants` - Integer and float constants
+//!   - `cast` - Type conversions (int↔float, widening, narrowing)
+//!   - `aggregate` - Struct/tuple/enum operations
+//!   - `call` - Function calls
+//!
+//! - **[`convert::intrinsics`]**: GPU intrinsic converters:
+//!   - `basic` - Thread/block IDs, barrier
+//!   - `warp` - Shuffle, vote operations
+//!   - `mbarrier` - Asynchronous barriers (Hopper+)
+//!   - `tma` - Tensor Memory Accelerator (Hopper+)
+//!   - `wgmma` - Warpgroup Matrix Multiply-Accumulate (Hopper)
+//!   - `tcgen05` - 5th-gen Tensor Core (Blackwell)
+//!   - `stmatrix` - Shared memory matrix store
+//!
+//! ## Usage
+//!
+//! ```ignore
+//! use mir_lower::lower_mir_to_llvm;
+//! use pliron::context::Context;
+//!
+//! let mut ctx = Context::new();
+//! // ... register dialects, translate MIR into dialect-mir ...
+//!
+//! lower_mir_to_llvm(&mut ctx, module_op)?;
+//!
+//! // module_op now contains dialect-llvm operations
+//! ```
+//!
+//! ## GPU Intrinsic Lowering Strategy
+//!
+//! GPU intrinsics are lowered using two strategies:
+//!
+//! 1. **LLVM Intrinsic Calls**: For operations with direct NVVM intrinsic
+//!    equivalents (e.g., `llvm_nvvm_read_ptx_sreg_tid_x` for thread ID).
+//!
+//! 2. **Inline PTX Assembly**: For complex operations without direct intrinsics,
+//!    or where inline PTX provides better control (e.g., tcgen05, wgmma MMA).
+//!    Uses `llvm.inlineasm` with the `convergent` attribute for warp-synchronous
+//!    semantics.
+
+#![warn(missing_docs)]
+
+pub mod context;
+pub mod conversion_interface;
+pub mod convert;
+pub mod helpers;
+pub mod lowering;
+pub mod type_conversion_interface;
+
+use std::collections::HashMap;
+
+use pliron::{
+    builtin::types::{IntegerType, Signedness},
+    context::{Context, Ptr},
+    irbuild::dialect_conversion::{
+        DialectConversion, DialectConversionRewriter, OperandsInfo, apply_dialect_conversion,
+    },
+    location::Located,
+    op::{Op, op_cast},
+    operation::Operation,
+    result::Result,
+    r#type::{TypeObj, type_impls},
+};
+
+use context::{DynamicSmemAlignmentMap, SharedGlobalsMap};
+use conversion_interface::MirToLlvmConversion as MirToLlvmConversionInterface;
+use convert::types::convert_type;
+use type_conversion_interface::MirConvertibleType;
+
+// ============================================================================
+// DialectConversion driver
+// ============================================================================
+
+/// `dialect-mir` → `dialect-llvm` conversion driver.
+///
+/// Implements pliron's `DialectConversion` trait. The `rewrite` method uses
+/// `op_cast`-based dispatch via the `MirToLlvmConversion` op interface,
+/// so each `dialect-mir` / `dialect-nvvm` op declares its own lowering.
+///
+/// Holds CUDA-specific state that certain ops need during conversion:
+/// shared-memory global deduplication and dynamic shared-memory alignment.
+pub struct MirToLlvmConversionDriver {
+    /// Shared memory global deduplication across all functions.
+    pub shared_globals: SharedGlobalsMap,
+    /// Per-kernel dynamic shared memory alignment tracking.
+    pub dynamic_smem_alignments: DynamicSmemAlignmentMap,
+}
+
+fn is_mir_or_nvvm_op(ctx: &Context, op: Ptr<Operation>) -> bool {
+    let opid = Operation::get_opid(op, ctx);
+    let dialect = opid.dialect.to_string();
+    dialect == "mir" || dialect == "nvvm"
+}
+
+impl DialectConversion for MirToLlvmConversionDriver {
+    fn can_convert_op(&self, ctx: &Context, op: Ptr<Operation>) -> bool {
+        is_mir_or_nvvm_op(ctx, op)
+    }
+
+    fn can_convert_type(&self, ctx: &Context, ty: Ptr<TypeObj>) -> bool {
+        let ty_ref = ty.deref(ctx);
+
+        // Signed/unsigned integers need signless normalisation (LLVM convention).
+        if let Some(int_ty) = ty_ref.downcast_ref::<IntegerType>() {
+            return int_ty.signedness() != Signedness::Signless;
+        }
+
+        type_impls::<dyn MirConvertibleType>(&**ty_ref)
+    }
+
+    fn convert_type(&mut self, ctx: &mut Context, ty: Ptr<TypeObj>) -> Result<Ptr<TypeObj>> {
+        convert_type(ctx, ty).map_err(|e| pliron::input_error_noloc!("{e}"))
+    }
+
+    fn rewrite(
+        &mut self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        op: Ptr<Operation>,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        let opid = Operation::get_opid(op, ctx);
+        let loc = op.deref(ctx).loc();
+
+        // Special-case ops that need CUDA pass-level state.
+        if opid == dialect_mir::ops::MirFuncOp::get_opid_static() {
+            return lowering::convert_func(
+                ctx,
+                rewriter,
+                op,
+                operands_info,
+                &mut self.shared_globals,
+                &mut self.dynamic_smem_alignments,
+            );
+        }
+        if opid == dialect_mir::ops::MirSharedAllocOp::get_opid_static() {
+            return convert::ops::memory::convert_shared_alloc_dc(
+                ctx,
+                rewriter,
+                op,
+                operands_info,
+                &mut self.shared_globals,
+            );
+        }
+        if opid == dialect_mir::ops::MirExternSharedOp::get_opid_static() {
+            return convert::ops::memory::convert_extern_shared_dc(
+                ctx,
+                rewriter,
+                op,
+                operands_info,
+                &mut self.shared_globals,
+                &mut self.dynamic_smem_alignments,
+            );
+        }
+
+        // Generic dispatch for all other ops via op_cast.
+        let op_obj = Operation::get_op_dyn(op, ctx);
+        let Some(converter) = op_cast::<dyn MirToLlvmConversionInterface>(op_obj.as_ref()) else {
+            return pliron::input_err!(
+                loc,
+                "Unsupported MIR/NVVM op for lowering: {}",
+                Operation::get_opid(op, ctx)
+            );
+        };
+        converter.convert(ctx, rewriter, operands_info)
+    }
+}
+
+/// Runs the `dialect-mir` → `dialect-llvm` lowering pass on the given module.
+///
+/// This is the main entry point for the lowering pass. It uses pliron's
+/// `DialectConversion` framework to walk the IR, convert types, and
+/// dispatch per-op conversion logic.
+///
+/// # Arguments
+///
+/// * `ctx` - Mutable reference to the pliron context
+/// * `module_op` - Pointer to the module operation to transform
+///
+/// # Returns
+///
+/// `Ok(())` if all operations were successfully converted.
+pub fn lower_mir_to_llvm(ctx: &mut Context, module_op: Ptr<Operation>) -> Result<()> {
+    let mut conversion = MirToLlvmConversionDriver {
+        shared_globals: HashMap::new(),
+        dynamic_smem_alignments: HashMap::new(),
+    };
+    apply_dialect_conversion(ctx, &mut conversion, module_op)
+}
+
+/// Register the `dialect-mir` → `dialect-llvm` lowering pass with a pliron context.
+///
+/// This is a placeholder for future pass manager integration.
+/// Currently, the pass is invoked directly via [`lower_mir_to_llvm`].
+pub fn register(_ctx: &mut Context) {
+    // Placeholder for future pass manager integration
+}

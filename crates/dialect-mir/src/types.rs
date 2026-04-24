@@ -1,0 +1,671 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+//! MIR dialect types.
+
+use pliron::common_traits::Verify;
+use pliron::context::Context;
+use pliron::context::Ptr;
+use pliron::location::Location;
+use pliron::result::Error;
+use pliron::r#type::{Type, TypeObj, TypePtr};
+use pliron::verify_err;
+use pliron_derive::pliron_type;
+
+/// A tuple type.
+///
+/// Represents a fixed-size collection of heterogeneous types.
+/// Syntax: `mir.tuple <type1, type2, ...>`
+///
+/// # Verification
+/// * Structural validity is ensured by `def_type` macro and parser.
+/// * Inner types must be valid.
+#[pliron_type(name = "mir.tuple", format = "`<` vec($types, CharSpace(`,`)) `>`")]
+#[derive(Hash, PartialEq, Eq, Debug, Clone)]
+pub struct MirTupleType {
+    pub types: Vec<Ptr<TypeObj>>,
+}
+
+impl MirTupleType {
+    pub fn get(ctx: &mut Context, types: Vec<Ptr<TypeObj>>) -> TypePtr<Self> {
+        Type::register_instance(MirTupleType { types }, ctx)
+    }
+
+    pub fn get_existing(ctx: &Context, types: Vec<Ptr<TypeObj>>) -> Option<TypePtr<Self>> {
+        Type::get_instance(MirTupleType { types }, ctx)
+    }
+
+    pub fn get_types(&self) -> &[Ptr<TypeObj>] {
+        &self.types
+    }
+}
+
+impl Verify for MirTupleType {
+    fn verify(&self, _ctx: &Context) -> Result<(), Error> {
+        // Tuple types are valid if their contained types are valid.
+        // Structural validity is ensured by the parser/builder.
+        Ok(())
+    }
+}
+
+/// CUDA/PTX address space constants (matches NVPTX backend).
+pub mod address_space {
+    /// Generic address space (can alias any memory)
+    pub const GENERIC: u32 = 0;
+    /// Global device memory (VRAM)
+    pub const GLOBAL: u32 = 1;
+    /// Per-block shared memory (fast scratchpad)
+    pub const SHARED: u32 = 3;
+    /// Read-only constant memory (cached)
+    pub const CONSTANT: u32 = 4;
+    /// Per-thread local memory (stack/spill)
+    pub const LOCAL: u32 = 5;
+    /// Tensor Memory - Blackwell+ (sm_100+) tcgen05 operands
+    pub const TMEM: u32 = 6;
+}
+
+/// A pointer type with mutability and address space tracking.
+///
+/// Represents a pointer to a value of a specific type in a specific memory space.
+/// Syntax: `mir.ptr <type, mutable: bool, addrspace: u32>`
+///
+/// Address spaces are critical for GPU memory:
+/// - 0 (generic): Can point to any memory, resolved at runtime
+/// - 1 (global): Device memory (VRAM)
+/// - 3 (shared): Per-block shared memory (fast scratchpad)
+/// - 4 (constant): Read-only constant memory
+/// - 5 (local): Per-thread local memory
+/// - 6 (tmem): Tensor Memory - Blackwell+ tcgen05 operands
+///
+/// # Verification
+/// * Pointee type must be valid.
+#[pliron_type(
+    name = "mir.ptr",
+    format = "`<` $pointee `,` `mutable:` $is_mutable `,` `addrspace:` $address_space `>`"
+)]
+#[derive(Hash, PartialEq, Eq, Debug, Clone)]
+pub struct MirPtrType {
+    pub pointee: Ptr<TypeObj>,
+    pub is_mutable: bool,
+    pub address_space: u32,
+}
+
+impl MirPtrType {
+    /// Create a pointer type with explicit address space.
+    pub fn get(
+        ctx: &mut Context,
+        pointee: Ptr<TypeObj>,
+        is_mutable: bool,
+        address_space: u32,
+    ) -> TypePtr<Self> {
+        Type::register_instance(
+            MirPtrType {
+                pointee,
+                is_mutable,
+                address_space,
+            },
+            ctx,
+        )
+    }
+
+    /// Create a pointer in generic address space (0).
+    pub fn get_generic(
+        ctx: &mut Context,
+        pointee: Ptr<TypeObj>,
+        is_mutable: bool,
+    ) -> TypePtr<Self> {
+        Self::get(ctx, pointee, is_mutable, address_space::GENERIC)
+    }
+
+    /// Create a pointer in shared memory address space (3).
+    pub fn get_shared(ctx: &mut Context, pointee: Ptr<TypeObj>, is_mutable: bool) -> TypePtr<Self> {
+        Self::get(ctx, pointee, is_mutable, address_space::SHARED)
+    }
+
+    /// Create a pointer in global memory address space (1).
+    pub fn get_global(ctx: &mut Context, pointee: Ptr<TypeObj>, is_mutable: bool) -> TypePtr<Self> {
+        Self::get(ctx, pointee, is_mutable, address_space::GLOBAL)
+    }
+
+    /// Create a pointer in constant memory address space (4).
+    pub fn get_constant(
+        ctx: &mut Context,
+        pointee: Ptr<TypeObj>,
+        is_mutable: bool,
+    ) -> TypePtr<Self> {
+        Self::get(ctx, pointee, is_mutable, address_space::CONSTANT)
+    }
+
+    /// Create a pointer in tensor memory address space (6) - Blackwell+ tcgen05.
+    pub fn get_tmem(ctx: &mut Context, pointee: Ptr<TypeObj>, is_mutable: bool) -> TypePtr<Self> {
+        Self::get(ctx, pointee, is_mutable, address_space::TMEM)
+    }
+
+    pub fn get_existing(
+        ctx: &Context,
+        pointee: Ptr<TypeObj>,
+        is_mutable: bool,
+        address_space: u32,
+    ) -> Option<TypePtr<Self>> {
+        Type::get_instance(
+            MirPtrType {
+                pointee,
+                is_mutable,
+                address_space,
+            },
+            ctx,
+        )
+    }
+
+    pub fn is_mutable(&self) -> bool {
+        self.is_mutable
+    }
+
+    pub fn address_space(&self) -> u32 {
+        self.address_space
+    }
+
+    /// Check if this pointer is in shared memory (addrspace 3).
+    pub fn is_shared(&self) -> bool {
+        self.address_space == address_space::SHARED
+    }
+
+    /// Check if this pointer is in tensor memory (addrspace 6) - Blackwell+ tcgen05.
+    pub fn is_tmem(&self) -> bool {
+        self.address_space == address_space::TMEM
+    }
+}
+
+impl Verify for MirPtrType {
+    fn verify(&self, _ctx: &Context) -> Result<(), Error> {
+        // Pointer types are valid if their pointee type is valid.
+        Ok(())
+    }
+}
+
+/// A slice type: { ptr: *T, len: usize }
+///
+/// Represents a view into a contiguous sequence of elements.
+/// Syntax: `mir.slice <type>`
+///
+/// # Verification
+/// * Element type must be valid.
+#[pliron_type(name = "mir.slice", format = "`<` $element_ty `>`")]
+#[derive(Hash, PartialEq, Eq, Debug, Clone)]
+pub struct MirSliceType {
+    pub element_ty: Ptr<TypeObj>,
+}
+
+impl MirSliceType {
+    pub fn get(ctx: &mut Context, element_ty: Ptr<TypeObj>) -> TypePtr<Self> {
+        Type::register_instance(MirSliceType { element_ty }, ctx)
+    }
+
+    pub fn get_existing(ctx: &Context, element_ty: Ptr<TypeObj>) -> Option<TypePtr<Self>> {
+        Type::get_instance(MirSliceType { element_ty }, ctx)
+    }
+
+    pub fn element_type(&self) -> Ptr<TypeObj> {
+        self.element_ty
+    }
+}
+
+impl Verify for MirSliceType {
+    fn verify(&self, _ctx: &Context) -> Result<(), Error> {
+        Ok(())
+    }
+}
+
+/// A disjoint slice type.
+///
+/// Same layout as slice, but enforces thread-local access semantics in the compiler.
+/// Syntax: `mir.disjoint_slice <type>`
+///
+/// # Verification
+/// * Element type must be valid.
+#[pliron_type(name = "mir.disjoint_slice", format = "`<` $element_ty `>`")]
+#[derive(Hash, PartialEq, Eq, Debug, Clone)]
+pub struct MirDisjointSliceType {
+    pub element_ty: Ptr<TypeObj>,
+}
+
+impl MirDisjointSliceType {
+    pub fn get(ctx: &mut Context, element_ty: Ptr<TypeObj>) -> TypePtr<Self> {
+        Type::register_instance(MirDisjointSliceType { element_ty }, ctx)
+    }
+
+    pub fn get_existing(ctx: &Context, element_ty: Ptr<TypeObj>) -> Option<TypePtr<Self>> {
+        Type::get_instance(MirDisjointSliceType { element_ty }, ctx)
+    }
+
+    pub fn element_type(&self) -> Ptr<TypeObj> {
+        self.element_ty
+    }
+}
+
+impl Verify for MirDisjointSliceType {
+    fn verify(&self, _ctx: &Context) -> Result<(), Error> {
+        Ok(())
+    }
+}
+
+/// A struct type with named fields.
+///
+/// Represents a product type with named, typed fields.
+/// Syntax: `mir.struct <"Name", ["f0", "f1", ...], [type0, type1, ...]>`
+///
+/// Unlike tuples, structs have:
+/// - A name (for debugging and identification)
+/// - Named fields (stored as strings)
+/// - Can represent any Rust struct
+///
+/// # Memory Layout (ABI Compatibility)
+///
+/// For `#[repr(Rust)]` structs, rustc may reorder fields in memory for better
+/// packing. We store the exact layout from rustc to ensure host/device ABI match:
+///
+/// - `mem_to_decl[mem_idx]` = declaration index of field at memory position `mem_idx`
+/// - `field_offsets[decl_idx]` = byte offset of field in declaration order
+/// - `total_size` = total struct size including trailing padding
+///
+/// When lowering to LLVM, we use explicit padding arrays `[N x i8]` to match
+/// the exact offsets, making the struct layout independent of LLVM's datalayout.
+///
+/// # Verification
+/// * Field names and types must have same length.
+/// * Field types must be valid.
+#[pliron_type(
+    name = "mir.struct",
+    format = "`<` $name `,` `[` vec($field_names, CharSpace(`,`)) `]` `,` `[` vec($field_types, CharSpace(`,`)) `]` `,` `[` vec($mem_to_decl, CharSpace(`,`)) `]` `,` `[` vec($field_offsets, CharSpace(`,`)) `]` `,` $total_size `>`"
+)]
+#[derive(Hash, PartialEq, Eq, Debug, Clone)]
+pub struct MirStructType {
+    /// The struct name (e.g., "TmemF32x32")
+    pub name: String,
+    /// Field names in declaration order
+    pub field_names: Vec<String>,
+    /// Field types in declaration order (parallel to field_names)
+    pub field_types: Vec<Ptr<TypeObj>>,
+    /// Memory order mapping: mem_to_decl[mem_idx] = decl_idx.
+    /// Empty means identity (no reordering).
+    pub mem_to_decl: Vec<usize>,
+    /// Byte offset of each field in declaration order (bytes).
+    /// Empty means offsets are not known (fallback to LLVM layout).
+    pub field_offsets: Vec<u64>,
+    /// Total struct size in bytes (including trailing padding).
+    /// 0 means size is not known (fallback to LLVM layout).
+    pub total_size: u64,
+}
+
+impl MirStructType {
+    /// Create a new struct type with identity memory order (no reordering).
+    pub fn get(
+        ctx: &mut Context,
+        name: String,
+        field_names: Vec<String>,
+        field_types: Vec<Ptr<TypeObj>>,
+    ) -> TypePtr<Self> {
+        Self::get_with_layout(ctx, name, field_names, field_types, vec![])
+    }
+
+    /// Create a new struct type with explicit memory order.
+    ///
+    /// `mem_to_decl[mem_idx]` = declaration index of field at memory position `mem_idx`.
+    /// Pass empty vec for identity (declaration order = memory order).
+    pub fn get_with_layout(
+        ctx: &mut Context,
+        name: String,
+        field_names: Vec<String>,
+        field_types: Vec<Ptr<TypeObj>>,
+        mem_to_decl: Vec<usize>,
+    ) -> TypePtr<Self> {
+        Self::get_with_full_layout(ctx, name, field_names, field_types, mem_to_decl, vec![], 0)
+    }
+
+    /// Create a new struct type with complete layout information from rustc.
+    ///
+    /// This is the most accurate way to represent a struct - it includes exact
+    /// field offsets and total size, ensuring perfect ABI compatibility.
+    ///
+    /// # Arguments
+    /// * `mem_to_decl` - Memory order mapping (empty = identity)
+    /// * `field_offsets` - Byte offset of each field in declaration order (empty = unknown)
+    /// * `total_size` - Total struct size in bytes (0 = unknown)
+    pub fn get_with_full_layout(
+        ctx: &mut Context,
+        name: String,
+        field_names: Vec<String>,
+        field_types: Vec<Ptr<TypeObj>>,
+        mem_to_decl: Vec<usize>,
+        field_offsets: Vec<u64>,
+        total_size: u64,
+    ) -> TypePtr<Self> {
+        Type::register_instance(
+            MirStructType {
+                name,
+                field_names,
+                field_types,
+                mem_to_decl,
+                field_offsets,
+                total_size,
+            },
+            ctx,
+        )
+    }
+
+    /// Get an existing struct type if it exists.
+    pub fn get_existing(
+        ctx: &Context,
+        name: String,
+        field_names: Vec<String>,
+        field_types: Vec<Ptr<TypeObj>>,
+    ) -> Option<TypePtr<Self>> {
+        Type::get_instance(
+            MirStructType {
+                name,
+                field_names,
+                field_types,
+                mem_to_decl: vec![],
+                field_offsets: vec![],
+                total_size: 0,
+            },
+            ctx,
+        )
+    }
+
+    /// Get the struct name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Get the number of fields.
+    pub fn field_count(&self) -> usize {
+        self.field_types.len()
+    }
+
+    /// Get field names.
+    pub fn field_names(&self) -> &[String] {
+        &self.field_names
+    }
+
+    /// Get field types.
+    pub fn field_types(&self) -> &[Ptr<TypeObj>] {
+        &self.field_types
+    }
+
+    /// Get the index of a field by name.
+    pub fn get_field_index(&self, name: &str) -> Option<usize> {
+        self.field_names.iter().position(|n| n == name)
+    }
+
+    /// Get the memory order mapping.
+    /// Returns identity order if no explicit mapping is stored.
+    pub fn memory_order(&self) -> Vec<usize> {
+        if self.mem_to_decl.is_empty() {
+            (0..self.field_types.len()).collect()
+        } else {
+            self.mem_to_decl.clone()
+        }
+    }
+
+    /// Check if fields are reordered in memory.
+    pub fn is_reordered(&self) -> bool {
+        !self.mem_to_decl.is_empty()
+    }
+
+    /// Get field offsets in declaration order (bytes).
+    /// Returns empty if offsets are not known.
+    pub fn field_offsets(&self) -> &[u64] {
+        &self.field_offsets
+    }
+
+    /// Get total struct size in bytes.
+    /// Returns 0 if size is not known.
+    pub fn total_size(&self) -> u64 {
+        self.total_size
+    }
+
+    /// Check if we have explicit layout information from rustc.
+    pub fn has_explicit_layout(&self) -> bool {
+        !self.field_offsets.is_empty() && self.total_size > 0
+    }
+
+    /// Get the type of a field by index.
+    pub fn get_field_type(&self, index: usize) -> Option<Ptr<TypeObj>> {
+        self.field_types.get(index).copied()
+    }
+
+    /// Get the type of a field by name.
+    pub fn get_field_type_by_name(&self, name: &str) -> Option<Ptr<TypeObj>> {
+        self.get_field_index(name)
+            .and_then(|idx| self.get_field_type(idx))
+    }
+}
+
+impl Verify for MirStructType {
+    fn verify(&self, _ctx: &Context) -> Result<(), Error> {
+        // Struct types are valid if field names and types have same length.
+        // This is ensured by the constructor - no runtime check needed.
+        // Field types validity is checked separately.
+        Ok(())
+    }
+}
+
+/// A fixed-size array type.
+///
+/// Represents a contiguous sequence of N elements of the same type.
+/// Syntax: `mir.array <type, size>`
+///
+/// # Verification
+/// * Element type must be valid.
+/// * Size must be non-zero.
+#[pliron_type(name = "mir.array", format = "`<` $element_ty `,` $size `>`")]
+#[derive(Hash, PartialEq, Eq, Debug, Clone)]
+pub struct MirArrayType {
+    pub element_ty: Ptr<TypeObj>,
+    pub size: u64,
+}
+
+impl MirArrayType {
+    /// Create a new array type.
+    pub fn get(ctx: &mut Context, element_ty: Ptr<TypeObj>, size: u64) -> TypePtr<Self> {
+        Type::register_instance(MirArrayType { element_ty, size }, ctx)
+    }
+
+    /// Get an existing array type if it exists.
+    pub fn get_existing(
+        ctx: &Context,
+        element_ty: Ptr<TypeObj>,
+        size: u64,
+    ) -> Option<TypePtr<Self>> {
+        Type::get_instance(MirArrayType { element_ty, size }, ctx)
+    }
+
+    /// Get the element type.
+    pub fn element_type(&self) -> Ptr<TypeObj> {
+        self.element_ty
+    }
+
+    /// Get the array size.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+}
+
+impl Verify for MirArrayType {
+    fn verify(&self, _ctx: &Context) -> Result<(), Error> {
+        // Array types are valid if element type is valid.
+        // Zero-sized arrays are technically valid in Rust ([T; 0]).
+        Ok(())
+    }
+}
+
+/// An enum variant definition for MirEnumType.
+#[derive(Hash, PartialEq, Eq, Debug, Clone)]
+pub struct EnumVariant {
+    /// Variant name (e.g., "Some", "None", "Ok", "Err")
+    pub name: String,
+    /// Field types for this variant (empty for unit variants like None)
+    pub field_types: Vec<Ptr<TypeObj>>,
+}
+
+impl EnumVariant {
+    /// Create a new enum variant.
+    pub fn new(name: String, field_types: Vec<Ptr<TypeObj>>) -> Self {
+        EnumVariant { name, field_types }
+    }
+
+    /// Create a unit variant (no fields).
+    pub fn unit(name: String) -> Self {
+        EnumVariant {
+            name,
+            field_types: vec![],
+        }
+    }
+}
+
+/// An enum type (algebraic data type with multiple variants).
+///
+/// Represents Rust enums like Option<T>, Result<T,E>, and custom enums.
+///
+/// Memory layout follows Rust's enum representation:
+/// - Discriminant (integer type based on variant count)
+/// - Payload (union of all variant payloads, sized to largest)
+///
+/// Note: For simplicity, we store variant info in flattened vectors
+/// since the #[format_type] macro has trouble with nested structs.
+///
+/// # Verification
+/// * Must have at least one variant.
+/// * Discriminant type must be an integer type.
+#[pliron_type(
+    name = "mir.enum",
+    format = "`<` $name `,` $discriminant_ty `,` `[` vec($variant_names, CharSpace(`,`)) `]` `,` `[` vec($variant_field_counts, CharSpace(`,`)) `]` `,` `[` vec($all_field_types, CharSpace(`,`)) `]` `>`"
+)]
+#[derive(Hash, PartialEq, Eq, Debug, Clone)]
+pub struct MirEnumType {
+    /// The enum name (e.g., "Option", "Result")
+    pub name: String,
+    /// The discriminant type (usually u8, u16, or u32)
+    pub discriminant_ty: Ptr<TypeObj>,
+    /// Variant names in order
+    pub variant_names: Vec<String>,
+    /// Number of fields for each variant (parallel to variant_names)
+    pub variant_field_counts: Vec<u32>,
+    /// All field types concatenated (use variant_field_counts to split)
+    pub all_field_types: Vec<Ptr<TypeObj>>,
+}
+
+impl MirEnumType {
+    /// Create a new enum type from EnumVariant definitions.
+    pub fn get(
+        ctx: &mut Context,
+        name: String,
+        discriminant_ty: Ptr<TypeObj>,
+        variants: Vec<EnumVariant>,
+    ) -> TypePtr<Self> {
+        // Flatten variants into parallel vectors
+        let mut variant_names = Vec::with_capacity(variants.len());
+        let mut variant_field_counts = Vec::with_capacity(variants.len());
+        let mut all_field_types = Vec::new();
+
+        for v in variants {
+            variant_names.push(v.name);
+            variant_field_counts.push(v.field_types.len() as u32);
+            all_field_types.extend(v.field_types);
+        }
+
+        Type::register_instance(
+            MirEnumType {
+                name,
+                discriminant_ty,
+                variant_names,
+                variant_field_counts,
+                all_field_types,
+            },
+            ctx,
+        )
+    }
+
+    /// Get the enum name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Get the discriminant type.
+    pub fn discriminant_type(&self) -> Ptr<TypeObj> {
+        self.discriminant_ty
+    }
+
+    /// Get the number of variants.
+    pub fn variant_count(&self) -> usize {
+        self.variant_names.len()
+    }
+
+    /// Get a variant by index, reconstructing EnumVariant.
+    pub fn get_variant(&self, index: usize) -> Option<EnumVariant> {
+        if index >= self.variant_names.len() {
+            return None;
+        }
+
+        // Calculate offset into all_field_types
+        let field_offset: usize = self.variant_field_counts[..index]
+            .iter()
+            .map(|&x| x as usize)
+            .sum();
+        let field_count = self.variant_field_counts[index] as usize;
+        let field_types = self.all_field_types[field_offset..field_offset + field_count].to_vec();
+
+        Some(EnumVariant {
+            name: self.variant_names[index].clone(),
+            field_types,
+        })
+    }
+
+    /// Get the index of a variant by name.
+    pub fn get_variant_index(&self, name: &str) -> Option<usize> {
+        self.variant_names.iter().position(|n| n == name)
+    }
+
+    /// Get a variant by name.
+    pub fn get_variant_by_name(&self, name: &str) -> Option<EnumVariant> {
+        self.get_variant_index(name)
+            .and_then(|idx| self.get_variant(idx))
+    }
+
+    /// Check if this is Option<T> type.
+    pub fn is_option(&self) -> bool {
+        self.name == "Option" && self.variant_names.len() == 2
+    }
+
+    /// Check if this is Result<T, E> type.
+    pub fn is_result(&self) -> bool {
+        self.name == "Result" && self.variant_names.len() == 2
+    }
+}
+
+impl Verify for MirEnumType {
+    fn verify(&self, _ctx: &Context) -> Result<(), Error> {
+        // Enum types must have at least one variant
+        if self.variant_names.is_empty() {
+            return verify_err!(
+                Location::Unknown,
+                "MirEnumType must have at least one variant"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Register dialect types.
+pub fn register(ctx: &mut Context) {
+    MirTupleType::register(ctx);
+    MirPtrType::register(ctx);
+    MirSliceType::register(ctx);
+    MirDisjointSliceType::register(ctx);
+    MirStructType::register(ctx);
+    MirEnumType::register(ctx);
+    MirArrayType::register(ctx);
+}

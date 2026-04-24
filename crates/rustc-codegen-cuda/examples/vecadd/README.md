@@ -1,0 +1,111 @@
+# vecadd
+
+## Vector Addition - The "Hello World" of CUDA
+
+This example demonstrates the simplest possible CUDA kernel: element-wise vector addition (`c[i] = a[i] + b[i]`). It showcases the unified compilation model where both host and device code exist in a single file.
+
+## What This Example Does
+
+- Allocates three vectors (a, b, c) of 1024 floats
+- Launches a kernel where each thread adds one pair of elements
+- Verifies the results on the host
+
+## Key Concepts Demonstrated
+
+### Unified Compilation
+
+```rust
+// No #![cfg_attr(cuda_device, no_std)] needed!
+// Single file compiles to both PTX and native host code
+
+#[kernel]
+pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
+    let idx = thread::index_1d();
+    if let Some(c_elem) = c.get_mut(idx) {
+        *c_elem = a[idx.get()] + b[idx.get()];
+    }
+}
+```
+
+### Thread Indexing
+
+- `thread::index_1d()` returns a `BoundedIdx` that provides safe bounds checking
+- `idx.in_bounds(len)` checks if thread is within valid range
+- `idx.get()` returns the raw `usize` index
+
+### Memory Safety
+
+- `DisjointSlice<T>` provides mutable access with the guarantee that each thread writes to a unique location
+- Input slices `&[f32]` are read-only on the device
+
+### cuda_launch! Macro
+
+```rust
+cuda_launch! {
+    kernel: vecadd,
+    stream: stream,
+    module: module,
+    config: LaunchConfig::for_num_elems(N as u32),
+    args: [slice(a_dev), slice(b_dev), slice_mut(c_dev)]
+}
+```
+
+## Build and Run
+
+```bash
+cargo oxide run vecadd
+```
+
+## Expected Output
+
+```text
+=== Unified Compilation Vector Addition ===
+
+Input vectors (first 5 elements):
+  a = [0.0, 1.0, 2.0, 3.0, 4.0]
+  b = [0.0, 2.0, 4.0, 6.0, 8.0]
+
+Output vector (first 5 elements):
+  c = [0.0, 3.0, 6.0, 9.0, 12.0]
+
+✓ SUCCESS: All 1024 elements correct!
+```
+
+## Hardware Requirements
+
+- **Minimum GPU**: Any CUDA-capable GPU (Kepler or newer recommended)
+- **CUDA Driver**: 11.0+
+
+## Potential Errors
+
+| Error                      | Cause                  | Solution                                      |
+|----------------------------|------------------------|-----------------------------------------------|
+| `CUDA_ERROR_NO_DEVICE`     | No GPU found           | Ensure NVIDIA driver is installed             |
+| `Failed to load PTX module`| PTX compilation failed | Check that PTX file exists in crate root      |
+| `Kernel launch failed`     | Invalid launch config  | Ensure grid/block dims don't exceed limits    |
+
+## How It Works Under the Hood
+
+1. **rustc** parses the file, generates MIR for everything
+2. **rustc-codegen-cuda** intercepts codegen:
+   - Finds `cuda_oxide_kernel_vecadd` (from `#[kernel]`)
+   - Routes it to mir-importer → PTX generation
+   - Routes `main` and other host code to standard LLVM
+3. Final binary contains both native host code AND loads external PTX
+
+## Generated PTX
+
+The kernel generates approximately:
+
+```ptx
+.entry vecadd (
+    .param .u64 %a_ptr, .param .u64 %a_len,
+    .param .u64 %b_ptr, .param .u64 %b_len,
+    .param .u64 %c_ptr, .param .u64 %c_len
+) {
+    // Calculate global thread index
+    // Bounds check
+    // Load a[idx], b[idx]
+    // Add and store to c[idx]
+}
+```

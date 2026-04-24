@@ -1,0 +1,169 @@
+# Supported Features
+
+This appendix presents the cuda-oxide feature matrix: every compiler capability,
+runtime API, and hardware feature along with its current support status. The
+data is drawn from the project's internal tracking sheet and the test suite.
+
+**Legend:** **Full** = tested and working, **Planned** = on the roadmap,
+**N/A** = not applicable or no identified need.
+
+---
+
+## Compiler: Memory Model
+
+| Feature | Status | Description |
+|:--------|:-------|:------------|
+| HMM / Unified Memory Management | **Full** | GPU directly reads/writes host memory without `cudaMemcpy`. Reference captures in closures leverage HMM for host pointer access. Requires Turing+ GPU, Linux 6.1.24+, CUDA 12.2+. |
+| Unified Struct ABI (no `#[repr(C)]`) | **Full** | Device struct layout matches host exactly. The compiler queries rustc's actual layout and reproduces it with explicit padding in LLVM IR. Works with `#[repr(Rust)]` default. |
+| Dynamic Layout Matching | **Full** | Compiler queries rustc's `fields_by_offset_order()` and byte offsets, builds LLVM structs with correct field order and explicit padding bytes. Independent of LLVM's datalayout. |
+
+## Compiler: Type System
+
+| Feature | Status | Description |
+|:--------|:-------|:------------|
+| Generics and Monomorphization | **Full** | Generic kernels and device functions with trait bounds. Monomorphized instances collected from rustc MIR. Const generics supported. |
+| Enums (`Option<T>`, `Result<T,E>`, custom) | **Full** | Full enum support including discriminant extraction and payload access. Pattern matching on enums works. |
+| Struct Construction and Field Access | **Full** | Struct literals, field access, pass-by-value and return values. User-defined structs supported without annotations. |
+| Array Types (`[T; N]`) | **Full** | Static array construction, constant-index and runtime-index access. Mutable arrays auto-promoted to memory-backed. |
+| `CuSimd<T, N>` SIMD Type | **Full** | Generic SIMD register type with named accessors (`x`/`y`/`z`/`w`), runtime and compile-time indexing, `to_array` conversion. |
+| ABI Scalarization | **Full** | Composite types (slices, structs) are scalarized at kernel boundaries. `&[T]` becomes `(ptr, len)` pair, reconstructed inside the function. |
+
+## Compiler: Closures
+
+| Feature | Status | Description |
+|:--------|:-------|:------------|
+| Move Closures (`FnOnce`) | **Full** | Closures that capture by value. Captures are passed as kernel arguments. `move \|x\| x * factor` pattern. |
+| Reference Closures (`Fn`/`FnMut`) | **Full** | Non-move closures that capture by reference. GPU reads host addresses via HMM. |
+| Host-to-Device Closures | **Full** | Closures defined on host passed to generic kernels. Polynomial evaluation with captured coefficients tested. |
+| Device-Internal Closures | **Full** | Closures created and used entirely on device, including closures passed to device functions. |
+
+## Compiler: Control Flow
+
+| Feature | Status | Description |
+|:--------|:-------|:------------|
+| Match Expressions (integer switch) | **Full** | Multi-way match on integers. Generates chain of conditional branches. |
+| Match on Enums | **Full** | Pattern matching on `Option<T>` and custom enums. Discriminant extraction + payload access. |
+| For Loops (range, iterator, enumerate) | **Full** | Full iterator desugaring: range-based, `slice.iter()`, `enumerate()`, nested loops, `break`, `continue`. |
+| While Loops / If-Else | **Full** | Baseline control flow fully supported. |
+| Break and Continue | **Full** | `break` and `continue` in for/while loops, including early exit. |
+
+## Compiler: Arithmetic and Casting
+
+| Feature | Status | Description |
+|:--------|:-------|:------------|
+| 64-bit Arithmetic | **Full** | Full 64-bit integer arithmetic including shifts, bitwise ops, and descriptor field packing. |
+| Type Casting (all kinds) | **Full** | IntToInt, IntToFloat, FloatToInt, FloatToFloat, Transmute (bitcast), PtrToPtr, PtrToInt, IntToPtr, pointer coercions. |
+
+## Compiler: Interop
+
+| Feature | Status | Description |
+|:--------|:-------|:------------|
+| Bi-directional LTOIR Support | **Full** | Rust kernels call CUDA C++ device functions **and** C++ calls Rust device functions. Via NVVM IR → libNVVM → LTOIR → nvJitLink. |
+| Device FFI (`extern "C"`) | **Full** | `#[device] extern "C" { fn ... }` declarations for external LTOIR functions. CUB/CCCL integration demonstrated. |
+| MathDx FFI (cuFFTDx / cuBLASDx) | **Full** | cuFFTDx (8/16/32-point thread-level FFT), cuBLASDx (32x32x32 block-level GEMM) via LTOIR. |
+| Cross-Crate Kernels | **Full** | Kernels and device functions defined in library crates with monomorphization at the binary crate use site. |
+
+## Compiler: Functions
+
+| Feature | Status | Description |
+|:--------|:-------|:------------|
+| `#[kernel]` Attribute | **Full** | Marks functions as GPU kernel entry points (`ptx_kernel` calling convention). Multiple kernels per file. |
+| `#[device]` Helper Functions | **Full** | Device-side helper functions callable from kernels. Inlined aggressively by `llc`. |
+| Standalone `#[device]` Functions | **Full** | Device functions compiled without any kernel present. Clean export names for C++ consumption. |
+| Multi-Kernel Modules | **Full** | Multiple `#[kernel]` functions in a single source file compile to a single PTX module. |
+
+## Compiler: Compilation Pipeline
+
+| Feature | Status | Description |
+|:--------|:-------|:------------|
+| Unified Single-Source Compilation | **Full** | Host and device code in the same file. Custom rustc codegen backend intercepts codegen. No `#[cfg]` needed. |
+| PTX Output | **Full** | Default output: Rust MIR → `dialect-mir` → `mem2reg` → `dialect-llvm` → LLVM IR → `llc` → PTX. Targets sm_80 through sm_100a. |
+| NVVM IR Output | **Full** | Alternative output for libNVVM consumption with NVVM metadata. |
+| LTOIR Output | **Full** | Device-side LTO for linking with CUDA C++. Via `--dlto` flag or `CUDA_OXIDE_EMIT_LTOIR`. |
+| Pipeline Inspection | **Full** | `cargo oxide pipeline <example>` shows IR at each compilation stage. |
+| cuda-gdb Debug Support | **Full** | Build with debug info and launch `cuda-gdb`. `breakpoint()` intrinsic for programmatic breakpoints. |
+
+---
+
+## Runtime Library: Safety
+
+| Feature | Status | Description |
+|:--------|:-------|:------------|
+| `DisjointSlice<T>` | **Full** | Bounds-checked parallel write output slice. Access via `ThreadIndex` returns `Option<&mut T>`. |
+| `ThreadIndex` (opaque index type) | **Full** | Newtype that can only be constructed by trusted index functions. Guarantees unique indices. |
+| `ManagedBarrier` Typestate | **Full** | Compile-time barrier lifecycle: `Uninit → Ready → Invalidated`. Invalid transitions are compile errors. |
+
+## Runtime Library: Atomics
+
+| Feature | Status | Description |
+|:--------|:-------|:------------|
+| Device-Scope Atomics | **Full** | `DeviceAtomic{U32,I32,U64,I64,F32,F64}` with `.gpu` scope. All 5 orderings. |
+| Block-Scope Atomics | **Full** | `BlockAtomic{U32,I32,U64,I64,F32,F64}` with `.cta` scope. |
+| System-Scope Atomics | **Full** | `SystemAtomic{U32,I32,U64,I64,F32,F64}` with `.sys` scope. For CPU-GPU shared data. |
+| `core::sync::atomic` Support | **Full** | Standard library atomic types lowered to PTX `atom.sys` instructions. |
+
+## Runtime Library: Shared Memory
+
+| Feature | Status | Description |
+|:--------|:-------|:------------|
+| Static Shared Memory | **Full** | `SharedArray<T, N, ALIGN>` — compile-time sized, block-scoped. Optional alignment up to 256B. |
+| Dynamic Shared Memory | **Full** | `DynamicSharedArray<T, ALIGN>` — runtime-sized, set via `LaunchConfig::shared_mem_bytes`. |
+| Distributed Shared Memory (DSMEM) | **Full** | Direct access to other blocks' shared memory within a cluster. `map_shared_rank()` for address mapping. sm_90+. |
+
+## Runtime Library: Thread and Synchronization
+
+| Feature | Status | Description |
+|:--------|:-------|:------------|
+| Thread/Block/Grid Intrinsics | **Full** | `threadIdx`, `blockIdx`, `blockDim`, `index_1d()`, `index_2d(row_stride)` (returns `Option<ThreadIndex>`). Lowered to NVVM sreg reads. |
+| Block Synchronization | **Full** | `sync_threads()` — thread block barrier. |
+| Async Barriers (mbarrier) | **Full** | Hardware async barriers for Hopper+: init, arrive, test_wait, try_wait, inval. |
+| Cluster Synchronization | **Full** | `cluster_sync()` for all blocks in a cluster. sm_90+. |
+| Fence Operations | **Full** | `fence_proxy_async_shared_cta()` for TMA visibility, `nanosleep(ns)`. |
+
+## Runtime Library: Warp
+
+| Feature | Status | Description |
+|:--------|:-------|:------------|
+| Warp Shuffle Operations | **Full** | `shuffle`, `shuffle_xor`, `shuffle_down`, `shuffle_up` for `i32` and `f32`. |
+| Warp Vote Operations | **Full** | `all(pred)`, `any(pred)`, `ballot(pred)` → bitmask. |
+| Lane/Warp ID | **Full** | `lane_id()` (0–31), `warp_id()`. Direct register reads. |
+
+## Runtime Library: Debug
+
+| Feature | Status | Description |
+|:--------|:-------|:------------|
+| `gpu_printf!` Macro | **Full** | Formatted GPU output with full format specifier support. Lowers to `vprintf`. |
+| `gpu_assert!` Macro | **Full** | Runtime GPU assertion. Calls `trap()` if condition is false. |
+| Debug Intrinsics | **Full** | `clock()`, `clock64()`, `trap()`, `breakpoint()`, `prof_trigger::<N>()`. |
+
+## Runtime Library: Kernel Launch
+
+| Feature | Status | Description |
+|:--------|:-------|:------------|
+| `cuda_launch!` Macro | **Full** | Synchronous kernel launch with argument passing, closure extraction, cluster support. |
+| `#[launch_bounds]` | **Full** | Occupancy hints: max threads per block, min blocks per SM. |
+| `#[cluster_launch]` | **Full** | Compile-time cluster dimensions. Emits `.reqnctapercluster` in PTX. |
+
+## Runtime Library: TMA
+
+| Feature | Status | Description |
+|:--------|:-------|:------------|
+| TMA Bulk Tensor Copy (1D–5D) | **Full** | `cp_async_bulk_tensor_{1..5}d_g2s`. 128-byte TMA descriptors. sm_90+. |
+| TMA Multicast | **Full** | Single TMA load broadcast to all CTAs in cluster. sm_100a for full multicast. |
+| TMA Commit/Wait Groups | **Full** | `cp_async_bulk_commit_group`, `cp_async_bulk_wait_group` for async completion tracking. |
+
+---
+
+## Not Yet Implemented
+
+| Feature | Status | Notes |
+|:--------|:-------|:------|
+| Inline Assembly (`asm!` macro) | **Planned** | Workaround: use built-in intrinsics or add new intrinsics to `cuda-device`. |
+| Cooperative Groups (full API) | **Planned** | Workaround: use existing primitives (`sync_threads`, warp shuffle, `cluster_sync`). |
+| FP8 / MX Data Types | **Planned** | Roadmap item for Blackwell. No architectural limitation. |
+| Dynamic Dispatch (`dyn Trait`) | **N/A** | Use generics with static dispatch. Haven't found a real need for this. |
+| Heap Allocation (`Box`, `Vec`) | **N/A** | CUDA has a device-side heap (`malloc`/`free` in kernels), and the compiler allows the `alloc` crate through -- but no device-side `#[global_allocator]` is wired up today. Even if it were, device `malloc` is extremely slow (serialized, fragmented, uncoalesced). Use slices and `SharedArray`. |
+| `String` / `format_args!` | **N/A** | Use `gpu_printf!` for formatted output. |
+| Panic / Unwinding | **N/A** | Panic paths exist in MIR but the compiler strips `core::panicking::*` and all unwind edges. The GPU hardware *can* support unwinding (absolute branches + per-thread call stack tracking post-Volta), but the CUDA toolchain (nvcc/ptxas) doesn't expose it today -- no landing pads survive to PTX. If a panic path is reached at runtime the GPU traps (same as `panic=abort`). NVIDIA has an active project to add C++ exception support to CUDA for automotive safety; the current cuda-oxide design is forward-compatible with that work. Use `gpu_assert!()` + `trap()` for explicit runtime checks today. |
+| Standard Library (`std`/`alloc`) | **N/A** | `std` is forbidden. `alloc` is allowed by the collector but has no backing allocator. Only `core` is fully functional. `Option`, `Result`, iterators all work. |
+| Texture Memory | **N/A** | Lower priority given TMA availability on Hopper+. |

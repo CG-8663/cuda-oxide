@@ -1,0 +1,431 @@
+#!/usr/bin/env bash
+#
+# scripts/smoketest.sh -- run every cuda-oxide example and report pass/fail
+# per GPU-aware gating rules.
+#
+# Default behavior (no arguments): run every example under
+# crates/rustc-codegen-cuda/examples/. Examples are categorized and a
+# category-specific verdict rule is applied to the cargo output:
+#
+#   standard     -- execution must succeed (SUCCESS/PASS/Complete marker).
+#   error        -- compilation must fail with a recognized diagnostic; the
+#                   example is an intentional negative test of our codegen
+#                   errors. Signal termination (crash) is never accepted.
+#   tcgen05      -- 5th-gen tensor cores; sm_100 datacenter only. On sm_100
+#                   require full execution; elsewhere PTX compilation is
+#                   sufficient.
+#   wgmma        -- Hopper only (sm_90a). On Hopper require execution;
+#                   elsewhere PTX compilation is sufficient.
+#   collectives  -- multi-GPU P2P required. With peer access require
+#                   execution; on single-GPU/non-P2P boxes PTX generation
+#                   is sufficient.
+#   ltoir        -- runs with `--emit-nvvm-ir --arch=<host>`; the host
+#                   compute capability is detected via `nvidia-smi` so the
+#                   resulting cubin actually loads. Execution must succeed
+#                   — or the example may opt to `println!("skipping: ...")`
+#                   with exit 0 (e.g. mathdx_ffi_test when MATHDX_ROOT is
+#                   unset), in which case we require the cuda-oxide
+#                   NVVM IR (`.ll`) to have been generated.
+#
+# The categorization is just a pair of bash arrays at the top of the file.
+# Add/remove examples there when introducing a new example.
+#
+# See --help for runtime flags.
+
+set -uo pipefail
+
+# ---- Example categorization ---------------------------------------------
+
+TCGEN05_EXAMPLES=(gemm_sol tcgen05 tcgen05_matmul)
+WGMMA_EXAMPLES=(wgmma)
+COLLECTIVES_EXAMPLES=(oxide_collectives_ping_pong)
+LTOIR_EXAMPLES=(cpp_consumes_rust_device device_ffi_test mathdx_ffi_test)
+
+classify() {
+    local ex="$1" cat
+    for cat in "${TCGEN05_EXAMPLES[@]}";     do [[ "$ex" == "$cat" ]] && { echo tcgen05;     return; }; done
+    for cat in "${WGMMA_EXAMPLES[@]}";       do [[ "$ex" == "$cat" ]] && { echo wgmma;       return; }; done
+    for cat in "${COLLECTIVES_EXAMPLES[@]}"; do [[ "$ex" == "$cat" ]] && { echo collectives; return; }; done
+    for cat in "${LTOIR_EXAMPLES[@]}";       do [[ "$ex" == "$cat" ]] && { echo ltoir;       return; }; done
+    [[ "$ex" == "error" ]] && { echo error; return; }
+    echo standard
+}
+
+# ---- CLI -----------------------------------------------------------------
+
+usage() {
+    cat <<'EOF'
+Usage: scripts/smoketest.sh [OPTIONS]
+
+Run every cuda-oxide example and report PASS/FAIL per GPU-aware gating
+rules. With no options, runs all examples.
+
+OPTIONS
+  -o, --only PATTERN   Run only examples whose name matches the bash regex
+                       PATTERN (e.g. -o 'tcgen05|wgmma').
+  -s, --skip PATTERN   Skip examples whose name matches PATTERN.
+  -x, --fail-fast      Stop at the first failure.
+  -v, --verbose        Stream cargo output live (instead of capturing to
+                       a per-example log file). Verdict is printed at the
+                       end of each example.
+      --keep-logs      Retain per-example logs on success as well as
+                       failure. Logs for failures are always kept.
+      --no-color       Disable ANSI color. Also honours the NO_COLOR env
+                       var (https://no-color.org/).
+  -h, --help           Show this help and exit.
+
+POSITIONALS
+  Any bare arguments are treated as additive --only patterns and joined
+  with `|`. If --only is also supplied, positionals extend it (OR).
+
+EXAMPLES
+  scripts/smoketest.sh                 # run all examples
+  scripts/smoketest.sh vecadd          # examples matching 'vecadd'
+  scripts/smoketest.sh vecadd gemm     # matching 'vecadd' OR 'gemm'
+  scripts/smoketest.sh -o '^vecadd$'   # exact-match form
+  scripts/smoketest.sh -s 'wgmma|tma'  # skip wgmma and tma examples
+  scripts/smoketest.sh -x -v vecadd    # stop on first fail, stream output
+
+Per-example logs live under target/smoketest-logs/.
+EOF
+}
+
+ONLY=""
+SKIP=""
+FAIL_FAST=0
+VERBOSE=0
+KEEP_LOGS=0
+FORCE_NO_COLOR=0
+declare -a POSITIONAL=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -o|--only)      [[ $# -lt 2 ]] && { echo "error: $1 requires a pattern" >&2; exit 2; }; ONLY="$2"; shift 2;;
+        -s|--skip)      [[ $# -lt 2 ]] && { echo "error: $1 requires a pattern" >&2; exit 2; }; SKIP="$2"; shift 2;;
+        -x|--fail-fast) FAIL_FAST=1; shift;;
+        -v|--verbose)   VERBOSE=1; shift;;
+        --keep-logs)    KEEP_LOGS=1; shift;;
+        --no-color)     FORCE_NO_COLOR=1; shift;;
+        -h|--help)      usage; exit 0;;
+        --)             shift; POSITIONAL+=("$@"); break;;
+        -*)             echo "error: unknown option: $1" >&2; usage >&2; exit 2;;
+        *)              POSITIONAL+=("$1"); shift;;
+    esac
+done
+
+# Bare positionals act as additive --only patterns joined with `|`.
+# Combine them with any explicit --only (OR, not replace) so that
+# `--only foo bar` and `-o foo bar` produce `foo|bar`.
+if [[ ${#POSITIONAL[@]} -gt 0 ]]; then
+    joined="$(IFS='|'; echo "${POSITIONAL[*]}")"
+    if [[ -n "${ONLY}" ]]; then
+        ONLY="${ONLY}|${joined}"
+    else
+        ONLY="${joined}"
+    fi
+fi
+
+# ---- Preflight -----------------------------------------------------------
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "${script_dir}/.." && pwd)"
+cd "${repo_root}"
+
+if [[ ! -f "Cargo.toml" ]] || [[ ! -d "crates/rustc-codegen-cuda/examples" ]]; then
+    echo "error: must be run from inside the cuda-oxide repo (got ${PWD})" >&2
+    exit 2
+fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "error: cargo not found in PATH" >&2
+    exit 2
+fi
+
+if ! cargo oxide --help >/dev/null 2>&1; then
+    echo "error: 'cargo oxide' subcommand missing; build it with:" >&2
+    echo "         cargo build -p cargo-oxide --release" >&2
+    exit 2
+fi
+
+# ---- Colors --------------------------------------------------------------
+
+if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]] && [[ ${FORCE_NO_COLOR} -eq 0 ]]; then
+    C_PASS=$'\e[32m'; C_FAIL=$'\e[31m'; C_SKIP=$'\e[33m'
+    C_DIM=$'\e[2m'; C_BOLD=$'\e[1m'; C_RESET=$'\e[0m'
+else
+    C_PASS=""; C_FAIL=""; C_SKIP=""; C_DIM=""; C_BOLD=""; C_RESET=""
+fi
+
+# ---- Banner --------------------------------------------------------------
+
+git_head="$(git rev-parse --short HEAD 2>/dev/null || echo '?')"
+git_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+gpu_info="$(nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader 2>/dev/null | head -1 || echo 'no GPU detected')"
+
+# Detect host compute capability for the ltoir category: the cubin produced
+# by the LTOIR linker must match the GPU's arch or it refuses to load.
+# nvidia-smi returns something like "12.0" → sm_120, "10.0" → sm_100.
+host_cc="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+if [[ -n "${host_cc}" ]]; then
+    # Strip the dot: 12.0 -> 120
+    LTOIR_ARCH="sm_${host_cc//./}"
+else
+    # No GPU detected. ltoir examples will likely fail, but pick a sensible
+    # floor so the cuda-oxide side still compiles.
+    LTOIR_ARCH="sm_90"
+fi
+
+printf "%scuda-oxide smoketest%s @ %s%s%s (%s)\n" "${C_BOLD}" "${C_RESET}" "${C_BOLD}" "${git_head}" "${C_RESET}" "${git_branch}"
+printf "GPU: %s\n" "${gpu_info}"
+printf "LTOIR arch: %s\n" "${LTOIR_ARCH}"
+if [[ -n "${ONLY}" ]]; then printf "Filter --only: %s\n" "${ONLY}"; fi
+if [[ -n "${SKIP}" ]]; then printf "Filter --skip: %s\n" "${SKIP}"; fi
+echo ""
+
+# ---- Example selection ---------------------------------------------------
+
+mapfile -t ALL_EXAMPLES < <(cd crates/rustc-codegen-cuda/examples && for d in */; do echo "${d%/}"; done | sort)
+
+selected=()
+for ex in "${ALL_EXAMPLES[@]}"; do
+    if [[ -n "${ONLY}" ]] && ! [[ "${ex}" =~ ${ONLY} ]]; then continue; fi
+    if [[ -n "${SKIP}" ]] &&   [[ "${ex}" =~ ${SKIP} ]]; then continue; fi
+    selected+=("${ex}")
+done
+
+total=${#selected[@]}
+if [[ ${total} -eq 0 ]]; then
+    echo "error: no examples matched the given filters" >&2
+    exit 1
+fi
+
+# ---- Verdict functions ---------------------------------------------------
+#
+# Each verdict_* function consumes a log file + exit code, prints the
+# classification string to stdout, and returns 0 (pass) or 1 (fail).
+# They never run cargo themselves; that is the caller's job.
+
+verdict_standard() {
+    local log="$1" ec="$2"
+    if [[ ${ec} -gt 128 ]]; then echo "FAIL (crashed, signal $((ec - 128)))"; return 1; fi
+    if [[ ${ec} -ne 0 ]]; then   echo "FAIL (exit=${ec})";                    return 1; fi
+    if grep -qE 'SUCCESS|PASS|Complete' "${log}"; then echo "PASS"; return 0; fi
+    echo "FAIL (no success marker)"
+    return 1
+}
+
+verdict_error() {
+    local log="$1" ec="$2"
+    if [[ ${ec} -gt 128 ]]; then echo "FAIL (crashed, signal $((ec - 128)))"; return 1; fi
+    if grep -qE 'Device codegen failed|Translation failed|Compilation error|Unsupported construct' "${log}"; then
+        echo "PASS (expected compile failure)"
+        return 0
+    fi
+    # Non-zero exit + a real rustc/cargo error line is still a legit
+    # "example refused to compile" signal. Crucially, we require the error
+    # line: just exit=42 with no diagnostic is NOT accepted (unlike the old
+    # CLAUDE.md blob).
+    if [[ ${ec} -ne 0 ]] && grep -qE '^error(\[|:)|error: could not compile|error aborting due to' "${log}"; then
+        echo "PASS (expected compile failure, exit=${ec})"
+        return 0
+    fi
+    if [[ ${ec} -eq 0 ]]; then
+        echo "FAIL (compilation succeeded, expected failure)"
+    else
+        echo "FAIL (exit=${ec} but no compile-error marker)"
+    fi
+    return 1
+}
+
+verdict_tcgen05() {
+    local log="$1" ec="$2"
+    if [[ ${ec} -gt 128 ]]; then echo "FAIL (crashed, signal $((ec - 128)))"; return 1; fi
+    if grep -qE 'WARNING: tcgen05 requires|Skipping GPU test: requires sm_100|Skipping benchmark: requires sm_100|tcgen05 \(5th gen tensor cores\) requires sm_100|PTX was generated successfully' "${log}"; then
+        if grep -qE 'PTX written|PTX Verification|PTX file generated' "${log}"; then
+            echo "PASS (tcgen05, PTX compiled)"
+            return 0
+        fi
+        echo "FAIL (tcgen05, PTX not generated)"
+        return 1
+    fi
+    if [[ ${ec} -ne 0 ]]; then echo "FAIL (tcgen05, exit=${ec})"; return 1; fi
+    if grep -qE 'SUCCESS|PASS|Complete' "${log}"; then echo "PASS (tcgen05, executed)"; return 0; fi
+    echo "FAIL (tcgen05, no success marker)"
+    return 1
+}
+
+verdict_wgmma() {
+    local log="$1" ec="$2"
+    if [[ ${ec} -gt 128 ]]; then echo "FAIL (crashed, signal $((ec - 128)))"; return 1; fi
+    if grep -qE 'WARNING: WGMMA requires|WGMMA is Hopper-only|PTX load failed \(expected on non-Hopper\)|PTX module loaded' "${log}"; then
+        if grep -qE 'PTX written|PTX Verification|PTX file generated|inspect generated PTX|\.ptx' "${log}"; then
+            echo "PASS (wgmma, PTX compiled)"
+            return 0
+        fi
+        echo "FAIL (wgmma, PTX not generated)"
+        return 1
+    fi
+    if [[ ${ec} -ne 0 ]]; then echo "FAIL (wgmma, exit=${ec})"; return 1; fi
+    if grep -qE 'SUCCESS|PASS|Complete' "${log}"; then echo "PASS (wgmma, executed)"; return 0; fi
+    echo "FAIL (wgmma, no success marker)"
+    return 1
+}
+
+verdict_collectives() {
+    local ex="$1" log="$2" ec="$3"
+    local ptx="crates/rustc-codegen-cuda/examples/${ex}/${ex}.ptx"
+    if [[ ${ec} -gt 128 ]]; then echo "FAIL (crashed, signal $((ec - 128)))"; return 1; fi
+    if [[ ${ec} -ne 0 ]]; then   echo "FAIL (collectives, exit=${ec})";       return 1; fi
+    if grep -qE 'skipping:' "${log}"; then
+        if [[ -f "${ptx}" ]]; then
+            echo "PASS (collectives, PTX compiled)"
+            return 0
+        fi
+        echo "FAIL (collectives, PTX not generated)"
+        return 1
+    fi
+    if grep -qE 'SUCCESS|PASS|Complete' "${log}"; then
+        echo "PASS (collectives, executed)"
+        return 0
+    fi
+    echo "FAIL (collectives, no success marker)"
+    return 1
+}
+
+verdict_ltoir() {
+    local ex="$1" log="$2" ec="$3"
+    local ll_file="crates/rustc-codegen-cuda/examples/${ex}/${ex}.ll"
+    if [[ ${ec} -gt 128 ]]; then echo "FAIL (crashed, signal $((ec - 128)))"; return 1; fi
+    # `skipping:` marker -- the example opted out (e.g. mathdx_ffi_test with
+    # MATHDX_ROOT unset). Accept as pass so long as the cuda-oxide side
+    # still produced NVVM IR. Mirrors the collectives verdict.
+    if grep -qE 'skipping:' "${log}"; then
+        if [[ -f "${ll_file}" ]]; then
+            echo "PASS (LTOIR, skipped: NVVM IR generated)"
+            return 0
+        fi
+        echo "FAIL (LTOIR, skipped but no NVVM IR)"
+        return 1
+    fi
+    if [[ ${ec} -ne 0 ]]; then   echo "FAIL (LTOIR, exit=${ec})";             return 1; fi
+    if grep -qE 'SUCCESS|PASS|Complete|NVVM IR is ready' "${log}"; then
+        echo "PASS (LTOIR)"
+        return 0
+    fi
+    echo "FAIL (LTOIR, no success marker)"
+    return 1
+}
+
+# ---- Runner --------------------------------------------------------------
+
+# Run cargo oxide for ${ex} in category ${cat}. Writes to ${log}. Returns
+# the cargo process exit code via the global ${CARGO_EC}.
+run_cargo() {
+    local ex="$1" log="$2" cat="$3"
+    local -a args=("run" "${ex}")
+    if [[ "${cat}" == "ltoir" ]]; then
+        args+=("--emit-nvvm-ir" "--arch=${LTOIR_ARCH}")
+    fi
+    if [[ ${VERBOSE} -eq 1 ]]; then
+        cargo oxide "${args[@]}" 2>&1 | tee "${log}"
+        CARGO_EC=${PIPESTATUS[0]}
+    else
+        cargo oxide "${args[@]}" >"${log}" 2>&1
+        CARGO_EC=$?
+    fi
+}
+
+# ---- Main loop -----------------------------------------------------------
+
+log_dir="target/smoketest-logs"
+mkdir -p "${log_dir}"
+
+pass=0
+failures=()
+started=${SECONDS}
+i=0
+
+for ex in "${selected[@]}"; do
+    i=$((i + 1))
+    cat="$(classify "${ex}")"
+    log="${log_dir}/${ex}.log"
+    : > "${log}"
+
+    # collectives: remove any stale PTX first; verdict logic checks for
+    # regeneration.
+    if [[ "${cat}" == "collectives" ]]; then
+        rm -f "crates/rustc-codegen-cuda/examples/${ex}/${ex}.ptx"
+    fi
+
+    if [[ ${VERBOSE} -eq 1 ]]; then
+        printf "%s[%2d/%2d] %s (%s)%s\n" "${C_BOLD}" "${i}" "${total}" "${ex}" "${cat}" "${C_RESET}"
+    else
+        printf "[%2d/%2d] %-32s ... " "${i}" "${total}" "${ex}"
+    fi
+
+    t0=${SECONDS}
+    run_cargo "${ex}" "${log}" "${cat}"
+    ec=${CARGO_EC}
+    dt=$((SECONDS - t0))
+
+    case "${cat}" in
+        error)       verdict="$(verdict_error       "${log}" "${ec}")"        && status=0 || status=$? ;;
+        tcgen05)     verdict="$(verdict_tcgen05     "${log}" "${ec}")"        && status=0 || status=$? ;;
+        wgmma)       verdict="$(verdict_wgmma       "${log}" "${ec}")"        && status=0 || status=$? ;;
+        collectives) verdict="$(verdict_collectives "${ex}" "${log}" "${ec}")" && status=0 || status=$? ;;
+        ltoir)       verdict="$(verdict_ltoir       "${ex}" "${log}" "${ec}")" && status=0 || status=$? ;;
+        standard)    verdict="$(verdict_standard    "${log}" "${ec}")"        && status=0 || status=$? ;;
+        *)           verdict="FAIL (unknown category: ${cat})"; status=1 ;;
+    esac
+
+    if [[ ${status} -eq 0 ]]; then
+        color="${C_PASS}"
+    else
+        color="${C_FAIL}"
+    fi
+
+    if [[ ${VERBOSE} -eq 1 ]]; then
+        printf "  => %s%s%s %s[%ds]%s\n" "${color}" "${verdict}" "${C_RESET}" "${C_DIM}" "${dt}" "${C_RESET}"
+    else
+        printf "%s%s%s %s[%ds]%s\n" "${color}" "${verdict}" "${C_RESET}" "${C_DIM}" "${dt}" "${C_RESET}"
+    fi
+
+    if [[ ${status} -eq 0 ]]; then
+        pass=$((pass + 1))
+        if [[ ${KEEP_LOGS} -eq 0 ]]; then
+            rm -f "${log}"
+        fi
+    else
+        failures+=("${ex}|${verdict}|${log}")
+        if [[ ${FAIL_FAST} -eq 1 ]]; then
+            break
+        fi
+    fi
+done
+
+elapsed=$((SECONDS - started))
+ran=${i}
+fail=$((ran - pass))
+
+# ---- Summary -------------------------------------------------------------
+
+echo ""
+printf "%s===== SMOKETEST SUMMARY =====%s\n" "${C_BOLD}" "${C_RESET}"
+printf "Pass:    %s%d%s / %d\n" "${C_PASS}" "${pass}" "${C_RESET}" "${ran}"
+printf "Fail:    %s%d%s / %d\n" "${C_FAIL}" "${fail}" "${C_RESET}" "${ran}"
+if [[ ${ran} -lt ${total} ]]; then
+    printf "Skipped: %s%d%s (fail-fast stopped early)\n" "${C_SKIP}" "$((total - ran))" "${C_RESET}"
+fi
+printf "Elapsed: %ds\n" "${elapsed}"
+
+if [[ ${#failures[@]} -gt 0 ]]; then
+    echo ""
+    printf "%sFailures:%s\n" "${C_BOLD}" "${C_RESET}"
+    for f in "${failures[@]}"; do
+        IFS='|' read -r fex fverdict flog <<<"${f}"
+        printf "  %s%s%s  %s\n  %s(log: %s)%s\n" "${C_FAIL}" "${fex}" "${C_RESET}" "${fverdict}" "${C_DIM}" "${flog}" "${C_RESET}"
+    done
+    exit 1
+fi
+
+exit 0

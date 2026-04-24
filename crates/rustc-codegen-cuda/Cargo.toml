@@ -1,0 +1,41 @@
+[package]
+name = "rustc_codegen_cuda"
+version = "0.1.0"
+edition = "2024"
+authors = ["Nihal Pasham <nihalp@nvidia.com>"]
+license = "Apache-2.0"
+repository = "https://gitlab-master.nvidia.com/nihalp/cuda-oxide.git"
+description = "Unified host/device compilation backend for rustc (CUDA/PTX codegen)"
+
+# IMPORTANT: Must be dylib for rustc to load as codegen backend
+[lib]
+crate-type = ["dylib"]
+
+# Keep out of workspace - requires special nightly build
+[workspace]
+
+[dependencies]
+# cuda-oxide pipeline (reuse existing infrastructure)
+# Use path dependencies since we're isolated from workspace
+mir-importer = { path = "../mir-importer" }
+mir-lower = { path = "../mir-lower" }
+dialect-llvm = { path = "../dialect-llvm" }
+dialect-mir = { path = "../dialect-mir" }
+dialect-nvvm = { path = "../dialect-nvvm" }
+
+# IMPORTANT: This crate is isolated from the main workspace, so we cannot use
+# `{ workspace = true }`. Keep these versions synchronized with root Cargo.toml
+# [workspace.dependencies] section.
+pliron = { git = "https://github.com/vaivaswatha/pliron" }
+pliron-derive = { git = "https://github.com/vaivaswatha/pliron" }
+linkme = "0.3"            # must match workspace
+combine = "4.6"           # must match workspace
+once_cell = "1.18"        # must match workspace
+thiserror = "2"           # must match workspace
+
+# Note: rustc internal crates are NOT listed here.
+# They're accessed via `extern crate` with #![feature(rustc_private)]
+# rustc will link them when loading this dylib as a codegen backend.
+
+[package.metadata.rust-analyzer]
+rustc_private = true

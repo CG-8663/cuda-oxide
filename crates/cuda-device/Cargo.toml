@@ -1,0 +1,11 @@
+[package]
+name = "cuda-device"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Device-side intrinsics and types for CUDA kernels in Rust"
+
+[dependencies]
+cuda-macros = { workspace = true }

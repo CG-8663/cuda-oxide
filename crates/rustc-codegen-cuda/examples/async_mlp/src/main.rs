@@ -1,0 +1,350 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+//! Async MLP Pipeline Example
+//!
+//! Demonstrates the full `cuda-async` execution model with a multi-kernel
+//! forward pass: GEMM → MatVec → ReLU, run concurrently across multiple
+//! simulated devices.
+//!
+//! # Async patterns showcased
+//!
+//! - `with_context`         — stream-aware memory operations as DeviceOperations
+//! - `and_then`             — chaining dependent kernel launches on the same stream
+//! - `zip!`                 — combining independent allocations into one operation
+//! - `.arc()`               — sharing weights across batches via Arc
+//! - `tokio::spawn`         — concurrent batch execution across the stream pool
+//! - `.await`               — non-blocking completion
+//! - `value()`              — lifting host data into the DeviceOperation graph
+//!
+//! # Pipeline
+//!
+//! ```text
+//! For each batch:
+//!   input [DIM×DIM] ──► GEMM(input, W0) ──► hidden [DIM×DIM]
+//!                                               │
+//!                              MatVec(hidden, W1) ──► output [DIM]
+//!                                                        │
+//!                                                  ReLU(output) ──► result [DIM]
+//! ```
+//!
+//! Build and run with:
+//!   cargo oxide run async_mlp
+
+use cuda_async::device_box::DeviceBox;
+use cuda_async::device_context::init_device_contexts;
+use cuda_async::device_operation::{self, DeviceOperation, Zippable, value};
+use cuda_async::launch::AsyncKernelLaunch;
+use cuda_async::zip;
+use cuda_core::memory::{malloc_async, memcpy_dtoh_async, memcpy_htod_async, memset_d8_async};
+use cuda_core::{CudaModule, LaunchConfig};
+use cuda_device::{DisjointSlice, kernel, thread};
+use std::future::IntoFuture;
+use std::mem;
+use std::sync::Arc;
+
+// =============================================================================
+// KERNELS -- compiled to PTX by rustc-codegen-cuda
+// =============================================================================
+
+/// Naive GEMM: C = alpha * A * B + beta * C
+/// Each thread computes one element of C. Row-major layout.
+#[kernel]
+pub fn sgemm_naive(
+    m: u32,
+    n: u32,
+    k: u32,
+    alpha: f32,
+    a: &[f32],
+    b: &[f32],
+    beta: f32,
+    mut c: DisjointSlice<f32>,
+) {
+    let row = thread::index_2d_row();
+    let col = thread::index_2d_col();
+
+    if let Some(c_idx) = thread::index_2d(n as usize) {
+        // col < n guaranteed by index_2d returning Some
+        if row < m as usize {
+            let n_sz = n as usize;
+            let k_sz = k as usize;
+            let mut sum = 0.0f32;
+            let mut i = 0usize;
+            while i < k_sz {
+                sum = sum + a[row * k_sz + i] * b[i * n_sz + col];
+                i = i + 1;
+            }
+            if let Some(c_elem) = c.get_mut(c_idx) {
+                *c_elem = alpha * sum + beta * (*c_elem);
+            }
+        }
+    }
+}
+
+/// Naive matrix-vector multiply: out = mat * vec_in
+/// Each thread computes one element of the output vector.
+#[kernel]
+pub fn matvec_naive(_m: u32, n: u32, mat: &[f32], vec_in: &[f32], mut vec_out: DisjointSlice<f32>) {
+    let row = thread::index_1d();
+    if let Some(out_elem) = vec_out.get_mut(row) {
+        let n_sz = n as usize;
+        let mut sum = 0.0f32;
+        let mut j = 0usize;
+        while j < n_sz {
+            sum = sum + mat[row.get() * n_sz + j] * vec_in[j];
+            j = j + 1;
+        }
+        *out_elem = sum;
+    }
+}
+
+/// Elementwise ReLU: out[i] = max(0, input[i])
+#[kernel]
+pub fn relu(input: &[f32], mut output: DisjointSlice<f32>) {
+    let idx = thread::index_1d();
+    if let Some(out_elem) = output.get_mut(idx) {
+        let val = input[idx.get()];
+        *out_elem = if val > 0.0f32 { val } else { 0.0f32 };
+    }
+}
+
+// =============================================================================
+// DEVICE MEMORY HELPERS -- DeviceOperations for allocation and transfer
+// =============================================================================
+
+/// Allocates device memory and copies host data to it (H2D).
+/// `ctx` is provided by the scheduler at execution time (not the call site)
+/// and carries the assigned CUDA stream for this operation.
+fn h2d(host_data: Vec<f32>) -> impl DeviceOperation<Output = DeviceBox<[f32]>> {
+    device_operation::with_context(move |ctx| {
+        let stream = ctx.get_cuda_stream();
+        let n = host_data.len();
+        let num_bytes = n * mem::size_of::<f32>();
+        unsafe {
+            let dptr = malloc_async(stream.cu_stream(), num_bytes).unwrap();
+            memcpy_htod_async(dptr, host_data.as_ptr(), num_bytes, stream.cu_stream()).unwrap();
+            value(DeviceBox::from_raw_parts(dptr, n, ctx.get_device_id()))
+        }
+    })
+}
+
+/// Allocates zero-initialized device memory.
+/// `ctx` is provided by the scheduler at execution time.
+fn zeros(n: usize) -> impl DeviceOperation<Output = DeviceBox<[f32]>> {
+    device_operation::with_context(move |ctx| {
+        let stream = ctx.get_cuda_stream();
+        let num_bytes = n * mem::size_of::<f32>();
+        unsafe {
+            let dptr = malloc_async(stream.cu_stream(), num_bytes).unwrap();
+            memset_d8_async(dptr, 0, num_bytes, stream.cu_stream()).unwrap();
+            value(DeviceBox::from_raw_parts(dptr, n, ctx.get_device_id()))
+        }
+    })
+}
+
+/// Copies device memory back to host (D2H).
+/// `ctx` is provided by the scheduler at execution time.
+fn d2h(dev: DeviceBox<[f32]>) -> impl DeviceOperation<Output = Vec<f32>> {
+    device_operation::with_context(move |ctx| {
+        let stream = ctx.get_cuda_stream();
+        let n = dev.len();
+        let num_bytes = n * mem::size_of::<f32>();
+        let mut host = vec![0.0f32; n];
+        unsafe {
+            memcpy_dtoh_async(
+                host.as_mut_ptr(),
+                dev.cu_deviceptr(),
+                num_bytes,
+                stream.cu_stream(),
+            )
+            .unwrap();
+        }
+        // dev is kept alive in this closure until the stream synchronizes
+        let _ = &dev;
+        value(host)
+    })
+}
+
+// =============================================================================
+// HOST CODE
+// =============================================================================
+
+const DIM: usize = 64;
+const BLOCK: u32 = 16;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("=== Async MLP Pipeline ===\n");
+
+    // 1. Initialize the async device context (round-robin pool of 4 streams).
+    init_device_contexts(0, 1)?;
+    let module = cuda_async::device_context::load_module_from_file("async_mlp.ptx", 0)?;
+
+    // 2. Allocate model weights on device using zip! to compose independent ops.
+    //    Both allocations are submitted together on the same stream.
+    println!("Allocating model weights...");
+    let w0_host: Vec<f32> = (0..DIM * DIM)
+        .map(|i| ((i % 7) as f32 - 3.0) * 0.01)
+        .collect();
+    let w1_host: Vec<f32> = (0..DIM).map(|i| ((i % 5) as f32 - 2.0) * 0.01).collect();
+
+    let (w0, w1): (Arc<DeviceBox<[f32]>>, Arc<DeviceBox<[f32]>>) =
+        zip!(h2d(w0_host).arc(), h2d(w1_host).arc()).await?;
+    println!(
+        "  W0: {}x{} on device (Arc refcount={})",
+        DIM,
+        DIM,
+        Arc::strong_count(&w0)
+    );
+    println!(
+        "  W1: {} on device (Arc refcount={})\n",
+        DIM,
+        Arc::strong_count(&w1)
+    );
+
+    // 3. Build and launch concurrent forward passes for multiple batches.
+    //    Each batch is a lazy DeviceOperation graph that gets spawned onto
+    //    the Tokio runtime. The round-robin scheduling policy distributes
+    //    work across 4 CUDA streams automatically.
+    let num_batches = 4;
+    let mut handles = vec![];
+
+    for batch_idx in 0..num_batches {
+        let w0 = w0.clone();
+        let w1 = w1.clone();
+        let module = module.clone();
+
+        let batch_data: Vec<f32> = (0..DIM * DIM)
+            .map(|i| ((i + batch_idx * 37) % 13) as f32 * 0.1)
+            .collect();
+
+        // ── Build the lazy DeviceOperation pipeline ──────────────────────
+        //
+        //   zip!(input, hidden, output)     allocate 3 buffers
+        //     .and_then(...)                 launch GEMM
+        //     .and_then(...)                 launch MatVec
+        //     .and_then(...)                 launch ReLU
+        //     .and_then(d2h)                 copy result to host
+        //
+        // Nothing executes until tokio::spawn polls the future.
+
+        let gemm_cfg = LaunchConfig {
+            grid_dim: (
+                (DIM as u32 + BLOCK - 1) / BLOCK,
+                (DIM as u32 + BLOCK - 1) / BLOCK,
+                1,
+            ),
+            block_dim: (BLOCK, BLOCK, 1),
+            shared_mem_bytes: 0,
+        };
+        let matvec_cfg = LaunchConfig::for_num_elems(DIM as u32);
+        let relu_cfg = LaunchConfig::for_num_elems(DIM as u32);
+
+        let pipeline = zip!(h2d(batch_data), zeros(DIM * DIM), zeros(DIM))
+            // ── Stage 1: GEMM  hidden = input @ W0 ──────────────────────
+            .and_then(
+                move |(input, hidden, output): (
+                    DeviceBox<[f32]>,
+                    DeviceBox<[f32]>,
+                    DeviceBox<[f32]>,
+                )| {
+                    let func = module
+                        .load_function("sgemm_naive")
+                        .expect("Failed to load sgemm_naive");
+                    let mut launch = AsyncKernelLaunch::new(Arc::new(func));
+                    launch
+                        .push_args((
+                            DIM as u32,
+                            DIM as u32,
+                            DIM as u32,
+                            1.0f32,
+                            input.cu_deviceptr(),
+                            input.len() as u64,
+                            w0.cu_deviceptr(),
+                            w0.len() as u64,
+                            0.0f32,
+                            hidden.cu_deviceptr(),
+                            hidden.len() as u64,
+                        ))
+                        .set_launch_config(gemm_cfg);
+                    launch.and_then(move |()| value((hidden, output, w1, module)))
+                },
+            )
+            // ── Stage 2: MatVec  output = hidden @ W1 ───────────────────
+            .and_then(
+                move |(hidden, output, w1, module): (
+                    DeviceBox<[f32]>,
+                    DeviceBox<[f32]>,
+                    Arc<DeviceBox<[f32]>>,
+                    Arc<CudaModule>,
+                )| {
+                    let func = module
+                        .load_function("matvec_naive")
+                        .expect("Failed to load matvec_naive");
+                    let mut launch = AsyncKernelLaunch::new(Arc::new(func));
+                    launch
+                        .push_args((
+                            DIM as u32,
+                            DIM as u32,
+                            hidden.cu_deviceptr(),
+                            hidden.len() as u64,
+                            w1.cu_deviceptr(),
+                            w1.len() as u64,
+                            output.cu_deviceptr(),
+                            output.len() as u64,
+                        ))
+                        .set_launch_config(matvec_cfg);
+                    launch.and_then(move |()| value((output, module)))
+                },
+            )
+            // ── Stage 3: ReLU  result = max(0, output) ──────────────────
+            .and_then(
+                move |(output, module): (DeviceBox<[f32]>, Arc<CudaModule>)| {
+                    let func = module.load_function("relu").expect("Failed to load relu");
+                    let relu_out: DeviceBox<[f32]> = output;
+                    let mut launch = AsyncKernelLaunch::new(Arc::new(func));
+                    launch
+                        .push_args((
+                            relu_out.cu_deviceptr(),
+                            relu_out.len() as u64,
+                            relu_out.cu_deviceptr(),
+                            relu_out.len() as u64,
+                        ))
+                        .set_launch_config(relu_cfg);
+                    launch.and_then(move |()| value(relu_out))
+                },
+            )
+            // ── Stage 4: D2H  copy result back to host ──────────────────
+            .and_then(d2h);
+
+        // Spawn the pipeline as a Tokio task. The DeviceOperation is
+        // converted to a Future via IntoFuture and polled by the runtime.
+        handles.push(tokio::spawn(pipeline.into_future()));
+    }
+
+    // 4. Await all batches and verify results.
+    println!(
+        "Launched {} batches concurrently, awaiting results...\n",
+        num_batches
+    );
+    for (i, handle) in handles.into_iter().enumerate() {
+        let result: Vec<f32> = handle.await.expect("Tokio task panicked")?;
+        let all_non_negative = result.iter().all(|&v| v >= 0.0);
+        println!(
+            "Batch {}: {} elements, first 8 = {:?}{}",
+            i,
+            result.len(),
+            &result[..8.min(result.len())],
+            if all_non_negative {
+                " [ReLU OK]"
+            } else {
+                " [ReLU FAILED: negative values found]"
+            }
+        );
+    }
+
+    println!("\nSUCCESS: All batches completed.");
+    Ok(())
+}

@@ -1,0 +1,15 @@
+[package]
+name = "cuda-async"
+version = "0.1.0"
+edition.workspace = true
+description = "Async execution layer for CUDA device operations"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cuda-core = { path = "../cuda-core" }
+cuda-bindings = { path = "../cuda-bindings" }
+futures = "0.3"
+thiserror = { workspace = true }
+anyhow = { workspace = true }

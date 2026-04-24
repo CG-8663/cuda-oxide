@@ -1,0 +1,923 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+//! Compilation pipeline: MIR → `dialect-mir` → `dialect-llvm` → LLVM IR → PTX.
+//!
+//! Orchestrates the full compilation flow from collected MIR functions to
+//! executable PTX code.
+//!
+//! # Pipeline Steps
+//!
+//! ```text
+//! ┌────────────┐  ┌────────────┐  ┌───────────┐  ┌────────────────┐  ┌────────────┐
+//! │ 1. Trans-  │─▶│ 2. Verify  │─▶│ 3. mem2reg│─▶│  4. Lower      │─▶│ 5. Export  │
+//! │    late to │  │ dialect-mir│  │   (slots  │  │ dialect-mir →  │  │ LLVM IR    │
+//! │ dialect-mir│  │            │  │    → SSA) │  │  dialect-llvm  │  │ → PTX (llc)│
+//! └────────────┘  └────────────┘  └───────────┘  └────────────────┘  └────────────┘
+//! ```
+//!
+//! # GPU Target Selection
+//!
+//! The pipeline auto-detects GPU features in the generated LLVM IR and selects
+//! an appropriate target:
+//!
+//! | Feature           | Target    | Architecture         |
+//! |-------------------|-----------|----------------------|
+//! | tcgen05/TMEM      | sm_100a   | Blackwell datacenter |
+//! | TMA multicast     | sm_100a   | Blackwell datacenter |
+//! | WGMMA             | sm_90a    | Hopper only          |
+//! | TMA/mbarrier      | sm_100    | Hopper+ compatible   |
+//! | Basic CUDA        | sm_80     | Ampere+ (max compat) |
+//!
+//! Override with `CUDA_OXIDE_TARGET=<target>` environment variable.
+
+use pliron::common_traits::Verify;
+use rustc_public::mir::mono::Instance;
+
+/// A function collected for GPU compilation.
+///
+/// Represents a monomorphized function instance that will be translated to PTX.
+/// For generic functions like `add::<f32>`, the instance contains the concrete
+/// type substitutions.
+#[derive(Debug, Clone)]
+pub struct CollectedFunction {
+    /// The monomorphized stable_mir instance (includes concrete generic args).
+    pub instance: Instance,
+    /// True if this is a GPU kernel entry point (has `#[kernel]` attribute).
+    pub is_kernel: bool,
+    /// The name to export in PTX. For kernels, this is the user-visible name.
+    pub export_name: String,
+}
+
+/// An external device function declaration (for FFI with external LTOIR).
+///
+/// Unlike `CollectedFunction`, these have no MIR body - they're just declarations
+/// that will be emitted as LLVM `declare` statements for nvJitLink to resolve
+/// when linking with external LTOIR (e.g., CCCL libraries).
+#[derive(Debug, Clone)]
+pub struct DeviceExternDecl {
+    /// The export name (the original function name, e.g., "cub_block_reduce_sum").
+    pub export_name: String,
+
+    /// Function parameter types (LLVM type strings like "float", "ptr", "i32").
+    pub param_types: Vec<String>,
+
+    /// Return type (LLVM type string like "float", "void", "i32").
+    pub return_type: String,
+
+    /// NVVM attributes for this function.
+    pub attrs: DeviceExternAttrs,
+}
+
+/// NVVM attributes for device extern declarations.
+///
+/// NOTE: These attributes are currently **not emitted** to the LLVM IR output.
+/// When linking LTOIR via nvJitLink, the external library's LTOIR already contains
+/// proper attributes (convergent, nounwind, memory, etc.) on the function DEFINITIONS.
+/// nvJitLink uses the definition's attributes during LTO, making attributes on our
+/// declarations redundant.
+///
+/// This struct is retained for the pipeline API but values are not used in code generation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct DeviceExternAttrs {
+    /// Function is convergent (all threads must execute together).
+    /// NOTE: Not currently emitted to LLVM IR.
+    pub is_convergent: bool,
+
+    /// Function is pure (no side effects, result depends only on inputs).
+    /// NOTE: Not currently emitted to LLVM IR.
+    pub is_pure: bool,
+
+    /// Function is read-only (only reads memory, doesn't write).
+    /// NOTE: Not currently emitted to LLVM IR.
+    pub is_readonly: bool,
+}
+
+// Implement AsDeviceExtern trait for dialect-llvm integration
+impl dialect_llvm::export::AsDeviceExtern for DeviceExternDecl {
+    fn as_device_extern(&self) -> dialect_llvm::export::DeviceExternDecl {
+        dialect_llvm::export::DeviceExternDecl {
+            export_name: self.export_name.clone(),
+            param_types: self.param_types.clone(),
+            return_type: self.return_type.clone(),
+            attrs: dialect_llvm::export::DeviceExternAttrs {
+                is_convergent: self.attrs.is_convergent,
+                is_pure: self.attrs.is_pure,
+                is_readonly: self.attrs.is_readonly,
+            },
+        }
+    }
+}
+use pliron::context::{Context, Ptr};
+use pliron::identifier::Legaliser;
+use pliron::linked_list::ContainsLinkedList;
+use pliron::op::Op;
+use pliron::operation::Operation;
+use pliron::printable::Printable;
+use std::path::Path;
+
+/// Output paths and target from successful compilation.
+pub struct CompilationResult {
+    /// Path to generated LLVM IR (`.ll` file).
+    pub ll_path: std::path::PathBuf,
+    /// Path to generated PTX assembly (`.ptx` file).
+    pub ptx_path: std::path::PathBuf,
+    /// GPU target architecture used (e.g., `sm_90a`, `sm_80`).
+    pub target: String,
+}
+
+/// Configuration for the compilation pipeline.
+pub struct PipelineConfig {
+    /// Directory for output files (`.ll`, `.ptx`, `.ltoir`).
+    pub output_dir: std::path::PathBuf,
+    /// Base name for output files (e.g., `"kernel"` → `kernel.ll`, `kernel.ptx`).
+    pub output_name: String,
+    /// Print progress messages to stdout.
+    pub verbose: bool,
+    /// Dump the `dialect-mir` module after translation (for debugging).
+    pub show_mir_dialect: bool,
+    /// Dump the `dialect-llvm` module after lowering (for debugging).
+    pub show_llvm_dialect: bool,
+    /// Enable LTOIR generation instead of PTX (for Blackwell+ GPUs).
+    ///
+    /// When true:
+    /// - Generates NVVM-compatible LLVM IR
+    /// - Wraps IR in LTOIR YAML container format
+    /// - Outputs `.ltoir` file instead of `.ptx`
+    /// - Skips `llc` invocation (LTOIR is consumed by nvJitLink, not llc)
+    pub emit_ltoir: bool,
+    /// Target architecture for LTOIR (e.g., "sm_100", "sm_90").
+    /// Only used when `emit_ltoir` is true.
+    pub ltoir_arch: String,
+    /// Emit NVVM IR suitable for libNVVM or other NVVM-compatible tools.
+    ///
+    /// When true:
+    /// - Uses full NVPTX datalayout
+    /// - Adds `@llvm.used` to preserve kernels from optimization
+    /// - Adds `!nvvm.annotations` for all kernels
+    /// - Adds `!nvvmir.version` metadata
+    /// - Outputs `.ll` file in NVVM IR format
+    ///
+    /// The output can be compiled to LTOIR using `nvvmCompileProgram -gen-lto`.
+    /// See `docs/nvvmir/NVVM_IR.md` for details on NVVM IR format.
+    ///
+    /// Currently supports NVVM 20 dialect (Blackwell+). Architecture is
+    /// controlled by `--arch` flag.
+    pub emit_nvvm_ir: bool,
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        Self {
+            output_dir: std::env::current_dir().unwrap_or_else(|_| ".".into()),
+            output_name: "kernel".to_string(),
+            verbose: true,
+            show_mir_dialect: false,
+            show_llvm_dialect: false,
+            emit_ltoir: false,
+            ltoir_arch: "sm_100".to_string(),
+            emit_nvvm_ir: false,
+        }
+    }
+}
+
+/// Runs the full compilation pipeline on collected functions.
+///
+/// # Pipeline Steps
+///
+/// 1. Register the `dialect-mir`, `dialect-nvvm`, and `dialect-llvm` dialects
+/// 2. Translate each function's MIR body into `dialect-mir`
+/// 3. Verify the `dialect-mir` module
+/// 4. Run `pliron::opts::mem2reg` to promote slot allocas back into SSA
+/// 5. Lower `dialect-mir` → `dialect-llvm` (via `mir-lower`)
+/// 6. Verify the `dialect-llvm` module
+/// 7. Export `dialect-llvm` to a `.ll` file (including device extern declarations)
+/// 8. Invoke `llc` to generate PTX (or emit LTOIR/NVVM IR when requested)
+///
+/// # Target Selection
+///
+/// Automatically detects GPU features (WGMMA, TMA, tcgen05) and selects
+/// an appropriate SM target. Can be overridden via `CUDA_OXIDE_TARGET`.
+///
+/// # Device Externs
+///
+/// External device function declarations (from `#[device] extern "C" { ... }`)
+/// are emitted as LLVM `declare` statements. These are resolved at link time
+/// by nvJitLink when linking with external LTOIR (e.g., CCCL libraries).
+///
+/// # Errors
+///
+/// Returns [`PipelineError`] with details on which step failed.
+pub fn run_pipeline(
+    functions: &[CollectedFunction],
+    device_externs: &[DeviceExternDecl],
+    config: &PipelineConfig,
+) -> Result<CompilationResult, PipelineError> {
+    let mut ctx = Context::new();
+
+    // Step 1: Register dialects
+    crate::translator::register_dialects(&mut ctx);
+
+    // Step 2: Create module
+    let module_name: pliron::identifier::Identifier = config
+        .output_name
+        .clone()
+        .try_into()
+        .unwrap_or_else(|_| "kernel".try_into().unwrap());
+    let module = pliron::builtin::ops::ModuleOp::new(&mut ctx, module_name);
+    let module_op_ptr = module.get_operation();
+
+    let mut legaliser = Legaliser::default();
+
+    // Step 3: Translate all functions
+    for func in functions {
+        if config.verbose {
+            eprintln!(
+                "Translating {}: {}",
+                if func.is_kernel {
+                    "kernel"
+                } else {
+                    "device fn"
+                },
+                func.export_name
+            );
+        }
+
+        let body = func
+            .instance
+            .body()
+            .ok_or_else(|| PipelineError::NoBody(func.export_name.clone()))?;
+
+        let func_op_ptr = crate::translator::body::translate_body(
+            &mut ctx,
+            &body,
+            &func.instance,
+            func.is_kernel,
+            Some(&func.export_name),
+            &mut legaliser,
+        )
+        .map_err(|e| {
+            // Use .disp(&ctx) for rich error formatting with location and backtrace
+            PipelineError::Translation(format!("{}: {}", func.export_name, e.disp(&ctx)))
+        })?;
+
+        // Dump the per-function IR BEFORE verification so users can see
+        // what the translator produced even when verification fails. If we
+        // verified first and bailed, `--show-mir-dialect` / `CUDA_OXIDE_DUMP_MIR`
+        // would silently print nothing for the offending function.
+        if config.show_mir_dialect {
+            eprintln!(
+                "\n=== dialect-mir func: {} (pre-verify) ===",
+                func.export_name
+            );
+            eprintln!("{}", func_op_ptr.deref(&ctx).disp(&ctx));
+        }
+
+        verify_operation(&ctx, func_op_ptr, &func.export_name)?;
+
+        // Append to module
+        append_to_module(&ctx, module_op_ptr, func_op_ptr);
+    }
+
+    // Step 4: Verify module. Dump BEFORE verify so module-level verification
+    // failures still surface the consolidated IR to the user.
+    if config.show_mir_dialect {
+        eprintln!("\n=== dialect-mir module (pre-verify) ===");
+        eprintln!("{}", module_op_ptr.deref(&ctx).disp(&ctx));
+    }
+    if config.verbose {
+        eprintln!("\n=== Verifying dialect-mir module ===");
+    }
+    verify_operation(&ctx, module_op_ptr, "module")?;
+    if config.verbose {
+        eprintln!("dialect-mir verification successful ✓");
+    }
+
+    // Step 4.5: Run mem2reg (promote `mir.alloca` + `mir.load`/`mir.store`
+    // chains back to SSA values). This erases every promotable alloca and
+    // replaces each load with the reaching definition, leaving the subsequent
+    // `dialect-mir` → `dialect-llvm` lowering to handle only genuinely
+    // address-taken locals.
+    if config.verbose {
+        eprintln!("\n=== Running mem2reg ===");
+    }
+    pliron::opts::mem2reg::mem2reg(module_op_ptr, &mut ctx).map_err(|e| {
+        PipelineError::Verification {
+            name: "mem2reg".to_string(),
+            message: e.disp(&ctx).to_string(),
+            operation: None,
+        }
+    })?;
+    if config.verbose {
+        eprintln!("mem2reg successful ✓");
+    }
+    if config.show_mir_dialect {
+        eprintln!("\n=== dialect-mir module (after mem2reg) ===");
+        eprintln!("{}", module_op_ptr.deref(&ctx).disp(&ctx));
+    }
+    verify_operation(&ctx, module_op_ptr, "module post-mem2reg")?;
+
+    // Step 5: Lower dialect-mir → dialect-llvm.
+    if config.verbose {
+        eprintln!("\n=== Lowering dialect-mir → dialect-llvm ===");
+    }
+    lower_to_llvm(&mut ctx, module_op_ptr)?;
+
+    // Step 5.5: Add device extern declarations to the dialect-llvm module.
+    // These are needed before verification so calls to extern functions are valid.
+    if !device_externs.is_empty() {
+        if config.verbose {
+            eprintln!(
+                "\n=== Adding {} device extern declarations ===",
+                device_externs.len()
+            );
+        }
+        add_device_extern_declarations(&mut ctx, module_op_ptr, device_externs)?;
+    }
+
+    // Step 6: Verify the dialect-llvm module. Dump BEFORE verify so
+    // verification failures still surface the IR to the user.
+    if config.show_llvm_dialect {
+        eprintln!("\n=== dialect-llvm (pre-verify) ===");
+        eprintln!("{}", module_op_ptr.deref(&ctx).disp(&ctx));
+    }
+    if config.verbose {
+        eprintln!("=== Verifying dialect-llvm module ===");
+    }
+    verify_operation(&ctx, module_op_ptr, "llvm module")?;
+    if config.verbose {
+        eprintln!("dialect-llvm verification successful ✓");
+    }
+
+    // Step 7: Export to LLVM IR
+    if config.verbose {
+        let mode = if config.emit_ltoir {
+            "LTOIR"
+        } else if config.emit_nvvm_ir {
+            "NVVM IR"
+        } else {
+            "PTX"
+        };
+        eprintln!("\n=== Exporting to LLVM IR ({} mode) ===", mode);
+    }
+    let ll_path = config.output_dir.join(format!("{}.ll", config.output_name));
+    let _llvm_ir = export_llvm_ir(
+        &ctx,
+        module_op_ptr,
+        device_externs,
+        &ll_path,
+        config.emit_ltoir,
+        config.emit_nvvm_ir,
+    )?;
+    if config.verbose {
+        eprintln!("LLVM IR written to {}", ll_path.display());
+    }
+
+    // Step 8: Generate PTX or LTOIR
+    if config.emit_ltoir {
+        return Err(PipelineError::Export(
+            "LTOIR container generation (--dlto) is not supported. \
+             Use --emit-nvvm-ir instead, which produces NVVM-compatible LLVM IR \
+             that can be compiled to LTOIR via libNVVM."
+                .to_string(),
+        ));
+    } else {
+        // PTX mode: invoke llc
+        if config.verbose {
+            eprintln!("\n=== Generating PTX ===");
+        }
+        let ptx_path = config
+            .output_dir
+            .join(format!("{}.ptx", config.output_name));
+        let target = generate_ptx(&ll_path, &ptx_path)?;
+        if config.verbose {
+            eprintln!(
+                "✓ PTX written to {} (target: {})",
+                ptx_path.display(),
+                target
+            );
+        }
+
+        Ok(CompilationResult {
+            ll_path,
+            ptx_path,
+            target,
+        })
+    }
+}
+
+/// Recursively verifies an operation and all nested operations.
+///
+/// On failure, attempts to find the innermost failing operation for better
+/// error messages.
+fn verify_operation(
+    ctx: &Context,
+    op_ptr: Ptr<Operation>,
+    name: &str,
+) -> Result<(), PipelineError> {
+    if let Err(e) = op_ptr.deref(ctx).verify(ctx) {
+        // Try to find specific failing operation
+        if let Some((err_op, err_msg)) = find_inner_verification_error(ctx, op_ptr) {
+            return Err(PipelineError::Verification {
+                name: name.to_string(),
+                message: err_msg,
+                operation: Some(err_op.deref(ctx).disp(ctx).to_string()),
+            });
+        }
+
+        // Use .disp(ctx) to get full error with location and backtrace
+        return Err(PipelineError::Verification {
+            name: name.to_string(),
+            message: e.disp(ctx).to_string(),
+            operation: None,
+        });
+    }
+    Ok(())
+}
+
+/// Inserts a function operation into the module's block.
+fn append_to_module(ctx: &Context, module_op_ptr: Ptr<Operation>, func_op_ptr: Ptr<Operation>) {
+    let region = module_op_ptr.deref(ctx).get_region(0).deref(ctx);
+    let block = region.iter(ctx).next().expect("Module should have a block");
+    func_op_ptr.insert_at_back(block, ctx);
+}
+
+/// Lowers `dialect-mir` operations to `dialect-llvm`.
+///
+/// Registers `dialect-llvm` and runs `mir-lower`'s `DialectConversion`-based
+/// pass, which converts each `dialect-mir`/`dialect-nvvm` op to its
+/// `dialect-llvm` equivalent.
+fn lower_to_llvm(ctx: &mut Context, module_op_ptr: Ptr<Operation>) -> Result<(), PipelineError> {
+    dialect_llvm::register(ctx);
+    mir_lower::register(ctx);
+
+    mir_lower::lower_mir_to_llvm(ctx, module_op_ptr)
+        .map_err(|e| PipelineError::Lowering(e.to_string()))
+}
+
+/// Adds device extern function declarations to the `dialect-llvm` module.
+///
+/// Creates `dialect-llvm` `FuncOp` declarations (without bodies) for each
+/// device extern function. These declarations ensure that calls to extern
+/// functions pass verification; the matching `declare` statements with
+/// attributes are emitted during LLVM IR export.
+fn add_device_extern_declarations(
+    ctx: &mut Context,
+    module_op_ptr: Ptr<Operation>,
+    device_externs: &[DeviceExternDecl],
+) -> Result<(), PipelineError> {
+    use dialect_llvm::ops::FuncOp;
+    use dialect_llvm::types::{FuncType, VoidType};
+    use pliron::identifier::Identifier;
+
+    // Get the module's block pointer first (this is a Ptr, not a Ref, so no borrow issues)
+    let block = {
+        let region = module_op_ptr.deref(ctx).get_region(0).deref(ctx);
+        region.iter(ctx).next().expect("Module should have a block")
+    };
+
+    for decl in device_externs {
+        // Parse parameter types from strings
+        let param_types: Vec<_> = decl
+            .param_types
+            .iter()
+            .map(|t| llvm_type_string_to_pliron(ctx, t))
+            .collect();
+
+        // Parse return type - for void, use VoidType
+        let return_type = if decl.return_type == "void" {
+            VoidType::get(ctx).into()
+        } else {
+            llvm_type_string_to_pliron(ctx, &decl.return_type)
+        };
+
+        // Create function type (result, args, is_variadic)
+        let func_type = FuncType::get(ctx, return_type, param_types, false);
+
+        // Use the original export name (NOT the prefixed name).
+        // The MIR sees calls to `cuda_oxide_device_extern_foo`, but the call lowering
+        // strips this prefix (see mir-lower/convert/ops/call.rs). So the LLVM IR will
+        // emit `call @foo(...)`. For this to resolve, we must declare `@foo` here.
+        let func_ident: Identifier = decl
+            .export_name
+            .clone()
+            .try_into()
+            .unwrap_or_else(|_| "extern_func".try_into().unwrap());
+
+        // Create function declaration (no body = declaration)
+        let func_op = FuncOp::new(ctx, func_ident, func_type);
+
+        // Insert at the front of the module (declarations come before definitions)
+        func_op.get_operation().insert_at_front(block, ctx);
+    }
+
+    Ok(())
+}
+
+/// Convert LLVM type string to pliron type.
+fn llvm_type_string_to_pliron(ctx: &mut Context, type_str: &str) -> Ptr<pliron::r#type::TypeObj> {
+    use dialect_llvm::types::PointerType;
+    use pliron::builtin::types::{FP32Type, FP64Type, IntegerType, Signedness};
+
+    match type_str {
+        "float" => FP32Type::get(ctx).into(),
+        "double" => FP64Type::get(ctx).into(),
+        "half" => {
+            // half is f16, but pliron may not have a direct type
+            // For now, use i16 as a fallback (will be handled in export)
+            IntegerType::get(ctx, 16, Signedness::Signless).into()
+        }
+        "i1" => IntegerType::get(ctx, 1, Signedness::Signless).into(),
+        "i8" => IntegerType::get(ctx, 8, Signedness::Signless).into(),
+        "i16" => IntegerType::get(ctx, 16, Signedness::Signless).into(),
+        "i32" => IntegerType::get(ctx, 32, Signedness::Signless).into(),
+        "i64" => IntegerType::get(ctx, 64, Signedness::Signless).into(),
+        "i128" => IntegerType::get(ctx, 128, Signedness::Signless).into(),
+        _ => PointerType::get(ctx, 0).into(), // Default to ptr
+    }
+}
+
+/// Exports a `dialect-llvm` module to textual LLVM IR (`.ll` file).
+///
+/// Backend configuration is selected based on flags:
+/// - `emit_nvvm_ir`: Uses `NvvmExportConfig` for NVVM IR output
+/// - Otherwise: Uses default `PtxExportConfig` for standard PTX generation
+///
+/// Device extern declarations are emitted before the main module content.
+fn export_llvm_ir(
+    ctx: &Context,
+    module_op_ptr: Ptr<Operation>,
+    device_externs: &[DeviceExternDecl],
+    path: &Path,
+    emit_ltoir: bool,
+    emit_nvvm_ir: bool,
+) -> Result<String, PipelineError> {
+    let module_op = Operation::get_op::<pliron::builtin::ops::ModuleOp>(module_op_ptr, ctx)
+        .ok_or_else(|| PipelineError::Export("Not a module op".to_string()))?;
+
+    let llvm_ir = if emit_ltoir {
+        let _ = device_externs;
+        return Err(PipelineError::Export(
+            "LTOIR container generation (--dlto) is not supported. \
+             Use --emit-nvvm-ir instead."
+                .to_string(),
+        ));
+    } else if emit_nvvm_ir {
+        let config = dialect_llvm::export::NvvmExportConfig;
+        dialect_llvm::export::export_module_with_externs(ctx, &module_op, device_externs, &config)
+            .map_err(PipelineError::Export)?
+    } else {
+        let config = dialect_llvm::export::PtxExportConfig;
+        dialect_llvm::export::export_module_with_externs(ctx, &module_op, device_externs, &config)
+            .map_err(PipelineError::Export)?
+    };
+
+    std::fs::write(path, &llvm_ir).map_err(|e| PipelineError::Export(e.to_string()))?;
+
+    Ok(llvm_ir)
+}
+
+/// Checks for WGMMA instructions (Hopper sm_90a only, NOT forward-compatible).
+///
+/// WGMMA (Warpgroup Matrix Multiply-Accumulate) requires sm_90a specifically.
+/// These are NOT forward-compatible - only work on H100/H200.
+fn contains_wgmma_features(ll_path: &Path) -> bool {
+    if let Ok(contents) = std::fs::read_to_string(ll_path) {
+        contents.contains("wgmma.fence")
+            || contents.contains("wgmma.commit_group")
+            || contents.contains("wgmma.wait_group")
+            || contents.contains("wgmma.mma_async")
+    } else {
+        false
+    }
+}
+
+/// Checks for Thread Block Cluster instructions (sm_90+).
+///
+/// Cluster features require Hopper (sm_90) or newer:
+/// - Cluster special registers (%cluster_ctaid, %cluster_nctaid)
+/// - Cluster synchronization (cluster.sync)
+/// - Distributed shared memory (mapa.shared::cluster)
+fn contains_cluster_features(ll_path: &Path) -> bool {
+    if let Ok(contents) = std::fs::read_to_string(ll_path) {
+        // Cluster special registers
+        contents.contains("cluster_ctaid")
+            || contents.contains("cluster_nctaid")
+            // Cluster synchronization
+            || contents.contains("cluster.sync")
+            // Distributed shared memory
+            || contents.contains("mapa.shared::cluster")
+    } else {
+        false
+    }
+}
+
+/// Checks for TMA/mbarrier instructions (Hopper+ compatible with Blackwell).
+///
+/// These instructions work on BOTH Hopper and Blackwell:
+/// - TMA: Tensor Memory Accelerator bulk copies
+/// - mbarrier: Async hardware barriers with transaction tracking
+///
+/// Use sm_90 (not sm_90a) for forward compatibility with sm_120 (Blackwell).
+fn contains_tma_features(ll_path: &Path) -> bool {
+    if let Ok(contents) = std::fs::read_to_string(ll_path) {
+        // TMA instructions
+        contents.contains("cp.async.bulk.tensor")
+            // mbarrier with transaction tracking (Hopper+)
+            || contents.contains("mbarrier.arrive.expect_tx")
+            || contents.contains("mbarrier.try_wait")
+            // Proxy fence for async operations
+            || contents.contains("fence.proxy.async")
+    } else {
+        false
+    }
+}
+/// Checks for Blackwell tcgen05 instructions (sm_100a+).
+///
+/// These instructions require sm_100a/sm_120a (Blackwell) or newer:
+/// - tcgen05: Tensor Core Gen 5 (TMEM allocation, MMA, sync primitives)
+///
+/// Key differences from Hopper:
+/// - tcgen05 MMA is single-thread (vs WGMMA's 128 threads)
+/// - Uses Tensor Memory (TMEM) instead of registers
+/// - Different synchronization model (mbarrier-based)
+fn contains_blackwell_features(ll_path: &Path) -> bool {
+    if let Ok(contents) = std::fs::read_to_string(ll_path) {
+        // tcgen05 TMEM allocation/deallocation
+        contents.contains("tcgen05.alloc")
+            || contents.contains("tcgen05.dealloc")
+            || contents.contains("tcgen05.relinquish_alloc_permit")
+            // tcgen05 synchronization
+            || contents.contains("tcgen05.fence")
+            || contents.contains("tcgen05.commit")
+            // tcgen05 MMA instructions (ws and non-ws/cta_group forms)
+            || contents.contains("tcgen05.mma")
+            // tcgen05 data movement
+            || contents.contains("tcgen05.cp")
+    } else {
+        false
+    }
+}
+
+/// Checks for TMA multicast in LLVM IR (requires sm_100a).
+///
+/// TMA multicast (`cp.async.bulk.tensor...multicast::cluster`) is an
+/// architecture-specific extension that broadcasts a tile to all CTAs in a
+/// cluster. In the LLVM intrinsic, this is controlled by the `use_cta_mask`
+/// parameter (second-to-last i1 argument) being set to true.
+fn contains_tma_multicast(ll_path: &Path) -> bool {
+    if let Ok(contents) = std::fs::read_to_string(ll_path) {
+        contents
+            .lines()
+            .any(|line| line.contains("g2s.tile") && line.contains(", i1 1, i1"))
+    } else {
+        false
+    }
+}
+
+/// GPU features detected in LLVM IR that determine target selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetectedFeatures {
+    /// tcgen05/TMEM (Blackwell datacenter, sm_100a).
+    Blackwell,
+    /// TMA multicast (arch-specific extension, sm_100a).
+    TmaMulticast,
+    /// WGMMA (Hopper only, sm_90a - NOT forward-compatible).
+    Wgmma,
+    /// TMA/mbarrier (Hopper+ compatible).
+    Tma,
+    /// Thread Block Clusters (sm_90+, forward-compatible).
+    Cluster,
+    /// No special features (maximum compatibility, sm_80).
+    Basic,
+}
+
+/// Maps detected features to GPU target architecture.
+fn select_target(features: DetectedFeatures) -> &'static str {
+    match features {
+        DetectedFeatures::Blackwell => "sm_100a",
+        DetectedFeatures::TmaMulticast => "sm_100a",
+        DetectedFeatures::Wgmma => "sm_90a",
+        // TMA needs PTX 8.0+ which requires sm_90a or sm_100+.
+        // sm_90a is NOT forward-compatible to Blackwell, so use sm_100 which:
+        // - Generates PTX 8.6 (supports all TMA features)
+        // - Works on all Blackwell variants (sm_100, sm_120)
+        // - Hopper users can override with CUDA_OXIDE_TARGET=sm_90a
+        DetectedFeatures::Tma => "sm_100",
+        // Cluster features require sm_90+ but are forward-compatible.
+        // Use sm_90 for Hopper compatibility, works on Blackwell too.
+        DetectedFeatures::Cluster => "sm_90",
+        DetectedFeatures::Basic => "sm_80",
+    }
+}
+
+/// Generates PTX from LLVM IR using `llc`.
+///
+/// Tries `llc-22` then `llc-21` in order. LLVM 21+ is the minimum supported
+/// version: earlier `llc` releases reject the modern TMA / tcgen05 / WGMMA
+/// intrinsic signatures that cuda-oxide emits (e.g. the 10-operand
+/// `llvm.nvvm.cp.async.bulk.tensor.g2s.tile.2d` with `addrspace(7)` + CTA
+/// group parameter requires LLVM 21). If `CUDA_OXIDE_LLC` is set, it is used
+/// exclusively — power users can point this at an older `llc` at their own
+/// risk (most examples will still compile but modern intrinsics will not).
+/// Auto-detects GPU features to select target, or uses `CUDA_OXIDE_TARGET`
+/// if set.
+fn generate_ptx(ll_path: &Path, ptx_path: &Path) -> Result<String, PipelineError> {
+    // Check for user-specified target override
+    let target_override = std::env::var("CUDA_OXIDE_TARGET").ok();
+
+    // Detect features (order matters: most specific first)
+    let detected = match (
+        contains_blackwell_features(ll_path),
+        contains_tma_multicast(ll_path),
+        contains_wgmma_features(ll_path),
+        contains_tma_features(ll_path),
+        contains_cluster_features(ll_path),
+    ) {
+        (true, _, _, _, _) => DetectedFeatures::Blackwell,
+        (_, true, _, _, _) => DetectedFeatures::TmaMulticast,
+        (_, _, true, _, _) => DetectedFeatures::Wgmma,
+        (_, _, _, true, _) => DetectedFeatures::Tma,
+        (_, _, _, _, true) => DetectedFeatures::Cluster,
+        _ => DetectedFeatures::Basic,
+    };
+
+    // Use override if provided, otherwise auto-detect
+    let target = match &target_override {
+        Some(t) => t.as_str(),
+        None => select_target(detected),
+    };
+
+    // Log target selection
+    if std::env::var("CUDA_OXIDE_VERBOSE").is_ok() {
+        match &target_override {
+            Some(_) => eprintln!("Target: {} (from CUDA_OXIDE_TARGET)", target),
+            None => eprintln!("Target: {} (auto-detected: {:?})", target, detected),
+        }
+    }
+
+    let verbose = std::env::var("CUDA_OXIDE_VERBOSE").is_ok();
+
+    // Check for user-specified llc path override
+    if let Ok(llc_path) = std::env::var("CUDA_OXIDE_LLC") {
+        if verbose {
+            eprintln!("Using llc: {} (from CUDA_OXIDE_LLC)", llc_path);
+        }
+        let result = std::process::Command::new(&llc_path)
+            .arg("-march=nvptx64")
+            .arg(format!("-mcpu={}", target))
+            .arg(ll_path)
+            .arg("-o")
+            .arg(ptx_path)
+            .output();
+
+        return match result {
+            Ok(output) if output.status.success() => Ok(target.to_string()),
+            Ok(output) => Err(PipelineError::PtxGeneration(format!(
+                "CUDA_OXIDE_LLC={} failed:\n{}",
+                llc_path,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))),
+            Err(e) => Err(PipelineError::PtxGeneration(format!(
+                "CUDA_OXIDE_LLC={}: {}",
+                llc_path, e
+            ))),
+        };
+    }
+
+    // Try different llc versions (newest first for best atomics/scope support).
+    //
+    // LLVM 21 is the floor: older releases reject modern TMA / tcgen05 /
+    // WGMMA intrinsic signatures that cuda-oxide emits. Users on older
+    // distros can opt in to a specific `llc` via `CUDA_OXIDE_LLC`.
+    //
+    // Target reference:
+    //   - sm_100a: Blackwell datacenter (tcgen05/TMEM)
+    //   - sm_90a:  Hopper only (WGMMA + TMA) - NOT forward-compatible
+    //   - sm_120:  Blackwell consumer (TMA with PTX 8.7)
+    //   - sm_80:   Ampere+ (maximum compatibility)
+    let llc_candidates = [("llc-22", target), ("llc-21", target)];
+
+    let mut last_error = String::new();
+
+    for (llc_cmd, llc_target) in llc_candidates {
+        let result = std::process::Command::new(llc_cmd)
+            .arg("-march=nvptx64")
+            .arg(format!("-mcpu={}", llc_target))
+            .arg(ll_path)
+            .arg("-o")
+            .arg(ptx_path)
+            .output();
+
+        match result {
+            Ok(output) if output.status.success() => {
+                if verbose {
+                    eprintln!("Using llc: {} (auto-detected)", llc_cmd);
+                }
+                return Ok(llc_target.to_string());
+            }
+            Ok(output) => {
+                // llc ran but failed - capture the error
+                last_error = String::from_utf8_lossy(&output.stderr).to_string();
+            }
+            Err(e) => match e.kind() {
+                std::io::ErrorKind::NotFound => continue,
+                _ => last_error = format!("{}: {}", llc_cmd, e),
+            },
+        }
+    }
+
+    match last_error.is_empty() {
+        true => Err(PipelineError::PtxGeneration(
+            "No working llc-21 or llc-22 found on PATH.\n\
+             cuda-oxide requires LLVM 21+ (earlier versions reject the TMA / \
+             tcgen05 / WGMMA intrinsic signatures we emit).\n\
+             Install with: sudo apt install llvm-21  (or llvm-22)\n\
+             Or set CUDA_OXIDE_LLC=/path/to/llc to use a specific binary."
+                .to_string(),
+        )),
+        false => Err(PipelineError::PtxGeneration(format!(
+            "llc failed:\n{}",
+            last_error.trim()
+        ))),
+    }
+}
+
+/// Recursively finds the innermost operation that failed verification.
+///
+/// Helps produce better error messages by pointing to the specific failing
+/// operation rather than just the containing module/function.
+fn find_inner_verification_error(
+    ctx: &Context,
+    op_ptr: Ptr<Operation>,
+) -> Option<(Ptr<Operation>, String)> {
+    let op = op_ptr.deref(ctx);
+
+    for region in op.regions() {
+        let region_ref = region.deref(ctx);
+        for block in region_ref.iter(ctx) {
+            let block_ref = block.deref(ctx);
+            for child_op in block_ref.iter(ctx) {
+                if let Some(err) = find_inner_verification_error(ctx, child_op) {
+                    return Some(err);
+                }
+            }
+        }
+    }
+
+    if let Err(e) = op.verify(ctx) {
+        // Use .disp(ctx) to get full error with location and backtrace
+        return Some((op_ptr, e.disp(ctx).to_string()));
+    }
+
+    None
+}
+
+/// Errors from pipeline execution, categorized by stage.
+#[derive(Debug)]
+pub enum PipelineError {
+    /// Function has no MIR body (shouldn't happen for collected functions).
+    NoBody(String),
+    /// MIR→Pliron IR translation failed.
+    Translation(String),
+    /// Pliron IR verification failed (includes failing operation if found).
+    Verification {
+        name: String,
+        message: String,
+        operation: Option<String>,
+    },
+    /// MIR→LLVM lowering failed.
+    Lowering(String),
+    /// LLVM IR export failed.
+    Export(String),
+    /// PTX generation via `llc` failed.
+    PtxGeneration(String),
+}
+
+impl std::fmt::Display for PipelineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoBody(name) => write!(f, "Function '{}' has no MIR body", name),
+            Self::Translation(msg) => write!(f, "Translation failed: {}", msg),
+            Self::Verification {
+                name,
+                message,
+                operation,
+            } => {
+                writeln!(f, "Verification failed for '{}':", name)?;
+                writeln!(f, "  {}", message)?;
+                if let Some(op) = operation {
+                    writeln!(f, "  Failed operation:\n{}", op)?;
+                }
+                Ok(())
+            }
+            Self::Lowering(msg) => write!(f, "Lowering failed: {}", msg),
+            Self::Export(msg) => write!(f, "Export failed: {}", msg),
+            Self::PtxGeneration(msg) => write!(f, "PTX generation failed: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for PipelineError {}

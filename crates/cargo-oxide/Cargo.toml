@@ -1,0 +1,15 @@
+[package]
+name = "cargo-oxide"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cargo subcommand for cuda-oxide: build and run Rust GPU programs"
+
+[[bin]]
+name = "cargo-oxide"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }

@@ -1,0 +1,36 @@
+# cuda-core
+
+Safe RAII wrappers around the CUDA driver API.
+
+## Overview
+
+This crate turns raw CUDA handles into Rust types with automatic cleanup on drop:
+
+| Type             | Wraps                  | Cleanup call                       |
+|------------------|------------------------|------------------------------------|
+| `CudaContext`    | `CUcontext` (primary)  | `cuDevicePrimaryCtxRelease_v2`     |
+| `CudaStream`     | `CUstream`             | `cuStreamDestroy_v2`               |
+| `CudaEvent`      | `CUevent`              | `cuEventDestroy_v2`                |
+| `CudaModule`     | `CUmodule`             | `cuModuleUnload`                   |
+| `CudaFunction`   | `CUfunction`           | (prevented from outliving module)  |
+
+## Key APIs
+
+- **Context**: `CudaContext::new(ordinal)` retains the primary context, binds it to the calling thread, and returns an `Arc<CudaContext>`.
+- **Streams**: `ctx.new_stream()` creates a non-blocking stream. `stream.launch_host_function(f)` enqueues an `FnOnce` callback after all prior stream work completes -- this is the bridge to Rust futures in `cuda-async`.
+- **Modules**: `ctx.load_module_from_file("kernel.ptx")` / `ctx.load_module_from_ptx_src(src)` load compiled GPU code. `module.load_function("kernel_name")` extracts a callable function handle.
+- **Memory**: Async (`malloc_async`, `free_async`, `memcpy_htod_async`, ...) and sync (`malloc_sync`, `free_sync`) device memory operations.
+- **Launch**: `launch_kernel(func, grid, block, smem, stream, params)` enqueues a kernel on a stream.
+- **Events**: `ctx.new_event(flags)` for synchronization points and GPU-side timing via `event.elapsed_ms(end)`.
+
+## Usage
+
+```rust
+use cuda_core::{CudaContext, LaunchConfig};
+
+let ctx = CudaContext::new(0)?;
+let stream = ctx.new_stream()?;
+let module = ctx.load_module_from_file("vecadd.ptx")?;
+let func = module.load_function("vecadd")?;
+// ... allocate memory, launch kernel, synchronize
+```

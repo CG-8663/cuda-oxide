@@ -1,0 +1,272 @@
+<p align="center">
+  <img src="assets/logo.png" alt="cuda-oxide logo" width="100%">
+</p>
+
+# cuda-oxide
+
+cuda-oxide is a custom rustc backend for compiling GPU kernels in pure Rust.
+The workspace combines:
+
+- single-source compilation -- host and device code live in the same file, built with one `cargo build`
+- a rustc codegen backend that compiles `#[kernel]` functions to CUDA PTX
+- device-side abstractions (type-safe indexing, shared memory, scoped atomics, barriers, TMA, warp/cluster ops)
+- a host-side runtime for memory management and kernel launching (`cuda-core`, `cuda-async`)
+- a rust-native compilation pipeline using [Pliron](https://github.com/vaivaswatha/pliron), an MLIR-like IR framework in Rust (Rust → Rust MIR → Pliron IR → LLVM IR → PTX)
+
+## Project Status
+
+cuda-oxide is an experimental compiler that demonstrates how CUDA SIMT kernels can be written natively in pure Rust -- no DSLs, no foreign language bindings -- and made available to the broader Rust community. The project is in an early stage (alpha) and under active development: you should expect bugs, incomplete features, and API breakage as we work to improve it. That said, we hope you'll try it in your own work and help shape its direction by sharing feedback on your experience.
+
+Please see [CONTRIBUTING.md](CONTRIBUTING.md) if you're interested in contributing to the project.
+
+## Quick Start
+
+```rust
+use cuda_device::{kernel, thread, DisjointSlice};
+use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
+use cuda_host::cuda_launch;
+
+// Device: generic kernel that applies any function to each element.
+// F can be a closure with captures — rustc monomorphizes it to a concrete type.
+#[kernel]
+pub fn map<T: Copy, F: Fn(T) -> T + Copy>(f: F, input: &[T], mut out: DisjointSlice<T>) {
+    let idx = thread::index_1d();
+    if let Some(out_elem) = out.get_mut(idx) {
+        *out_elem = f(input[idx.get()]);
+    }
+}
+
+fn main() {
+    let ctx = CudaContext::new(0).unwrap();
+    let stream = ctx.default_stream();
+
+    let data: Vec<f32> = (0..1024).map(|i| i as f32).collect();
+    let input = DeviceBuffer::from_host(&stream, &data).unwrap();
+    let mut output = DeviceBuffer::<f32>::zeroed(&stream, 1024).unwrap();
+
+    let module = ctx.load_module_from_file("host_closure.ptx").unwrap();
+
+    // Launch with a closure — factor is captured and passed to the GPU automatically
+    let factor = 2.5f32;
+    cuda_launch! {
+        kernel: map::<f32, _>,
+        stream: stream,
+        module: module,
+        config: LaunchConfig::for_num_elems(1024),
+        args: [move |x: f32| x * factor, slice(input), slice_mut(output)]
+    }.unwrap();
+
+    let result = output.to_host_vec(&stream).unwrap();
+    assert!((result[1] - 2.5).abs() < 1e-5);
+}
+```
+
+The above example defines a generic `#[kernel]` function `map` that accepts any
+`Fn(T) -> T` closure. On the host side, `CudaContext` and `DeviceBuffer` manage
+the GPU context and memory, and `cuda_launch!` dispatches the kernel to the GPU.
+The closure `move |x| x * factor` is captured, scalarized, and passed as PTX
+kernel parameters automatically. PTX is generated alongside the host binary in a
+single `cargo build` invocation.
+
+For composable async GPU work, the same launch site looks almost identical:
+`stream:` disappears, `cuda_launch_async!` returns a lazy `DeviceOperation`,
+and execution happens when you call `.sync()` or `.await`.
+
+```rust
+use cuda_async::device_operation::DeviceOperation;
+use cuda_host::cuda_launch_async;
+
+// Assuming `module`, `input`, and `output` come from the cuda-async setup:
+let factor = 2.5f32;
+cuda_launch_async! {
+    kernel: map::<f32, _>,
+    module: module,
+    config: LaunchConfig::for_num_elems(1024),
+    args: [move |x: f32| x * factor, slice(input), slice_mut(output)]
+}
+.sync()?;
+// or: .await?;
+```
+
+See the `async_mlp` example and `crates/cuda-async/README.md` for the full async setup.
+
+```bash
+# Build and run an example
+cargo oxide run host_closure
+
+# Show full compilation pipeline (Rust MIR → dialect-mir → mem2reg → dialect-llvm → LLVM IR → PTX)
+cargo oxide pipeline vecadd
+
+# Debug with cuda-gdb
+cargo oxide debug vecadd --tui
+```
+
+## Setup
+
+### Requirements
+
+- **cargo-oxide** — cargo subcommand that drives the build pipeline (`cargo oxide run`, `build`, `debug`, etc.)
+- **Rust nightly** with `rust-src` and `rustc-dev` components (pinned in `rust-toolchain.toml`)
+- **CUDA Toolkit** (12.x+)
+- **LLVM 21+** with NVPTX backend (`llc` must be in PATH)
+- **Clang + libclang dev headers** (`clang-21` / `libclang-common-21-dev`) — needed by `bindgen` when building the host `cuda-bindings` crate
+- **Linux** (tested on Ubuntu 24.04)
+
+> **Why LLVM 21?** We emit TMA / tcgen05 / WGMMA intrinsics that `llc` from LLVM 20 and earlier can't
+> handle. Simple kernels might still work with an older `llc`, but anything Hopper / Blackwell needs 21+.
+
+### Install
+
+#### cargo-oxide
+
+Inside the cuda-oxide repo, `cargo oxide` works out of the box via a workspace alias.
+
+For use outside the repo (your own projects):
+
+```bash
+cargo install --git https://gitlab-master.nvidia.com/nihalp/cuda-oxide.git cargo-oxide
+```
+
+On first run, `cargo-oxide` will automatically fetch and build the codegen backend.
+
+#### Rust
+
+```bash
+# Toolchain installed automatically via rust-toolchain.toml
+# Manual install if needed:
+rustup toolchain install nightly-2026-04-03
+rustup component add rust-src rustc-dev --toolchain nightly-2026-04-03
+```
+
+#### CUDA
+
+```bash
+export PATH="/usr/local/cuda/bin:$PATH"
+nvcc --version
+```
+
+#### LLVM
+
+```bash
+# Ubuntu/Debian
+sudo apt install llvm-21
+
+# Verify NVPTX support
+llc-21 --version | grep nvptx
+```
+
+The pipeline auto-discovers `llc-22` and `llc-21` on `PATH` (in that order).
+To pin a specific binary, set `CUDA_OXIDE_LLC=/usr/bin/llc-21`.
+
+#### Clang (host `cuda-bindings`)
+
+The host `cuda-bindings` crate runs `bindgen`, which loads libclang and needs
+clang's own resource-dir `stddef.h` — a bare `libclang1-*` runtime is not
+enough.
+
+```bash
+sudo apt install clang-21   # or libclang-common-21-dev
+```
+
+`cargo oxide doctor` catches this up front; the symptom otherwise is a cryptic
+`'stddef.h' file not found` during the host build.
+
+### Verifying Installation
+
+```bash
+# Check that all prerequisites are in place
+cargo oxide doctor
+
+# Build and run an example end-to-end
+cargo oxide run vecadd
+```
+
+`cargo oxide doctor` validates your Rust toolchain, CUDA toolkit, LLVM, and
+codegen backend. If everything is configured correctly, `cargo oxide run vecadd`
+compiles a Rust kernel to PTX, launches it on the GPU, and prints `PASSED`.
+
+## Examples
+
+**38 examples** in `crates/rustc-codegen-cuda/examples/`. Highlights:
+
+| Example              | Description                                                              |
+|----------------------|--------------------------------------------------------------------------|
+| `vecadd`             | Vector addition -- canonical first example                               |
+| `host_closure`       | Generic kernels with closures passed from host                           |
+| `generic`            | Generic kernels with monomorphization (`scale<T>`)                       |
+| `gemm_sol`           | GEMM SoL: 868 TFLOPS (58% cuBLAS on B200), 8 kernels across 4 phases     |
+| `tcgen05`            | Blackwell tensor cores (sm_100a): TMEM, MMA, cta_group::2                |
+| `atomics`            | GPU atomics: 6 types x 3 scopes x 5 orderings (20 tests)                 |
+| `cluster`            | Thread Block Clusters + DSMEM ring exchange (Hopper+)                    |
+| `async_mlp`          | Async MLP pipeline: GEMM → MatVec → ReLU across concurrent streams       |
+| `mathdx_ffi_test`    | cuFFTDx thread-level FFT + cuBLASDx block-level GEMM                     |
+| `async_vecadd`       | Async GPU execution with `cuda-async` and `DeviceOperation`              |
+| `cross_crate_kernel` | Library crates defining kernels, bundled into binaries                   |
+
+```bash
+cargo oxide run vecadd
+cargo oxide run gemm_sol
+```
+
+## Crate Overview
+
+### User-Facing Crates
+
+| Crate               | Description                                                               |
+|---------------------|---------------------------------------------------------------------------|
+| `cuda-device`       | Device intrinsics (`thread::*`, `warp::*`, barriers)                      |
+| `cuda-host`         | Host utilities (`cuda_launch!`, `cuda_launch_async!`)                     |
+| `cuda-macros`       | Proc macros (`#[kernel]`, `#[device]`, `gpu_printf!`)                     |
+| `cuda-bindings`     | Raw `bindgen` FFI bindings to `cuda.h`                                    |
+| `cuda-core`         | Safe RAII wrappers (`CudaContext`, `CudaStream`, `DeviceBuffer<T>`)       |
+| `cuda-async`        | Async execution layer (`DeviceOperation`, `DeviceFuture`, `DeviceBox<T>`) |
+
+### Compiler Crates
+
+| Crate                | Description                                           |
+|----------------------|-------------------------------------------------------|
+| `rustc-codegen-cuda` | Custom rustc backend                                  |
+| `mir-importer`       | Rust MIR -> `dialect-mir` translation + pipeline      |
+| `mir-lower`          | `dialect-mir` -> `dialect-llvm` lowering              |
+| `dialect-mir`        | pliron dialect modelling Rust MIR                     |
+| `dialect-llvm`       | pliron dialect modelling LLVM IR (+ export to `.ll`)  |
+| `dialect-nvvm`       | pliron dialect modelling NVVM intrinsics              |
+
+### Build Tooling
+
+| Crate          | Description                                          |
+|----------------|------------------------------------------------------|
+| `cargo-oxide`  | Cargo subcommand (`cargo oxide run`, etc.)           |
+
+### Documentation
+
+| Directory           | Description                                                        |
+|---------------------|--------------------------------------------------------------------|
+| `cuda-oxide-book`   | Project book (Sphinx + MyST) — guides, compiler internals, API ref |
+
+## Status
+
+### Highlights:
+
+- End-to-end Rust -> PTX compilation
+- Unified single-source compilation (host + device in one file)
+- Generic functions with monomorphization
+- Closures with captures (move and non-move via HMM)
+- User-defined structs, enums, pattern matching
+- Full GPU intrinsic support (thread, warp, shared memory, barriers, TMA, clusters, atomics)
+- Cross-crate kernels
+- LTOIR generation for Blackwell+ (device-side LTO)
+- Device FFI: Rust <-> C++/CCCL interop via LTOIR
+- MathDx integration: cuFFTDx thread-level FFT, cuBLASDx block-level GEMM
+- Host runtime: `cuda-core` (explicit control) and `cuda-async` (composable async operations)
+- GEMM SoL: 868 TFLOPS (58% cuBLAS SoL) on B200 with cta_group::2, CLC, 4-stage pipeline
+
+## Documentation
+
+**WIP:** 🚧 🚧 The **[cuda-oxide book](https://cuda-oxide-106262.gitlab-master-pages.nvidia.com/index.html)** is the primary reference for the project. It covers SIMT kernel authoring in Rust, synchronous and asynchronous GPU programming, the compiler architecture, and more.
+
+To build and serve the book locally, see [cuda-oxide-book/README.md](./cuda-oxide-book/README.md).
+
+## License
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.

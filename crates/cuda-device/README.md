@@ -1,0 +1,149 @@
+# cuda-device
+
+`#![no_std]` device-side intrinsics and abstractions for writing CUDA kernels in Rust. This crate provides everything that runs on the GPU: thread identification, memory abstractions, synchronization, warp primitives, tensor cores, TMA, atomics, and debug facilities.
+
+```text
+  User kernel code
+       │
+       │  uses
+       ▼
+  cuda-device  ───────────────────────────────────┐
+  │                                             │
+  │  thread     warp       barrier     cusimd   │  Universal
+  │  disjoint   shared     atomic      debug    │
+  │                                             │
+  │  tma        wgmma      stmatrix    cluster  │  Hopper+
+  │  tcgen05    clc                             │  Blackwell+
+  └─────────────────────────────────────────────┘
+       │
+       │  compiled by
+       ▼
+  rustc-codegen-cuda  →  MIR → LLVM IR → PTX
+```
+
+## Modules
+
+| Module     | Description                                                                  | GPU     |
+|------------|------------------------------------------------------------------------------|---------|
+| `thread`   | Thread/block/grid IDs, `index_1d`/`index_2d`, `sync_threads`, fences         | All     |
+| `disjoint` | `DisjointSlice<T>` -- safe parallel writes via `ThreadIndex`                 | All     |
+| `shared`   | `SharedArray<T, N>`, `DynamicSharedArray<T>` -- block-scoped shared memory   | All     |
+| `warp`     | Shuffle (xor/up/down/idx for i32 and f32), lane_id, vote (all/any/ballot)    | All     |
+| `atomic`   | Scoped GPU atomics; `core::sync::atomic` types also supported on device      | sm_70+  |
+| `debug`    | `clock`/`clock64`, `trap`, `breakpoint`, `gpu_printf!`, `gpu_assert!`        | All     |
+| `barrier`  | `Barrier`, `ManagedBarrier<State, Kind>` -- async mbarrier for TMA           | sm_90+  |
+| `cluster`  | Thread block clusters, DSMEM (`map_shared_rank`), `cluster_sync`             | sm_90+  |
+| `tma`      | `TmaDescriptor`, bulk tensor copies (1D-5D global↔shared, multicast)         | sm_90+  |
+| `wgmma`    | Warpgroup MMA fence/commit/wait, smem descriptors, bf16/f16/tf32 MMA         | sm_90   |
+| `tcgen05`  | 5th-gen tensor cores: TMEM alloc/dealloc, MMA, stmatrix, CG2 variants        | sm_100+ |
+| `cusimd`   | `CuSimd<T, N>` vector register type, `Float2`/`Float4`/`TmemRegs*` aliases   | All     |
+| `clc`      | Cluster Launch Control: cancel, query first ctaid                            | sm_100+ |
+
+## Key Types
+
+### `ThreadIndex` and `DisjointSlice<T>`
+
+`ThreadIndex` can only be constructed by `index_1d()` / `index_2d()`, guaranteeing each thread gets a unique value. `DisjointSlice<T>` accepts only `ThreadIndex` for mutable access, preventing data races by construction.
+
+```rust
+#[kernel]
+pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
+    let idx = thread::index_1d();
+    if let Some(c_elem) = c.get_mut(idx) {    // bounds-checked, returns Option
+        *c_elem = a[idx.get()] + b[idx.get()];
+    }
+}
+```
+
+For non-trivial patterns (reductions, histograms), `get_unchecked_mut(usize)` is the `unsafe` escape hatch.
+
+### `SharedArray<T, N, ALIGN>` and `DynamicSharedArray<T, ALIGN>`
+
+Block-scoped shared memory. `SharedArray` is compile-time sized; `DynamicSharedArray` is runtime-sized (set via `LaunchConfig::shared_mem_bytes`). Both are `!Sync` -- concurrent access requires explicit GPU barriers.
+
+```rust
+#[kernel]
+pub fn tiled(data: &[f32], mut out: DisjointSlice<f32>) {
+    static mut TILE: SharedArray<f32, 256> = SharedArray::UNINIT;
+
+    let tid = thread::threadIdx_x() as usize;
+    unsafe { TILE[tid] = data[thread::index_1d().get()]; }
+    thread::sync_threads();
+    // ... read from TILE ...
+}
+```
+
+Use `ALIGN = 128` for TMA destinations.
+
+### `ManagedBarrier<State, Kind, ID>`
+
+Typestate-based async barrier for TMA and MMA synchronization (Hopper+). Tracks initialization state (`Uninit` → `Ready` → `Invalidated`) and barrier kind (`TmaBarrier`, `MmaBarrier`, `GeneralBarrier`) at compile time.
+
+### Atomics
+
+Two kinds of atomics work on device:
+
+- **`cuda_device::atomic::*`** -- 18 scoped GPU atomic types across three scopes (`Device`/`.gpu`, `Block`/`.cta`, `System`/`.sys`) and six value types (u32, i32, u64, i64, f32, f64). These give explicit control over scope and ordering.
+- **`core::sync::atomic::*`** -- standard library atomics (`AtomicU32`, `AtomicBool`, etc.) also compile to GPU code, defaulting to device scope.
+
+Both paths emit the same NVVM atomic ops and share the full lowering pipeline to PTX.
+
+```rust
+use cuda_device::atomic::{DeviceAtomicU32, AtomicOrdering};
+
+static COUNTER: DeviceAtomicU32 = DeviceAtomicU32::new(0);
+// In kernel:
+COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+```
+
+### Tensor Cores and TMA
+
+**TMA** (`tma` module): Hardware DMA via `TmaDescriptor`. Async bulk tensor copies in 1D-5D between global and shared memory, with multicast and CTA-group-2 variants.
+
+**WGMMA** (`wgmma` module): Warpgroup MMA for Hopper -- fence/commit/wait pipeline, shared memory descriptors, bf16/f16/tf32 accumulate operations.
+
+**tcgen05** (`tcgen05` module): Blackwell 5th-gen tensor cores with Tensor Memory (TMEM). `TmemGuard<State, N_COLS>` manages TMEM lifetime with typestate. Includes MMA operations, SMEM↔TMEM copies, stmatrix stores, descriptor builders, bf16 packing helpers, and CTA-pair (cg2) variants.
+
+## Debug Facilities
+
+```rust
+use cuda_device::{gpu_printf, gpu_assert};
+
+#[kernel]
+pub fn debug_kernel(data: &[f32]) {
+    let idx = thread::index_1d();
+    gpu_printf!("thread %d: val = %f\n", idx.get() as i32, data[idx.get()] as f64);
+    gpu_assert!(data[idx.get()] >= 0.0);
+}
+```
+
+`gpu_printf!` compiles to device-side `vprintf` with C vararg promotion. `gpu_assert!` traps on failure.
+
+## Proc-Macro Re-exports
+
+These are defined in `cuda-macros` and re-exported from `cuda-device` for convenience:
+
+| Attribute           | Purpose                                       |
+|---------------------|-----------------------------------------------|
+| `#[kernel]`         | Mark a function as a GPU kernel entry point   |
+| `#[device]`         | Mark a helper function or extern block        |
+| `#[launch_bounds]`  | Set max threads / min blocks per SM           |
+| `#[cluster_launch]` | Set compile-time cluster dimensions           |
+| `#[convergent]`     | Mark as convergent (barrier semantics)        |
+| `#[pure]`           | Mark as pure (no side effects)                |
+| `#[readonly]`       | Mark as read-only                             |
+| `gpu_printf!`       | Device-side printf                            |
+
+## Safety Model
+
+1. **`ThreadIndex`** -- unconstructible except via trusted functions; guarantees unique indices
+2. **`DisjointSlice::get_mut()`** -- bounds-checked `Option<&mut T>`; `get_unchecked_mut()` is the explicit `unsafe` escape
+3. **`SharedArray` / `DynamicSharedArray`** -- `!Sync`; all access via `static mut` requires `unsafe`
+4. **Barriers, TMA, WGMMA, tcgen05** -- all `unsafe` functions; caller ensures synchronization semantics
+5. **Atomics** -- `unsafe impl Sync`; ordering semantics match CUDA scoped atomics
+
+## Further Reading
+
+- [cuda-host](../cuda-host/) -- host-side launch infrastructure
+- [cuda-macros](../cuda-macros/) -- proc-macro implementations
+- [cuda-core](../cuda-core/) -- CUDA driver API bindings

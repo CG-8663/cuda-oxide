@@ -1,0 +1,19 @@
+[package]
+name = "tma_multicast"
+version = "0.1.0"
+edition = "2024"
+authors = ["Nihal Pasham <nihalp@nvidia.com>"]
+license = "Apache-2.0"
+
+# Mark as standalone crate (not part of parent workspace)
+[workspace]
+
+# SM100a+ TMA Multicast (Tensor Memory Accelerator) example.
+# Requires Blackwell datacenter GPUs (B100/B200/GB200).
+# Build with:
+#   cargo oxide run tma_multicast
+
+[dependencies]
+cuda-device = { path = "../../../cuda-device" }
+cuda-host = { path = "../../../cuda-host" }
+cuda-core = { path = "../../../cuda-core" }
