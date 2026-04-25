@@ -22,5 +22,12 @@ jobs:
       - name: Clone repository
         uses: actions/checkout@v4
 
+      - name: Install CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.21
+        with:
+          cuda: "12.6.3"
+          method: network
+          sub-packages: '["nvcc", "cudart-dev"]'
+
       - name: Run clippy
         run: cargo clippy --workspace -- -D warnings
