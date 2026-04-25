@@ -33,7 +33,7 @@ unsafe fn set_mem_location_device(
     loc.type_ = cuda_bindings::CUmemLocationType_enum_CU_MEM_LOCATION_TYPE_DEVICE;
     unsafe {
         let base = loc as *mut _ as *mut u8;
-        (base.add(4) as *mut i32).write(device as i32);
+        (base.add(4) as *mut i32).write(device);
     }
 }
 

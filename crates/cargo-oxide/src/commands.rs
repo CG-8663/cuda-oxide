@@ -802,10 +802,10 @@ fn apply_ld_library_path(cmd: &mut Command) {
 /// Touch main.rs to force recompilation (faster than cargo clean).
 fn touch_main_rs(example_dir: &Path) {
     let main_rs = example_dir.join("src/main.rs");
-    if main_rs.exists() {
-        if let Ok(content) = std::fs::read(&main_rs) {
-            let _ = std::fs::write(&main_rs, content);
-        }
+    if main_rs.exists()
+        && let Ok(content) = std::fs::read(&main_rs)
+    {
+        let _ = std::fs::write(&main_rs, content);
     }
 }
 
@@ -1088,12 +1088,12 @@ fn main() {{
 /// Locate an executable by name, first via `which` (PATH lookup), then by
 /// checking a list of common fallback absolute paths.
 fn find_executable(name: &str, fallback_paths: &[&str]) -> Option<PathBuf> {
-    if let Ok(output) = Command::new("which").arg(name).output() {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return Some(PathBuf::from(path));
-            }
+    if let Ok(output) = Command::new("which").arg(name).output()
+        && output.status.success()
+    {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path.is_empty() {
+            return Some(PathBuf::from(path));
         }
     }
     for path in fallback_paths {

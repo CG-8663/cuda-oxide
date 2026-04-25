@@ -833,7 +833,7 @@ fn extract_ordering_from_generics(substs: &rustc_public::ty::GenericArgs) -> Ato
     if let Some(GenericArgKind::Const(c)) = substs.0.get(2) {
         let discr = match c.kind() {
             TyConstKind::Value(_, alloc) => alloc.read_uint().unwrap_or(4) as u64,
-            _ => c.eval_target_usize().unwrap_or(4) as u64,
+            _ => c.eval_target_usize().unwrap_or(4),
         };
         intrinsic_ordering_from_discriminant(discr)
     } else {
@@ -953,39 +953,39 @@ fn extract_core_intrinsic_generics(
     func: &mir::Operand,
     loc: &Location,
 ) -> TranslationResult<(AtomicTypeInfo, AtomicOrdering)> {
-    if let mir::Operand::Constant(const_op) = func {
-        if let TyKind::RigidTy(RigidTy::FnDef(_, substs)) = const_op.const_.ty().kind() {
-            if let Some(type_info) = extract_type_info_from_generics(&substs) {
-                // PTX has no 8-bit atomics; 16-bit is partial (sm_70+). Reject both for now.
-                // See docs/atomics/atomic-width-support.md.
-                if type_info.bit_width == 8 {
-                    return input_err!(
-                        loc.clone(),
-                        TranslationErr::unsupported(
-                            "8-bit atomics are not supported by PTX; use 32-bit or 64-bit. \
+    if let mir::Operand::Constant(const_op) = func
+        && let TyKind::RigidTy(RigidTy::FnDef(_, substs)) = const_op.const_.ty().kind()
+    {
+        if let Some(type_info) = extract_type_info_from_generics(&substs) {
+            // PTX has no 8-bit atomics; 16-bit is partial (sm_70+). Reject both for now.
+            // See docs/atomics/atomic-width-support.md.
+            if type_info.bit_width == 8 {
+                return input_err!(
+                    loc.clone(),
+                    TranslationErr::unsupported(
+                        "8-bit atomics are not supported by PTX; use 32-bit or 64-bit. \
                              See docs/atomics/atomic-width-support.md"
-                        )
-                    );
-                }
-                if type_info.bit_width == 16 {
-                    return input_err!(
-                        loc.clone(),
-                        TranslationErr::unsupported(
-                            "16-bit atomics are not yet supported; use 32-bit or 64-bit. \
-                             See docs/atomics/atomic-width-support.md"
-                        )
-                    );
-                }
-                let ordering = extract_ordering_from_generics(&substs);
-                return Ok((type_info, ordering));
+                    )
+                );
             }
-            return input_err!(
-                loc.clone(),
-                TranslationErr::unsupported(
-                    "could not extract element type from core atomic intrinsic generics"
-                )
-            );
+            if type_info.bit_width == 16 {
+                return input_err!(
+                    loc.clone(),
+                    TranslationErr::unsupported(
+                        "16-bit atomics are not yet supported; use 32-bit or 64-bit. \
+                             See docs/atomics/atomic-width-support.md"
+                    )
+                );
+            }
+            let ordering = extract_ordering_from_generics(&substs);
+            return Ok((type_info, ordering));
         }
+        return input_err!(
+            loc.clone(),
+            TranslationErr::unsupported(
+                "could not extract element type from core atomic intrinsic generics"
+            )
+        );
     }
     input_err!(
         loc.clone(),

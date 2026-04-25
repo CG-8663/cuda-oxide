@@ -438,6 +438,7 @@ impl NvvmAtomicCmpxchgOp {
     }
 
     /// Create a new cmpxchg from scratch.
+    #[allow(clippy::too_many_arguments)]
     pub fn build(
         ctx: &mut Context,
         ptr: Value,

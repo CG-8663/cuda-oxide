@@ -2122,6 +2122,12 @@ pub fn f32_pair_to_packed_bf16(a: f32, b: f32) -> u32 {
 /// Identical to [`tcgen05_alloc`] but emits `cta_group::2`.
 /// Both CTAs in the pair must call this together.
 ///
+/// # Safety
+///
+/// Must be called from a CUDA kernel context on sm_100a+.
+/// `dst_smem` must be a valid shared-memory pointer. Both CTAs in the
+/// pair must execute this cooperatively.
+///
 /// # PTX
 ///
 /// ```ptx
@@ -2136,6 +2142,11 @@ pub unsafe fn tcgen05_alloc_cg2(dst_smem: *mut u32, n_cols: u32) {
 /// Deallocate Tensor Memory for a CTA pair (`cta_group::2`).
 ///
 /// Identical to [`tcgen05_dealloc`] but emits `cta_group::2`.
+///
+/// # Safety
+///
+/// Must be called from a CUDA kernel context on sm_100a+.
+/// `tmem_addr` must be a previously allocated TMEM address.
 ///
 /// # PTX
 ///
@@ -2166,6 +2177,12 @@ pub fn tcgen05_relinquish_alloc_permit_cg2() {
 /// pair cooperate on a larger tile (e.g., 256×128 with each SM contributing
 /// half the rows).
 ///
+/// # Safety
+///
+/// Must be called from a CUDA kernel context on sm_100a+.
+/// Descriptors must reference valid SMEM regions. `d_tmem` must be a
+/// valid TMEM address. Both CTAs must participate.
+///
 /// # PTX
 ///
 /// ```ptx
@@ -2185,6 +2202,11 @@ pub unsafe fn tcgen05_mma_f16_cg2(
 
 /// Commit pending CTA-pair tcgen05 operations to an mbarrier (`cta_group::2`).
 ///
+/// # Safety
+///
+/// Must be called from a CUDA kernel context on sm_100a+.
+/// `mbar` must point to a valid mbarrier object in shared memory.
+///
 /// # PTX
 ///
 /// ```ptx
@@ -2197,6 +2219,11 @@ pub unsafe fn tcgen05_commit_cg2(mbar: *mut u64) {
 }
 
 /// Commit CTA-pair tcgen05 operations via `.shared::cluster` (`cta_group::2`).
+///
+/// # Safety
+///
+/// Must be called from a CUDA kernel context on sm_100a+.
+/// `mbar` must point to a valid mbarrier in cluster-accessible shared memory.
 ///
 /// # PTX
 ///
@@ -2216,6 +2243,12 @@ pub unsafe fn tcgen05_commit_shared_cluster_cg2(mbar: *mut u64) {
 /// Mojo's `mma_arrive_multicast` works — the MMA warp signals both its
 /// own and its partner CTA's barrier in one instruction.
 ///
+/// # Safety
+///
+/// Must be called from a CUDA kernel context on sm_100a+.
+/// `mbar` must point to a valid mbarrier in cluster-accessible shared memory.
+/// `cta_mask` must only reference valid CTA ranks within the cluster.
+///
 /// # Parameters
 ///
 /// - `mbar`: pointer to mbarrier in shared memory
@@ -2233,6 +2266,12 @@ pub unsafe fn tcgen05_commit_multicast_cg2(mbar: *mut u64, cta_mask: u16) {
 }
 
 /// Copy SMEM to TMEM for a CTA pair (`cta_group::2`).
+///
+/// # Safety
+///
+/// Must be called from a CUDA kernel context on sm_100a+.
+/// `tmem_addr` must be a valid TMEM address and `smem_desc` must be a
+/// valid SMEM descriptor. Both CTAs must participate.
 ///
 /// # PTX
 ///

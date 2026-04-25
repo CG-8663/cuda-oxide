@@ -142,7 +142,7 @@ impl AsyncKernelLaunch {
                 &mut self.args,
             )
         }
-        .map_err(|e| DeviceError::Driver(e))?;
+        .map_err(DeviceError::Driver)?;
         Ok(())
     }
 }

@@ -377,12 +377,12 @@ pub fn run_pipeline(
 
     // Step 8: Generate PTX or LTOIR
     if config.emit_ltoir {
-        return Err(PipelineError::Export(
+        Err(PipelineError::Export(
             "LTOIR container generation (--dlto) is not supported. \
              Use --emit-nvvm-ir instead, which produces NVVM-compatible LLVM IR \
              that can be compiled to LTOIR via libNVVM."
                 .to_string(),
-        ));
+        ))
     } else {
         // PTX mode: invoke llc
         if config.verbose {

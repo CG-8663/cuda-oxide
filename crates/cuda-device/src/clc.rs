@@ -169,6 +169,11 @@ pub unsafe fn clc_query_is_canceled(resp_lo: u64, resp_hi: u64) -> u32 {
 ///
 /// Only valid when `clc_query_is_canceled` returned 0 (work available).
 ///
+/// # Safety
+///
+/// Must be called from a CUDA kernel context. The response pair must
+/// originate from a prior `clc_query_cancel` call.
+///
 /// # PTX
 ///
 /// ```ptx
@@ -184,6 +189,11 @@ pub unsafe fn clc_query_get_first_ctaid_x(resp_lo: u64, resp_hi: u64) -> u32 {
 ///
 /// Only valid when `clc_query_is_canceled` returned 0 (work available).
 ///
+/// # Safety
+///
+/// Must be called from a CUDA kernel context. The response pair must
+/// originate from a prior `clc_query_cancel` call.
+///
 /// # PTX
 ///
 /// ```ptx
@@ -198,6 +208,11 @@ pub unsafe fn clc_query_get_first_ctaid_y(resp_lo: u64, resp_hi: u64) -> u32 {
 /// Get the Z coordinate of the canceled CTA's grid position.
 ///
 /// Only valid when `clc_query_is_canceled` returned 0 (work available).
+///
+/// # Safety
+///
+/// Must be called from a CUDA kernel context. The response pair must
+/// originate from a prior `clc_query_cancel` call.
 ///
 /// # PTX
 ///
