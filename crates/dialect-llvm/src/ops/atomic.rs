@@ -230,6 +230,7 @@ pub struct AtomicCmpxchgOp;
 
 impl AtomicCmpxchgOp {
     /// Create a new `cmpxchg` op.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctx: &mut Context,
         ptr: Value,
