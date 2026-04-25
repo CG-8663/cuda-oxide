@@ -17,17 +17,20 @@ permissions:
 jobs:
   clippy:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - name: Clone repository
         uses: actions/checkout@v4
 
       - name: Install CUDA toolkit
-        uses: Jimver/cuda-toolkit@v0.2.21
+        uses: Jimver/cuda-toolkit@v0.2.35
+        id: cuda-toolkit
         with:
           cuda: "13.0.0"
-          method: network
+          method: local
           sub-packages: '["nvcc", "cudart-dev"]'
 
       - name: Run clippy
+        env:
+          CUDA_TOOLKIT_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
         run: cargo clippy --workspace -- -D warnings
