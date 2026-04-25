@@ -8,6 +8,7 @@ target/
 *.tar.gz
 .cursor/
 .vscode/
+.claude/
 
 # Internal documentation (lives in docs/, not tracked -- see cuda-oxide-book/ for the book)
 /docs/
