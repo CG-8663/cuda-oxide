@@ -20,7 +20,7 @@ Start](../getting-started/quick-start.md) chapter is faster.
 ## Clone the repository
 
 ```bash
-git clone https://gitlab-master.nvidia.com/nihalp/cuda-oxide.git
+git clone https://github.com/NVlabs/cuda-oxide.git
 cd cuda-oxide
 ```
 
@@ -117,7 +117,7 @@ build process. `cargo-oxide` handles building it transparently.
 pipeline. Inside the repo, it works via a workspace alias. For standalone use:
 
 ```bash
-cargo install --git https://gitlab-master.nvidia.com/nihalp/cuda-oxide.git cargo-oxide
+cargo install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide
 ```
 
 On first run, `cargo-oxide` automatically fetches and builds the codegen backend

@@ -46,9 +46,9 @@ html_theme_options = {
 
     "icon_links": [
         {
-            "name": "GitLab",
-            "url": "https://gitlab-master.nvidia.com/nihalp/cuda-oxide",
-            "icon": "fa-brands fa-gitlab",
+            "name": "GitHub",
+            "url": "https://github.com/NVlabs/cuda-oxide",
+            "icon": "fa-brands fa-github",
             "type": "fontawesome",
         },
     ],

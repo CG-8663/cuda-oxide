@@ -9,7 +9,7 @@ This section walks through installing cuda-oxide, creating a project, writing a 
 If you haven't already, install the build tool:
 
 ```bash
-cargo install --git https://gitlab-master.nvidia.com/nihalp/cuda-oxide.git cargo-oxide
+cargo install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide
 ```
 
 Verify that your environment is set up correctly:

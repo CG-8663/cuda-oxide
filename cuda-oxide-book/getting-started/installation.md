@@ -109,7 +109,7 @@ The two extra components are required by the codegen backend:
 **For use outside the repo** (your own projects):
 
 ```bash
-cargo install --git https://gitlab-master.nvidia.com/nihalp/cuda-oxide.git cargo-oxide
+cargo install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide
 ```
 
 On first run, `cargo-oxide` will automatically fetch and build the codegen backend. Subsequent runs reuse the cached build.

@@ -11,7 +11,7 @@ Replaces the previous `xtask` pattern with a proper cargo subcommand that works 
 **External users**:
 
 ```bash
-cargo install --git https://gitlab-master.nvidia.com/nihalp/cuda-oxide.git cargo-oxide
+cargo install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide
 ```
 
 On first run, `cargo-oxide` will automatically fetch and build the codegen backend if it's not already available.

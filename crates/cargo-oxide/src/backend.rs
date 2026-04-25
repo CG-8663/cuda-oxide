@@ -141,7 +141,7 @@ fn auto_fetch_and_build() -> PathBuf {
                 "clone",
                 "--depth",
                 "1",
-                "https://gitlab-master.nvidia.com/nihalp/cuda-oxide.git",
+                "https://github.com/NVlabs/cuda-oxide.git",
                 src_dir.to_str().unwrap(),
             ])
             .status()

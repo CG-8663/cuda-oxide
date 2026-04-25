@@ -312,7 +312,7 @@ button.search-button__button {
 }
 
 /* ============================================
-   Navbar Icon Links (GitLab, etc.) - Circular like search/theme buttons
+   Navbar Icon Links (GitHub, etc.) - Circular like search/theme buttons
    ============================================ */
 .navbar-icon-links a.nav-link {
     background-color: var(--pst-color-surface) !important;
@@ -337,7 +337,7 @@ button.search-button__button {
     display: none !important;
 }
 
-.navbar-icon-links .nav-link .fa-gitlab {
+.navbar-icon-links .nav-link .fa-github {
     font-size: 1.15rem;
 }
 
