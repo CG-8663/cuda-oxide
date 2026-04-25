@@ -11,13 +11,18 @@ allow = [
     "BSD-3-Clause",
     "ISC",
     "Unicode-3.0",
-    "Unicode-DFS-2016",
     "Zlib",
-    "BSL-1.0",
-    "OpenSSL",
-    "CC0-1.0",
 ]
 confidence-threshold = 0.8
+
+[[licenses.clarify]]
+name = "cuda-bindings"
+expression = "LicenseRef-NVIDIA"
+license-files = [{ path = "../../LICENSE-NVIDIA", hash = 0x3863c5ac }]
+
+[[licenses.exceptions]]
+allow = ["LicenseRef-NVIDIA"]
+name = "cuda-bindings"
 
 [bans]
 multiple-versions = "warn"
