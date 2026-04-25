@@ -838,8 +838,8 @@ fn translate_call(
     // Skip precondition_check calls - these are UB check assertions that are
     // dead code because we return false for RuntimeChecks(UbChecks).
     // The MIR still contains these calls, but they're in dead branches.
-    if let Some(ref name) = pattern_name {
-        if name.contains("precondition_check") {
+    if let Some(ref name) = pattern_name
+        && name.contains("precondition_check") {
             // Just emit a goto to the target block, skipping the call entirely
             if let Some(target_idx) = target_usize {
                 let actual_prev_op = if let Some(p) = prev_op {
@@ -876,7 +876,6 @@ fn translate_call(
                 ));
             }
         }
-    }
 
     // Handle closure trait method calls (FnOnce::call_once, FnMut::call_mut, Fn::call)
     // These calls pass arguments as a tuple, but the closure body expects unpacked args.
@@ -884,8 +883,8 @@ fn translate_call(
     //
     // MIR shows: <{closure} as FnMut<(u32,)>>::call_mut(self_ref, tuple_args)
     // But the closure body expects: fn(self_ref, unpacked_arg1, unpacked_arg2, ...)
-    if let Some(ref name) = pattern_name {
-        if (name.contains("call_once") || name.contains("call_mut") || name.ends_with("::call"))
+    if let Some(ref name) = pattern_name
+        && (name.contains("call_once") || name.contains("call_mut") || name.ends_with("::call"))
             && substs_contains("Closure")
         {
             return translate_closure_call(
@@ -904,14 +903,13 @@ fn translate_call(
                 legaliser,
             );
         }
-    }
 
     // Handle prof_trigger specially to extract const generic N
-    if let Some(ref name) = pattern_name {
-        if name == "cuda_device::debug::prof_trigger" {
+    if let Some(ref name) = pattern_name
+        && name == "cuda_device::debug::prof_trigger" {
             // Extract the const generic N from the function type
-            if let mir::Operand::Constant(const_op) = func {
-                if let rustc_public::ty::TyKind::RigidTy(rustc_public::ty::RigidTy::FnDef(
+            if let mir::Operand::Constant(const_op) = func
+                && let rustc_public::ty::TyKind::RigidTy(rustc_public::ty::RigidTy::FnDef(
                     _,
                     substs,
                 )) = const_op.const_.ty().kind()
@@ -941,13 +939,11 @@ fn translate_call(
                         );
                     }
                 }
-            }
         }
-    }
 
     // Handle DynamicSharedArray specially to extract the ALIGN const generic
-    if let Some(ref name) = pattern_name {
-        if name.contains("DynamicSharedArray")
+    if let Some(ref name) = pattern_name
+        && name.contains("DynamicSharedArray")
             && (name.contains("::get") || name.contains("::offset"))
         {
             // Extract the ALIGN const generic from the function type
@@ -1009,13 +1005,12 @@ fn translate_call(
                 );
             }
         }
-    }
 
     // Try to dispatch core::sync::atomic intrinsics (std::intrinsics::atomic_*)
     // These use const generics for ordering, so we intercept them here before
     // the regular intrinsic dispatch and extract generics from the func operand.
-    if let Some(ref name) = pattern_name {
-        if intrinsics::atomic::is_core_atomic_intrinsic(name) {
+    if let Some(ref name) = pattern_name
+        && intrinsics::atomic::is_core_atomic_intrinsic(name) {
             return intrinsics::atomic::dispatch_core_intrinsic(
                 ctx,
                 body,
@@ -1031,11 +1026,10 @@ fn translate_call(
                 name,
             );
         }
-    }
 
     // Try to dispatch as intrinsic
-    if let Some(ref name) = pattern_name {
-        if let Some(result) = try_dispatch_intrinsic(
+    if let Some(ref name) = pattern_name
+        && let Some(result) = try_dispatch_intrinsic(
             ctx,
             body,
             name,
@@ -1051,7 +1045,6 @@ fn translate_call(
         )? {
             return Ok(result);
         }
-    }
 
     // Handle diverging calls (calls that never return, like unwrap_failed, panic, etc.)
     // These have no target block because the function never returns.

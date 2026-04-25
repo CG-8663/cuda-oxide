@@ -155,14 +155,13 @@ fn find_closure_generic(generics: &syn::Generics) -> Option<syn::Ident> {
     for param in &generics.params {
         if let syn::GenericParam::Type(type_param) = param {
             for bound in &type_param.bounds {
-                if let syn::TypeParamBound::Trait(trait_bound) = bound {
-                    if let Some(segment) = trait_bound.path.segments.last() {
+                if let syn::TypeParamBound::Trait(trait_bound) = bound
+                    && let Some(segment) = trait_bound.path.segments.last() {
                         let name = segment.ident.to_string();
                         if name == "Fn" || name == "FnMut" || name == "FnOnce" {
                             return Some(type_param.ident.clone());
                         }
                     }
-                }
             }
         }
     }
@@ -177,15 +176,12 @@ fn find_closure_param<'a>(
 ) -> Option<(usize, &'a (&'a Ident, &'a Type))> {
     for (idx, (_name, ty)) in args_info.iter().enumerate() {
         // Check if the type is a simple path matching our closure generic
-        if let Type::Path(type_path) = *ty {
-            if type_path.qself.is_none() {
-                if let Some(segment) = type_path.path.segments.first() {
-                    if type_path.path.segments.len() == 1 && segment.ident == *closure_type_name {
+        if let Type::Path(type_path) = *ty
+            && type_path.qself.is_none()
+                && let Some(segment) = type_path.path.segments.first()
+                    && type_path.path.segments.len() == 1 && segment.ident == *closure_type_name {
                         return Some((idx, &args_info[idx]));
                     }
-                }
-            }
-        }
     }
     None
 }
@@ -203,8 +199,8 @@ fn strip_mut_from_inputs(
             match arg {
                 FnArg::Typed(pat_type) => {
                     let mut new_pat_type = pat_type.clone();
-                    if let Pat::Ident(pat_ident) = &*pat_type.pat {
-                        if pat_ident.mutability.is_some() {
+                    if let Pat::Ident(pat_ident) = &*pat_type.pat
+                        && pat_ident.mutability.is_some() {
                             // Create new PatIdent without mut
                             let new_pat_ident = syn::PatIdent {
                                 attrs: pat_ident.attrs.clone(),
@@ -215,7 +211,6 @@ fn strip_mut_from_inputs(
                             };
                             new_pat_type.pat = Box::new(Pat::Ident(new_pat_ident));
                         }
-                    }
                     FnArg::Typed(new_pat_type)
                 }
                 other => other.clone(),
@@ -250,11 +245,10 @@ fn generate_generic_kernel_no_instantiation(input: ItemFn) -> TokenStream {
         .inputs
         .iter()
         .filter_map(|arg| {
-            if let FnArg::Typed(pat_type) = arg {
-                if let Pat::Ident(pat_ident) = &*pat_type.pat {
+            if let FnArg::Typed(pat_type) = arg
+                && let Pat::Ident(pat_ident) = &*pat_type.pat {
                     return Some((&pat_ident.ident, &*pat_type.ty));
                 }
-            }
             None
         })
         .collect();
@@ -543,11 +537,10 @@ fn generate_generic_kernel(input: ItemFn, instantiate_types: Vec<Type>) -> Token
     let arg_names: Vec<TokenStream2> = args
         .iter()
         .filter_map(|arg| {
-            if let FnArg::Typed(pat_type) = arg {
-                if let Pat::Ident(pat_ident) = &*pat_type.pat {
+            if let FnArg::Typed(pat_type) = arg
+                && let Pat::Ident(pat_ident) = &*pat_type.pat {
                     return Some(quote! { #pat_ident });
                 }
-            }
             None
         })
         .collect();
@@ -957,11 +950,10 @@ fn generate_device_function(mut input: ItemFn) -> TokenStream {
         .inputs
         .iter()
         .filter_map(|arg| {
-            if let FnArg::Typed(pat_type) = arg {
-                if let Pat::Ident(pat_ident) = &*pat_type.pat {
+            if let FnArg::Typed(pat_type) = arg
+                && let Pat::Ident(pat_ident) = &*pat_type.pat {
                     return Some(pat_ident.ident.clone());
                 }
-            }
             None
         })
         .collect();
@@ -1074,11 +1066,10 @@ fn generate_device_extern_block(mut input: ItemForeignMod) -> TokenStream {
                 .inputs
                 .iter()
                 .filter_map(|arg| {
-                    if let syn::FnArg::Typed(pat_type) = arg {
-                        if let syn::Pat::Ident(pat_ident) = &*pat_type.pat {
+                    if let syn::FnArg::Typed(pat_type) = arg
+                        && let syn::Pat::Ident(pat_ident) = &*pat_type.pat {
                             return Some(pat_ident.ident.clone());
                         }
-                    }
                     None
                 })
                 .collect();
@@ -1254,11 +1245,10 @@ impl<'ast> Visit<'ast> for IdentCollector {
         // Track local `let` bindings - they shadow outer variables
         if let syn::Pat::Ident(pat_ident) = &node.pat {
             self.local_bindings.insert(pat_ident.ident.to_string());
-        } else if let syn::Pat::Type(pat_type) = &node.pat {
-            if let syn::Pat::Ident(pat_ident) = &*pat_type.pat {
+        } else if let syn::Pat::Type(pat_type) = &node.pat
+            && let syn::Pat::Ident(pat_ident) = &*pat_type.pat {
                 self.local_bindings.insert(pat_ident.ident.to_string());
             }
-        }
         // Still visit the initializer and body
         syn::visit::visit_local(self, node);
     }

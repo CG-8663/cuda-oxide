@@ -816,8 +816,8 @@ fn strip_device_prefix(name: &str) -> String {
     if let Some(pos) = name.find(FQDN_DEVICE_PREFIX) {
         return name[pos + FQDN_DEVICE_PREFIX.len()..].to_string();
     }
-    if name.starts_with(DEVICE_PREFIX) {
-        return name[DEVICE_PREFIX.len()..].to_string();
+    if let Some(stripped) = name.strip_prefix(DEVICE_PREFIX) {
+        return stripped.to_string();
     }
     name.to_string()
 }

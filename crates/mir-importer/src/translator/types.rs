@@ -131,17 +131,15 @@ pub fn is_rust_type_zst(rust_ty: &rustc_public::ty::Ty) -> bool {
         // Closures with no captures are ZST, closures with captures are not
         rustc_public::ty::TyKind::RigidTy(rustc_public::ty::RigidTy::Closure(_, substs)) => {
             // Check substs[2] which is the tuple of upvar types
-            if substs.0.len() >= 3 {
-                if let rustc_public::ty::GenericArgKind::Type(upvar_tuple_ty) = &substs.0[2] {
-                    if let rustc_public::ty::TyKind::RigidTy(rustc_public::ty::RigidTy::Tuple(
+            if substs.0.len() >= 3
+                && let rustc_public::ty::GenericArgKind::Type(upvar_tuple_ty) = &substs.0[2]
+                    && let rustc_public::ty::TyKind::RigidTy(rustc_public::ty::RigidTy::Tuple(
                         upvar_tys,
                     )) = upvar_tuple_ty.kind()
                     {
                         // ZST if no captures
                         return upvar_tys.is_empty();
                     }
-                }
-            }
             // Default to ZST if we can't determine
             true
         }
@@ -567,9 +565,9 @@ pub fn translate_type(
             let mut field_names = Vec::new();
             let mut field_types = Vec::new();
 
-            if substs.0.len() >= 3 {
-                if let rustc_public::ty::GenericArgKind::Type(upvar_tuple_ty) = &substs.0[2] {
-                    if let rustc_public::ty::TyKind::RigidTy(rustc_public::ty::RigidTy::Tuple(
+            if substs.0.len() >= 3
+                && let rustc_public::ty::GenericArgKind::Type(upvar_tuple_ty) = &substs.0[2]
+                    && let rustc_public::ty::TyKind::RigidTy(rustc_public::ty::RigidTy::Tuple(
                         upvar_tys,
                     )) = upvar_tuple_ty.kind()
                     {
@@ -578,8 +576,6 @@ pub fn translate_type(
                             field_types.push(translate_type(ctx, upvar_ty)?);
                         }
                     }
-                }
-            }
 
             Ok(
                 dialect_mir::types::MirStructType::get(ctx, closure_name, field_names, field_types)

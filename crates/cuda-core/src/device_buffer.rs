@@ -126,7 +126,7 @@ impl<T> DeviceBuffer<T> {
     pub fn from_host(stream: &CudaStream, data: &[T]) -> Result<Self, DriverError> {
         let ctx = stream.context().clone();
         let len = data.len();
-        let num_bytes = len * std::mem::size_of::<T>();
+        let num_bytes = std::mem::size_of_val(data);
 
         let ptr = unsafe { crate::memory::malloc_async(stream.cu_stream(), num_bytes)? };
         unsafe {

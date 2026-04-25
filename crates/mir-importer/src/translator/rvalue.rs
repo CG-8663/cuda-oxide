@@ -655,8 +655,8 @@ pub fn translate_rvalue(
 
             // Case 1: For Ref(*ptr), just want the pointer itself - no load needed.
             // This is because &*ptr = ptr in terms of address.
-            if place.projection.len() == 1 {
-                if let mir::ProjectionElem::Deref = &place.projection[0] {
+            if place.projection.len() == 1
+                && let mir::ProjectionElem::Deref = &place.projection[0] {
                     // For &(*ptr), just return ptr directly without loading
                     let base_place = mir::Place {
                         local: place.local,
@@ -673,7 +673,6 @@ pub fn translate_rvalue(
                     )?;
                     return Ok((None, base_val, last_inserted));
                 }
-            }
 
             // ═══════════════════════════════════════════════════════════════════════
             // Case 2: &(*ptr).field - Reference to nested struct field
@@ -708,9 +707,9 @@ pub fn translate_rvalue(
             //
             // Pattern: Deref followed by Field projection(s)
             // ═══════════════════════════════════════════════════════════════════════
-            if place.projection.len() >= 2 {
-                if let mir::ProjectionElem::Deref = &place.projection[0] {
-                    if let mir::ProjectionElem::Field(field_idx, field_ty) = &place.projection[1] {
+            if place.projection.len() >= 2
+                && let mir::ProjectionElem::Deref = &place.projection[0]
+                    && let mir::ProjectionElem::Field(field_idx, field_ty) = &place.projection[1] {
                         // Get the base pointer (the local variable holding the pointer)
                         let base_place = mir::Place {
                             local: place.local,
@@ -825,8 +824,6 @@ pub fn translate_rvalue(
 
                         return Ok((None, result_val, last_inserted));
                     }
-                }
-            }
 
             // Case 3: bare local reference `&local` / `&mut local`.
             //
@@ -894,8 +891,8 @@ pub fn translate_rvalue(
             // This is the "correct-refs" path: we lean on the alloca slot
             // rather than `MirRefOp`, so a caller mutating through the
             // reference affects the original local.
-            if let Some(slot) = value_map.get_slot(place.local) {
-                if let Some((result_val, last_inserted)) = translate_place_addr_from_slot(
+            if let Some(slot) = value_map.get_slot(place.local)
+                && let Some((result_val, last_inserted)) = translate_place_addr_from_slot(
                     ctx,
                     slot,
                     &place.projection,
@@ -906,7 +903,6 @@ pub fn translate_rvalue(
                 )? {
                     return Ok((None, result_val, last_inserted));
                 }
-            }
 
             // Case 5: Fallback -- reference to a computed value that has no
             // backing slot (e.g. the result of an rvalue expression). Emit
@@ -939,8 +935,8 @@ pub fn translate_rvalue(
             // For other places, we must materialize an address (mir.ref or mir.field_addr).
 
             // Check if the place is a simple Deref: *local
-            if place.projection.len() == 1 {
-                if let mir::ProjectionElem::Deref = &place.projection[0] {
+            if place.projection.len() == 1
+                && let mir::ProjectionElem::Deref = &place.projection[0] {
                     // For &raw mut (*ptr) or &raw const (*ptr), just return ptr directly
                     let base_place = mir::Place {
                         local: place.local,
@@ -957,12 +953,11 @@ pub fn translate_rvalue(
                     )?;
                     return Ok((None, base_val, last_inserted));
                 }
-            }
 
             // Pattern: Deref followed by Field projection(s) - compute field address
-            if place.projection.len() >= 2 {
-                if let mir::ProjectionElem::Deref = &place.projection[0] {
-                    if let mir::ProjectionElem::Field(field_idx, field_ty) = &place.projection[1] {
+            if place.projection.len() >= 2
+                && let mir::ProjectionElem::Deref = &place.projection[0]
+                    && let mir::ProjectionElem::Field(field_idx, field_ty) = &place.projection[1] {
                         let base_place = mir::Place {
                             local: place.local,
                             projection: vec![],
@@ -1055,8 +1050,6 @@ pub fn translate_rvalue(
 
                         return Ok((None, result_val, last_inserted));
                     }
-                }
-            }
 
             // For other places, translate to a value and materialize an address.
             let (val, last_inserted) =
@@ -1939,11 +1932,9 @@ pub fn translate_operand(
                                 if let Some(num_str) = b_str
                                     .strip_prefix("Some(")
                                     .and_then(|s| s.strip_suffix(')'))
-                                {
-                                    if let Ok(byte) = num_str.parse::<u8>() {
+                                    && let Ok(byte) = num_str.parse::<u8>() {
                                         bytes[i] = byte;
                                     }
-                                }
                             }
                             f64::from_le_bytes(bytes)
                         } else {
@@ -2002,11 +1993,9 @@ pub fn translate_operand(
                                 if let Some(num_str) = b_str
                                     .strip_prefix("Some(")
                                     .and_then(|s| s.strip_suffix(')'))
-                                {
-                                    if let Ok(byte) = num_str.parse::<u8>() {
+                                    && let Ok(byte) = num_str.parse::<u8>() {
                                         bytes[i] = byte;
                                     }
-                                }
                             }
                             f32::from_le_bytes(bytes)
                         } else {
@@ -2173,11 +2162,9 @@ pub fn translate_operand(
                             if let Some(num_str) = b_str
                                 .strip_prefix("Some(")
                                 .and_then(|s| s.strip_suffix(')'))
-                            {
-                                if let Ok(byte) = num_str.parse::<u8>() {
+                                && let Ok(byte) = num_str.parse::<u8>() {
                                     bytes.push(byte);
                                 }
-                            }
                         }
                         let mut res: u64 = 0;
                         for (i, byte) in bytes.iter().enumerate() {
@@ -2260,11 +2247,9 @@ pub fn translate_operand(
                             if let Some(num_str) = b_str
                                 .strip_prefix("Some(")
                                 .and_then(|s| s.strip_suffix(')'))
-                            {
-                                if let Ok(byte) = num_str.parse::<u8>() {
+                                && let Ok(byte) = num_str.parse::<u8>() {
                                     bytes.push(byte);
                                 }
-                            }
                         }
 
                         let mut res: u64 = 0;
@@ -2452,13 +2437,13 @@ pub fn translate_place(
             let val = Value::OpResult { op, res_idx: 0 };
             return Ok((val, Some(op)));
         }
-        return input_err!(
+        input_err!(
             loc,
             TranslationErr::unsupported(format!(
                 "Local {} has no alloca slot and is not a ZST",
                 Into::<usize>::into(local)
             ))
-        );
+        )
     } else {
         // Handle projections (place.field, place[index], etc.)
         // For now, handle tuple field projections (_3.0, _3.1, etc.)
@@ -2969,14 +2954,9 @@ fn apply_deref_projection(
                 .downcast_ref::<dialect_mir::types::MirTupleType>()
                 .is_some_and(|tt| tt.get_types().is_empty());
             Some(DerefKind::Ptr { pointee, is_zst })
-        } else if let Some(slice_ty) = ptr_ty_ref.downcast_ref::<dialect_mir::types::MirSliceType>()
-        {
-            Some(DerefKind::Slice {
+        } else { ptr_ty_ref.downcast_ref::<dialect_mir::types::MirSliceType>().map(|slice_ty| DerefKind::Slice {
                 element_ty: slice_ty.element_type(),
-            })
-        } else {
-            None
-        }
+            }) }
     };
 
     let deref_kind = deref_kind.ok_or_else(|| {
@@ -3182,7 +3162,7 @@ fn apply_enum_field_projection(
 /// - `ConstantIndex {offset, from_end: false, ..}` → `MirConstantOp` + [`MirArrayElementAddrOp`]
 /// - `Index(local)`    → `load_local(local)` + [`MirArrayElementAddrOp`]
 /// - `Deref`           → load the pointer; subsequent projections apply to
-///                       the pointee.
+///   the pointee.
 ///
 /// Returns `Ok(Some((addr, last_op)))` on success, `Ok(None)` if the
 /// projection chain contains an element this helper doesn't know how to
@@ -3806,7 +3786,7 @@ fn translate_ptr_to_array_constant(
     let element_byte_size: usize = {
         let elem_obj = element_ty_ptr.deref(ctx);
         if let Some(int_ty) = elem_obj.downcast_ref::<IntegerType>() {
-            (int_ty.width() as usize + 7) / 8
+            (int_ty.width() as usize).div_ceil(8)
         } else if elem_obj.is::<FP32Type>() {
             4
         } else if elem_obj.is::<FP64Type>() {
@@ -5351,7 +5331,7 @@ fn enum_variant_field_offsets(
                 rustc_public::abi::FieldsShape::Primitive => Ok(vec![]),
                 rustc_public::abi::FieldsShape::Arbitrary { offsets } => Ok(offsets
                     .iter()
-                    .map(|offset| offset.bytes() as usize)
+                    .map(|offset| offset.bytes())
                     .collect()),
                 other => input_err!(
                     loc,
@@ -5368,7 +5348,7 @@ fn enum_variant_field_offsets(
                 variant
                     .offsets
                     .iter()
-                    .map(|offset| offset.bytes() as usize)
+                    .map(|offset| offset.bytes())
                     .collect()
             })
             .ok_or_else(|| {
@@ -5413,7 +5393,7 @@ fn read_enum_tag_value(
         }
         rustc_public::abi::FieldsShape::Arbitrary { offsets } => offsets
             .get(tag_field)
-            .map(|offset| offset.bytes() as usize)
+            .map(|offset| offset.bytes())
             .ok_or_else(|| {
                 input_error_noloc!(TranslationErr::unsupported(format!(
                     "Enum tag field {} out of bounds for {} layout fields",
@@ -5524,8 +5504,8 @@ pub(crate) fn extract_enum_discriminant(
                 return val as usize;
             }
             // If read_uint fails, try raw_bytes
-            if let Ok(bytes) = alloc.raw_bytes() {
-                if !bytes.is_empty() {
+            if let Ok(bytes) = alloc.raw_bytes()
+                && !bytes.is_empty() {
                     // Convert bytes to usize (little-endian)
                     let mut value: usize = 0;
                     for (i, &byte) in bytes.iter().take(8).enumerate() {
@@ -5533,7 +5513,6 @@ pub(crate) fn extract_enum_discriminant(
                     }
                     return value;
                 }
-            }
             // Last resort: bytes field directly
             if !alloc.bytes.is_empty() {
                 let mut value: usize = 0;
@@ -5649,8 +5628,8 @@ fn extract_shared_array_info(
     fn parse_const_value(c: &rustc_public::ty::TyConst) -> Option<usize> {
         let const_str = format!("{:?}", c);
         // Parse the bytes from the debug string
-        if let Some(bytes_part) = const_str.split("bytes: [").nth(1) {
-            if let Some(bytes_end) = bytes_part.split(']').next() {
+        if let Some(bytes_part) = const_str.split("bytes: [").nth(1)
+            && let Some(bytes_end) = bytes_part.split(']').next() {
                 let mut bytes = Vec::new();
                 for byte_str in bytes_end.split(',') {
                     if bytes.len() >= 8 {
@@ -5660,11 +5639,9 @@ fn extract_shared_array_info(
                     if let Some(num_str) = b_str
                         .strip_prefix("Some(")
                         .and_then(|s| s.strip_suffix(')'))
-                    {
-                        if let Ok(byte) = num_str.parse::<u8>() {
+                        && let Ok(byte) = num_str.parse::<u8>() {
                             bytes.push(byte);
                         }
-                    }
                 }
                 // Convert bytes to usize (little-endian)
                 let mut value: usize = 0;
@@ -5673,7 +5650,6 @@ fn extract_shared_array_info(
                 }
                 return Some(value);
             }
-        }
         None
     }
 

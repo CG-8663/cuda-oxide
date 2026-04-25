@@ -35,7 +35,7 @@ impl LaunchConfig {
     /// directly to element index.
     pub fn for_num_elems(n: u32) -> Self {
         const DEFAULT_BLOCK_SIZE: u32 = 256;
-        let grid_x = (n + DEFAULT_BLOCK_SIZE - 1) / DEFAULT_BLOCK_SIZE;
+        let grid_x = n.div_ceil(DEFAULT_BLOCK_SIZE);
         LaunchConfig {
             grid_dim: (grid_x, 1, 1),
             block_dim: (DEFAULT_BLOCK_SIZE, 1, 1),
