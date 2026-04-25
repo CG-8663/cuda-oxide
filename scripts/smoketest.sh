@@ -16,9 +16,6 @@
 #                   sufficient.
 #   wgmma        -- Hopper only (sm_90a). On Hopper require execution;
 #                   elsewhere PTX compilation is sufficient.
-#   collectives  -- multi-GPU P2P required. With peer access require
-#                   execution; on single-GPU/non-P2P boxes PTX generation
-#                   is sufficient.
 #   ltoir        -- runs with `--emit-nvvm-ir --arch=<host>`; the host
 #                   compute capability is detected via `nvidia-smi` so the
 #                   resulting cubin actually loads. Execution must succeed
@@ -38,14 +35,12 @@ set -uo pipefail
 
 TCGEN05_EXAMPLES=(gemm_sol tcgen05 tcgen05_matmul)
 WGMMA_EXAMPLES=(wgmma)
-COLLECTIVES_EXAMPLES=(oxide_collectives_ping_pong)
 LTOIR_EXAMPLES=(cpp_consumes_rust_device device_ffi_test mathdx_ffi_test)
 
 classify() {
     local ex="$1" cat
     for cat in "${TCGEN05_EXAMPLES[@]}";     do [[ "$ex" == "$cat" ]] && { echo tcgen05;     return; }; done
     for cat in "${WGMMA_EXAMPLES[@]}";       do [[ "$ex" == "$cat" ]] && { echo wgmma;       return; }; done
-    for cat in "${COLLECTIVES_EXAMPLES[@]}"; do [[ "$ex" == "$cat" ]] && { echo collectives; return; }; done
     for cat in "${LTOIR_EXAMPLES[@]}";       do [[ "$ex" == "$cat" ]] && { echo ltoir;       return; }; done
     [[ "$ex" == "error" ]] && { echo error; return; }
     echo standard
@@ -271,27 +266,6 @@ verdict_wgmma() {
     return 1
 }
 
-verdict_collectives() {
-    local ex="$1" log="$2" ec="$3"
-    local ptx="crates/rustc-codegen-cuda/examples/${ex}/${ex}.ptx"
-    if [[ ${ec} -gt 128 ]]; then echo "FAIL (crashed, signal $((ec - 128)))"; return 1; fi
-    if [[ ${ec} -ne 0 ]]; then   echo "FAIL (collectives, exit=${ec})";       return 1; fi
-    if grep -qE 'skipping:' "${log}"; then
-        if [[ -f "${ptx}" ]]; then
-            echo "PASS (collectives, PTX compiled)"
-            return 0
-        fi
-        echo "FAIL (collectives, PTX not generated)"
-        return 1
-    fi
-    if grep -qE 'SUCCESS|PASS|Complete' "${log}"; then
-        echo "PASS (collectives, executed)"
-        return 0
-    fi
-    echo "FAIL (collectives, no success marker)"
-    return 1
-}
-
 verdict_ltoir() {
     local ex="$1" log="$2" ec="$3"
     local ll_file="crates/rustc-codegen-cuda/examples/${ex}/${ex}.ll"
@@ -351,12 +325,6 @@ for ex in "${selected[@]}"; do
     log="${log_dir}/${ex}.log"
     : > "${log}"
 
-    # collectives: remove any stale PTX first; verdict logic checks for
-    # regeneration.
-    if [[ "${cat}" == "collectives" ]]; then
-        rm -f "crates/rustc-codegen-cuda/examples/${ex}/${ex}.ptx"
-    fi
-
     if [[ ${VERBOSE} -eq 1 ]]; then
         printf "%s[%2d/%2d] %s (%s)%s\n" "${C_BOLD}" "${i}" "${total}" "${ex}" "${cat}" "${C_RESET}"
     else
@@ -372,7 +340,6 @@ for ex in "${selected[@]}"; do
         error)       verdict="$(verdict_error       "${log}" "${ec}")"        && status=0 || status=$? ;;
         tcgen05)     verdict="$(verdict_tcgen05     "${log}" "${ec}")"        && status=0 || status=$? ;;
         wgmma)       verdict="$(verdict_wgmma       "${log}" "${ec}")"        && status=0 || status=$? ;;
-        collectives) verdict="$(verdict_collectives "${ex}" "${log}" "${ec}")" && status=0 || status=$? ;;
         ltoir)       verdict="$(verdict_ltoir       "${ex}" "${log}" "${ec}")" && status=0 || status=$? ;;
         standard)    verdict="$(verdict_standard    "${log}" "${ec}")"        && status=0 || status=$? ;;
         *)           verdict="FAIL (unknown category: ${cat})"; status=1 ;;

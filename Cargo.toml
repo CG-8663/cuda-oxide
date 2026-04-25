@@ -15,14 +15,13 @@ members = [
     "crates/cuda-bindings",
     "crates/cuda-core",
     "crates/cuda-async",
-    "crates/oxide-collectives",
 ]
 
 [workspace.package]
 edition = "2024"
 authors = ["Nihal Pasham <nihalp@nvidia.com>"]
 license = "Apache-2.0"
-repository = "https://gitlab-master.nvidia.com/nihalp/cuda-oxide.git"
+repository = "https://github.com/NVlabs/cuda-oxide.git"
 
 # Note: crates/rustc-codegen-cuda is NOT a workspace member because it requires
 # special rustc nightly features and a different build process.
@@ -46,7 +45,6 @@ cuda-macros = { path = "crates/cuda-macros" }
 cuda-bindings = { path = "crates/cuda-bindings" }
 cuda-core = { path = "crates/cuda-core" }
 cuda-async = { path = "crates/cuda-async" }
-oxide-collectives = { path = "crates/oxide-collectives" }
 
 # Common dependencies
 futures = "0.3"
