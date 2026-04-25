@@ -272,7 +272,7 @@ verdict_ltoir() {
     if [[ ${ec} -gt 128 ]]; then echo "FAIL (crashed, signal $((ec - 128)))"; return 1; fi
     # `skipping:` marker -- the example opted out (e.g. mathdx_ffi_test with
     # MATHDX_ROOT unset). Accept as pass so long as the cuda-oxide side
-    # still produced NVVM IR. Mirrors the collectives verdict.
+    # still produced NVVM IR.
     if grep -qE 'skipping:' "${log}"; then
         if [[ -f "${ll_file}" ]]; then
             echo "PASS (LTOIR, skipped: NVVM IR generated)"

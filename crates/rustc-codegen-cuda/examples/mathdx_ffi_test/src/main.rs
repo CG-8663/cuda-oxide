@@ -847,8 +847,7 @@ fn main() {
     // Preflight: skip cleanly if the MathDx SDK is not available on this
     // host. The smoketest's LTOIR verdict recognises the `skipping:` prefix
     // and treats this as PASS so long as the cuda-oxide NVVM IR (.ll) was
-    // generated (which happens before `cargo run` is invoked). Matches the
-    // `oxide_collectives_ping_pong` pattern.
+    // generated (which happens before `cargo run` is invoked).
     if find_mathdx_root().is_none() {
         println!("skipping: MathDx SDK not found");
         println!();

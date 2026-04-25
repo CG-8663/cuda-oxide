@@ -263,7 +263,7 @@ cargo oxide run gemm_sol
 
 ## Documentation
 
-**WIP:** 🚧 🚧 The **[cuda-oxide book](https://cuda-oxide-106262.gitlab-master-pages.nvidia.com/index.html)** is the primary reference for the project. It covers SIMT kernel authoring in Rust, synchronous and asynchronous GPU programming, the compiler architecture, and more.
+**WIP:** 🚧 🚧 The **[cuda-oxide book](https://nvlabs.github.io/cuda-oxide/)** is the primary reference for the project. It covers SIMT kernel authoring in Rust, synchronous and asynchronous GPU programming, the compiler architecture, and more.
 
 To build and serve the book locally, see [cuda-oxide-book/README.md](./cuda-oxide-book/README.md).
 

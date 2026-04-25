@@ -50,7 +50,6 @@
 //! │   │   │     - Collect all reachable functions from:                 │     │     │
 //! │   │   │       • Local crate                                         │     │     │
 //! │   │   │       • cuda_device (intrinsics)                              │     │     │
-//! │   │   │       • hematite_tensors (abstractions)                     │     │     │
 //! │   │   │       • core (iterators, Option, etc.)                      │     │     │
 //! │   │   │     - Filter out: fmt::*, panicking::*, intrinsic stubs     │     │     │
 //! │   │   └─────────────────────────────────────────────────────────────┘     │     │
@@ -171,7 +170,7 @@
 //! Kernel crates MUST use `#![no_std]`. This is enforced through:
 //!
 //! 1. **Crate filtering in collector**: Only functions from local crate, `cuda_device`,
-//!    `hematite_tensors`, and `core` are collected for device compilation
+//!    and `core` are collected for device compilation
 //! 2. **PTX link errors**: Calls to `std` functions will fail at PTX generation
 //!    because those functions aren't collected
 //!
@@ -184,7 +183,6 @@
 //! │   │ local (user's kernel code) │      │ std (OS, I/O, threads)     │            │
 //! │   │ cuda_device (GPU intrinsics) │      │ Everything else            │            │
 //! │   │ alloc (if allocator set)   │      │                            │            │
-//! │   │ hematite_tensors           │      │                            │            │
 //! │   │ core (iter, Option, etc.)  │      │                            │            │
 //! │   └────────────────────────────┘      └────────────────────────────┘            │
 //! │                                                                                 │

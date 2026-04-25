@@ -222,7 +222,6 @@ enforces rules about which crates are allowed in device code:
 | :-------------------- | :------------------------- | :------------------------------------------- |
 | Local crate           | Allowed                    | Your kernel code                             |
 | `cuda_device`         | Allowed                    | GPU intrinsics (stubs filtered -- see below) |
-| `hematite_tensors`    | Allowed                    | Tensor abstractions                          |
 | `core`                | Allowed                    | `no_std` standard library                    |
 | Other `no_std` crates | Allowed                    | Any crate in the dependency tree             |
 | `std`                 | **Forbidden**              | Compile-time error                           |
