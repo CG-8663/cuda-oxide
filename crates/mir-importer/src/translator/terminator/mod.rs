@@ -839,43 +839,44 @@ fn translate_call(
     // dead code because we return false for RuntimeChecks(UbChecks).
     // The MIR still contains these calls, but they're in dead branches.
     if let Some(ref name) = pattern_name
-        && name.contains("precondition_check") {
-            // Just emit a goto to the target block, skipping the call entirely
-            if let Some(target_idx) = target_usize {
-                let actual_prev_op = if let Some(p) = prev_op {
-                    p
-                } else {
-                    // Create a dummy i1 constant (false) as a placeholder operation
-                    use pliron::builtin::attributes::IntegerAttr;
-                    use pliron::utils::apint::APInt;
-                    use std::num::NonZeroUsize;
+        && name.contains("precondition_check")
+    {
+        // Just emit a goto to the target block, skipping the call entirely
+        if let Some(target_idx) = target_usize {
+            let actual_prev_op = if let Some(p) = prev_op {
+                p
+            } else {
+                // Create a dummy i1 constant (false) as a placeholder operation
+                use pliron::builtin::attributes::IntegerAttr;
+                use pliron::utils::apint::APInt;
+                use std::num::NonZeroUsize;
 
-                    let bool_ty = IntegerType::get(ctx, 1, Signedness::Signless);
-                    let dummy = Operation::new(
-                        ctx,
-                        MirConstantOp::get_concrete_op_info(),
-                        vec![bool_ty.into()],
-                        vec![],
-                        vec![],
-                        0,
-                    );
-                    dummy.deref_mut(ctx).set_loc(loc.clone());
-                    let const_op = MirConstantOp::new(dummy);
-                    let false_val = APInt::from_u64(0, NonZeroUsize::new(1).unwrap());
-                    const_op.set_attr_value(ctx, IntegerAttr::new(bool_ty, false_val));
-                    let dummy = const_op.get_operation();
-                    dummy.insert_at_front(block_ptr, ctx);
-                    dummy
-                };
-                return Ok(helpers::emit_goto(
+                let bool_ty = IntegerType::get(ctx, 1, Signedness::Signless);
+                let dummy = Operation::new(
                     ctx,
-                    target_idx,
-                    actual_prev_op,
-                    block_map,
-                    loc,
-                ));
-            }
+                    MirConstantOp::get_concrete_op_info(),
+                    vec![bool_ty.into()],
+                    vec![],
+                    vec![],
+                    0,
+                );
+                dummy.deref_mut(ctx).set_loc(loc.clone());
+                let const_op = MirConstantOp::new(dummy);
+                let false_val = APInt::from_u64(0, NonZeroUsize::new(1).unwrap());
+                const_op.set_attr_value(ctx, IntegerAttr::new(bool_ty, false_val));
+                let dummy = const_op.get_operation();
+                dummy.insert_at_front(block_ptr, ctx);
+                dummy
+            };
+            return Ok(helpers::emit_goto(
+                ctx,
+                target_idx,
+                actual_prev_op,
+                block_map,
+                loc,
+            ));
         }
+    }
 
     // Handle closure trait method calls (FnOnce::call_once, FnMut::call_mut, Fn::call)
     // These calls pass arguments as a tuple, but the closure body expects unpacked args.
@@ -885,13 +886,95 @@ fn translate_call(
     // But the closure body expects: fn(self_ref, unpacked_arg1, unpacked_arg2, ...)
     if let Some(ref name) = pattern_name
         && (name.contains("call_once") || name.contains("call_mut") || name.ends_with("::call"))
-            && substs_contains("Closure")
+        && substs_contains("Closure")
+    {
+        return translate_closure_call(
+            ctx,
+            body,
+            &call_name,
+            &func_ret_ty,
+            args,
+            destination,
+            &target_usize,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+            legaliser,
+        );
+    }
+
+    // Handle prof_trigger specially to extract const generic N
+    if let Some(ref name) = pattern_name
+        && name == "cuda_device::debug::prof_trigger"
+    {
+        // Extract the const generic N from the function type
+        if let mir::Operand::Constant(const_op) = func
+            && let rustc_public::ty::TyKind::RigidTy(rustc_public::ty::RigidTy::FnDef(_, substs)) =
+                const_op.const_.ty().kind()
         {
-            return translate_closure_call(
+            // The const generic N is the first generic argument
+            if let Some(rustc_public::ty::GenericArgKind::Const(c)) = substs.0.first() {
+                use rustc_public::ty::TyConstKind;
+
+                let event_id = match c.kind() {
+                    TyConstKind::Value(_, alloc) => {
+                        // Read the allocation bytes (little-endian u32)
+                        alloc.read_uint().unwrap_or(0) as u32
+                    }
+                    _ => {
+                        // Try eval_target_usize as fallback
+                        c.eval_target_usize().unwrap_or(0) as u32
+                    }
+                };
+                return intrinsics::debug::emit_prof_trigger(
+                    ctx,
+                    event_id,
+                    &target_usize,
+                    block_ptr,
+                    prev_op,
+                    block_map,
+                    loc,
+                );
+            }
+        }
+    }
+
+    // Handle DynamicSharedArray specially to extract the ALIGN const generic
+    if let Some(ref name) = pattern_name
+        && name.contains("DynamicSharedArray")
+        && (name.contains("::get") || name.contains("::offset"))
+    {
+        // Extract the ALIGN const generic from the function type
+        // DynamicSharedArray<T, ALIGN> has T as first generic, ALIGN as second
+        let alignment = if let mir::Operand::Constant(const_op) = func {
+            if let rustc_public::ty::TyKind::RigidTy(rustc_public::ty::RigidTy::FnDef(_, substs)) =
+                const_op.const_.ty().kind()
+            {
+                // The ALIGN const generic is the second generic argument (index 1)
+                // First is T (type), second is ALIGN (const)
+                if let Some(rustc_public::ty::GenericArgKind::Const(c)) = substs.0.get(1) {
+                    use rustc_public::ty::TyConstKind;
+                    match c.kind() {
+                        TyConstKind::Value(_, alloc) => alloc.read_uint().unwrap_or(16) as u64,
+                        _ => c.eval_target_usize().unwrap_or(16),
+                    }
+                } else {
+                    16 // Default alignment (matches nvcc)
+                }
+            } else {
+                16
+            }
+        } else {
+            16
+        };
+
+        if name.contains("::get") {
+            // Both get() and get_raw() use the same handler with offset 0
+            return intrinsics::memory::emit_dynamic_shared_get(
                 ctx,
                 body,
-                &call_name,
-                &func_ret_ty,
                 args,
                 destination,
                 &target_usize,
@@ -900,132 +983,48 @@ fn translate_call(
                 value_map,
                 block_map,
                 loc,
-                legaliser,
+                0,         // byte_offset = 0 for get() and get_raw()
+                alignment, // User-specified or default alignment
+            );
+        } else if name.contains("::offset") {
+            // DynamicSharedArray::offset(byte_offset) - get pointer at byte offset
+            return intrinsics::memory::emit_dynamic_shared_offset(
+                ctx,
+                body,
+                args,
+                destination,
+                &target_usize,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+                alignment, // User-specified or default alignment
             );
         }
-
-    // Handle prof_trigger specially to extract const generic N
-    if let Some(ref name) = pattern_name
-        && name == "cuda_device::debug::prof_trigger" {
-            // Extract the const generic N from the function type
-            if let mir::Operand::Constant(const_op) = func
-                && let rustc_public::ty::TyKind::RigidTy(rustc_public::ty::RigidTy::FnDef(
-                    _,
-                    substs,
-                )) = const_op.const_.ty().kind()
-                {
-                    // The const generic N is the first generic argument
-                    if let Some(rustc_public::ty::GenericArgKind::Const(c)) = substs.0.first() {
-                        use rustc_public::ty::TyConstKind;
-
-                        let event_id = match c.kind() {
-                            TyConstKind::Value(_, alloc) => {
-                                // Read the allocation bytes (little-endian u32)
-                                alloc.read_uint().unwrap_or(0) as u32
-                            }
-                            _ => {
-                                // Try eval_target_usize as fallback
-                                c.eval_target_usize().unwrap_or(0) as u32
-                            }
-                        };
-                        return intrinsics::debug::emit_prof_trigger(
-                            ctx,
-                            event_id,
-                            &target_usize,
-                            block_ptr,
-                            prev_op,
-                            block_map,
-                            loc,
-                        );
-                    }
-                }
-        }
-
-    // Handle DynamicSharedArray specially to extract the ALIGN const generic
-    if let Some(ref name) = pattern_name
-        && name.contains("DynamicSharedArray")
-            && (name.contains("::get") || name.contains("::offset"))
-        {
-            // Extract the ALIGN const generic from the function type
-            // DynamicSharedArray<T, ALIGN> has T as first generic, ALIGN as second
-            let alignment = if let mir::Operand::Constant(const_op) = func {
-                if let rustc_public::ty::TyKind::RigidTy(rustc_public::ty::RigidTy::FnDef(
-                    _,
-                    substs,
-                )) = const_op.const_.ty().kind()
-                {
-                    // The ALIGN const generic is the second generic argument (index 1)
-                    // First is T (type), second is ALIGN (const)
-                    if let Some(rustc_public::ty::GenericArgKind::Const(c)) = substs.0.get(1) {
-                        use rustc_public::ty::TyConstKind;
-                        match c.kind() {
-                            TyConstKind::Value(_, alloc) => alloc.read_uint().unwrap_or(16) as u64,
-                            _ => c.eval_target_usize().unwrap_or(16),
-                        }
-                    } else {
-                        16 // Default alignment (matches nvcc)
-                    }
-                } else {
-                    16
-                }
-            } else {
-                16
-            };
-
-            if name.contains("::get") {
-                // Both get() and get_raw() use the same handler with offset 0
-                return intrinsics::memory::emit_dynamic_shared_get(
-                    ctx,
-                    body,
-                    args,
-                    destination,
-                    &target_usize,
-                    block_ptr,
-                    prev_op,
-                    value_map,
-                    block_map,
-                    loc,
-                    0,         // byte_offset = 0 for get() and get_raw()
-                    alignment, // User-specified or default alignment
-                );
-            } else if name.contains("::offset") {
-                // DynamicSharedArray::offset(byte_offset) - get pointer at byte offset
-                return intrinsics::memory::emit_dynamic_shared_offset(
-                    ctx,
-                    body,
-                    args,
-                    destination,
-                    &target_usize,
-                    block_ptr,
-                    prev_op,
-                    value_map,
-                    block_map,
-                    loc,
-                    alignment, // User-specified or default alignment
-                );
-            }
-        }
+    }
 
     // Try to dispatch core::sync::atomic intrinsics (std::intrinsics::atomic_*)
     // These use const generics for ordering, so we intercept them here before
     // the regular intrinsic dispatch and extract generics from the func operand.
     if let Some(ref name) = pattern_name
-        && intrinsics::atomic::is_core_atomic_intrinsic(name) {
-            return intrinsics::atomic::dispatch_core_intrinsic(
-                ctx,
-                body,
-                func,
-                args,
-                destination,
-                &target_usize,
-                block_ptr,
-                prev_op,
-                value_map,
-                block_map,
-                loc,
-                name,
-            );
-        }
+        && intrinsics::atomic::is_core_atomic_intrinsic(name)
+    {
+        return intrinsics::atomic::dispatch_core_intrinsic(
+            ctx,
+            body,
+            func,
+            args,
+            destination,
+            &target_usize,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+            name,
+        );
+    }
 
     // Try to dispatch as intrinsic
     if let Some(ref name) = pattern_name
@@ -1042,9 +1041,10 @@ fn translate_call(
             block_map,
             loc.clone(),
             &substs_contains,
-        )? {
-            return Ok(result);
-        }
+        )?
+    {
+        return Ok(result);
+    }
 
     // Handle diverging calls (calls that never return, like unwrap_failed, panic, etc.)
     // These have no target block because the function never returns.

@@ -656,23 +656,17 @@ pub fn translate_rvalue(
             // Case 1: For Ref(*ptr), just want the pointer itself - no load needed.
             // This is because &*ptr = ptr in terms of address.
             if place.projection.len() == 1
-                && let mir::ProjectionElem::Deref = &place.projection[0] {
-                    // For &(*ptr), just return ptr directly without loading
-                    let base_place = mir::Place {
-                        local: place.local,
-                        projection: vec![],
-                    };
-                    let (base_val, last_inserted) = translate_place(
-                        ctx,
-                        body,
-                        &base_place,
-                        value_map,
-                        block_ptr,
-                        prev_op,
-                        loc,
-                    )?;
-                    return Ok((None, base_val, last_inserted));
-                }
+                && let mir::ProjectionElem::Deref = &place.projection[0]
+            {
+                // For &(*ptr), just return ptr directly without loading
+                let base_place = mir::Place {
+                    local: place.local,
+                    projection: vec![],
+                };
+                let (base_val, last_inserted) =
+                    translate_place(ctx, body, &base_place, value_map, block_ptr, prev_op, loc)?;
+                return Ok((None, base_val, last_inserted));
+            }
 
             // ═══════════════════════════════════════════════════════════════════════
             // Case 2: &(*ptr).field - Reference to nested struct field
@@ -709,121 +703,116 @@ pub fn translate_rvalue(
             // ═══════════════════════════════════════════════════════════════════════
             if place.projection.len() >= 2
                 && let mir::ProjectionElem::Deref = &place.projection[0]
-                    && let mir::ProjectionElem::Field(field_idx, field_ty) = &place.projection[1] {
-                        // Get the base pointer (the local variable holding the pointer)
-                        let base_place = mir::Place {
-                            local: place.local,
-                            projection: vec![],
-                        };
-                        let (ptr_val, mut last_inserted) = translate_place(
-                            ctx,
-                            body,
-                            &base_place,
-                            value_map,
-                            block_ptr,
-                            prev_op,
-                            loc.clone(),
-                        )?;
+                && let mir::ProjectionElem::Field(field_idx, field_ty) = &place.projection[1]
+            {
+                // Get the base pointer (the local variable holding the pointer)
+                let base_place = mir::Place {
+                    local: place.local,
+                    projection: vec![],
+                };
+                let (ptr_val, mut last_inserted) = translate_place(
+                    ctx,
+                    body,
+                    &base_place,
+                    value_map,
+                    block_ptr,
+                    prev_op,
+                    loc.clone(),
+                )?;
 
-                        // Get the field type
-                        let field_type = super::types::translate_type(ctx, field_ty)?;
+                // Get the field type
+                let field_type = super::types::translate_type(ctx, field_ty)?;
 
-                        // Determine if this is a mutable reference
-                        let is_mutable = matches!(borrow_kind, mir::BorrowKind::Mut { .. });
+                // Determine if this is a mutable reference
+                let is_mutable = matches!(borrow_kind, mir::BorrowKind::Mut { .. });
 
-                        // Create result pointer type
-                        let result_ptr_ty = dialect_mir::types::MirPtrType::get_generic(
-                            ctx, field_type, is_mutable,
-                        );
+                // Create result pointer type
+                let result_ptr_ty =
+                    dialect_mir::types::MirPtrType::get_generic(ctx, field_type, is_mutable);
 
-                        use dialect_mir::ops::MirFieldAddrOp;
-                        let field_addr_op = Operation::new(
-                            ctx,
-                            MirFieldAddrOp::get_concrete_op_info(),
-                            vec![result_ptr_ty.into()],
-                            vec![ptr_val],
-                            vec![],
-                            0,
-                        );
-                        field_addr_op.deref_mut(ctx).set_loc(loc.clone());
+                use dialect_mir::ops::MirFieldAddrOp;
+                let field_addr_op = Operation::new(
+                    ctx,
+                    MirFieldAddrOp::get_concrete_op_info(),
+                    vec![result_ptr_ty.into()],
+                    vec![ptr_val],
+                    vec![],
+                    0,
+                );
+                field_addr_op.deref_mut(ctx).set_loc(loc.clone());
 
-                        let mir_field_addr_op = MirFieldAddrOp::new(field_addr_op);
-                        mir_field_addr_op.set_attr_field_index(
-                            ctx,
-                            dialect_mir::attributes::FieldIndexAttr(*field_idx as u32),
-                        );
+                let mir_field_addr_op = MirFieldAddrOp::new(field_addr_op);
+                mir_field_addr_op.set_attr_field_index(
+                    ctx,
+                    dialect_mir::attributes::FieldIndexAttr(*field_idx as u32),
+                );
 
-                        // Insert the operation
-                        if let Some(prev) = last_inserted {
-                            field_addr_op.insert_after(ctx, prev);
-                        } else if let Some(prev) = prev_op {
-                            field_addr_op.insert_after(ctx, prev);
-                        } else {
-                            field_addr_op.insert_at_front(block_ptr, ctx);
-                        }
-                        last_inserted = Some(field_addr_op);
+                // Insert the operation
+                if let Some(prev) = last_inserted {
+                    field_addr_op.insert_after(ctx, prev);
+                } else if let Some(prev) = prev_op {
+                    field_addr_op.insert_after(ctx, prev);
+                } else {
+                    field_addr_op.insert_at_front(block_ptr, ctx);
+                }
+                last_inserted = Some(field_addr_op);
 
-                        // Get the result value
-                        let mut result_val = field_addr_op.deref(ctx).get_result(0);
+                // Get the result value
+                let mut result_val = field_addr_op.deref(ctx).get_result(0);
 
-                        // Handle additional projections after the first field
-                        // e.g., &(*ptr).field1.field2
-                        if place.projection.len() > 2 {
-                            for proj in &place.projection[2..] {
-                                match proj {
-                                    mir::ProjectionElem::Field(
-                                        nested_field_idx,
-                                        nested_field_ty,
-                                    ) => {
-                                        // Get the nested field type
-                                        let nested_field_type =
-                                            super::types::translate_type(ctx, nested_field_ty)?;
+                // Handle additional projections after the first field
+                // e.g., &(*ptr).field1.field2
+                if place.projection.len() > 2 {
+                    for proj in &place.projection[2..] {
+                        match proj {
+                            mir::ProjectionElem::Field(nested_field_idx, nested_field_ty) => {
+                                // Get the nested field type
+                                let nested_field_type =
+                                    super::types::translate_type(ctx, nested_field_ty)?;
 
-                                        // Create result pointer type for nested field
-                                        let nested_ptr_ty =
-                                            dialect_mir::types::MirPtrType::get_generic(
-                                                ctx,
-                                                nested_field_type,
-                                                is_mutable,
-                                            );
+                                // Create result pointer type for nested field
+                                let nested_ptr_ty = dialect_mir::types::MirPtrType::get_generic(
+                                    ctx,
+                                    nested_field_type,
+                                    is_mutable,
+                                );
 
-                                        let nested_field_addr_op = Operation::new(
-                                            ctx,
-                                            MirFieldAddrOp::get_concrete_op_info(),
-                                            vec![nested_ptr_ty.into()],
-                                            vec![result_val],
-                                            vec![],
-                                            0,
-                                        );
-                                        nested_field_addr_op.deref_mut(ctx).set_loc(loc.clone());
+                                let nested_field_addr_op = Operation::new(
+                                    ctx,
+                                    MirFieldAddrOp::get_concrete_op_info(),
+                                    vec![nested_ptr_ty.into()],
+                                    vec![result_val],
+                                    vec![],
+                                    0,
+                                );
+                                nested_field_addr_op.deref_mut(ctx).set_loc(loc.clone());
 
-                                        let mir_nested_op =
-                                            MirFieldAddrOp::new(nested_field_addr_op);
-                                        mir_nested_op.set_attr_field_index(
-                                            ctx,
-                                            dialect_mir::attributes::FieldIndexAttr(
-                                                *nested_field_idx as u32,
-                                            ),
-                                        );
+                                let mir_nested_op = MirFieldAddrOp::new(nested_field_addr_op);
+                                mir_nested_op.set_attr_field_index(
+                                    ctx,
+                                    dialect_mir::attributes::FieldIndexAttr(
+                                        *nested_field_idx as u32,
+                                    ),
+                                );
 
-                                        if let Some(prev) = last_inserted {
-                                            nested_field_addr_op.insert_after(ctx, prev);
-                                        }
-                                        last_inserted = Some(nested_field_addr_op);
-                                        result_val = nested_field_addr_op.deref(ctx).get_result(0);
-                                    }
-                                    _ => {
-                                        // For other projections (Index, etc.), fall through to general case
-                                        // This is a simplification - complex paths like &(*ptr).field[i]
-                                        // would need more handling
-                                        break;
-                                    }
+                                if let Some(prev) = last_inserted {
+                                    nested_field_addr_op.insert_after(ctx, prev);
                                 }
+                                last_inserted = Some(nested_field_addr_op);
+                                result_val = nested_field_addr_op.deref(ctx).get_result(0);
+                            }
+                            _ => {
+                                // For other projections (Index, etc.), fall through to general case
+                                // This is a simplification - complex paths like &(*ptr).field[i]
+                                // would need more handling
+                                break;
                             }
                         }
-
-                        return Ok((None, result_val, last_inserted));
                     }
+                }
+
+                return Ok((None, result_val, last_inserted));
+            }
 
             // Case 3: bare local reference `&local` / `&mut local`.
             //
@@ -900,9 +889,10 @@ pub fn translate_rvalue(
                     block_ptr,
                     prev_op,
                     loc.clone(),
-                )? {
-                    return Ok((None, result_val, last_inserted));
-                }
+                )?
+            {
+                return Ok((None, result_val, last_inserted));
+            }
 
             // Case 5: Fallback -- reference to a computed value that has no
             // backing slot (e.g. the result of an rvalue expression). Emit
@@ -936,120 +926,109 @@ pub fn translate_rvalue(
 
             // Check if the place is a simple Deref: *local
             if place.projection.len() == 1
-                && let mir::ProjectionElem::Deref = &place.projection[0] {
-                    // For &raw mut (*ptr) or &raw const (*ptr), just return ptr directly
-                    let base_place = mir::Place {
-                        local: place.local,
-                        projection: vec![],
-                    };
-                    let (base_val, last_inserted) = translate_place(
-                        ctx,
-                        body,
-                        &base_place,
-                        value_map,
-                        block_ptr,
-                        prev_op,
-                        loc,
-                    )?;
-                    return Ok((None, base_val, last_inserted));
-                }
+                && let mir::ProjectionElem::Deref = &place.projection[0]
+            {
+                // For &raw mut (*ptr) or &raw const (*ptr), just return ptr directly
+                let base_place = mir::Place {
+                    local: place.local,
+                    projection: vec![],
+                };
+                let (base_val, last_inserted) =
+                    translate_place(ctx, body, &base_place, value_map, block_ptr, prev_op, loc)?;
+                return Ok((None, base_val, last_inserted));
+            }
 
             // Pattern: Deref followed by Field projection(s) - compute field address
             if place.projection.len() >= 2
                 && let mir::ProjectionElem::Deref = &place.projection[0]
-                    && let mir::ProjectionElem::Field(field_idx, field_ty) = &place.projection[1] {
-                        let base_place = mir::Place {
-                            local: place.local,
-                            projection: vec![],
-                        };
-                        let (ptr_val, mut last_inserted) = translate_place(
-                            ctx,
-                            body,
-                            &base_place,
-                            value_map,
-                            block_ptr,
-                            prev_op,
-                            loc.clone(),
-                        )?;
+                && let mir::ProjectionElem::Field(field_idx, field_ty) = &place.projection[1]
+            {
+                let base_place = mir::Place {
+                    local: place.local,
+                    projection: vec![],
+                };
+                let (ptr_val, mut last_inserted) = translate_place(
+                    ctx,
+                    body,
+                    &base_place,
+                    value_map,
+                    block_ptr,
+                    prev_op,
+                    loc.clone(),
+                )?;
 
-                        let field_type = super::types::translate_type(ctx, field_ty)?;
-                        let is_mutable = matches!(mutability, mir::RawPtrKind::Mut);
-                        let result_ptr_ty = dialect_mir::types::MirPtrType::get_generic(
-                            ctx, field_type, is_mutable,
-                        );
+                let field_type = super::types::translate_type(ctx, field_ty)?;
+                let is_mutable = matches!(mutability, mir::RawPtrKind::Mut);
+                let result_ptr_ty =
+                    dialect_mir::types::MirPtrType::get_generic(ctx, field_type, is_mutable);
 
-                        use dialect_mir::ops::MirFieldAddrOp;
-                        let field_addr_op = Operation::new(
-                            ctx,
-                            MirFieldAddrOp::get_concrete_op_info(),
-                            vec![result_ptr_ty.into()],
-                            vec![ptr_val],
-                            vec![],
-                            0,
-                        );
-                        field_addr_op.deref_mut(ctx).set_loc(loc.clone());
+                use dialect_mir::ops::MirFieldAddrOp;
+                let field_addr_op = Operation::new(
+                    ctx,
+                    MirFieldAddrOp::get_concrete_op_info(),
+                    vec![result_ptr_ty.into()],
+                    vec![ptr_val],
+                    vec![],
+                    0,
+                );
+                field_addr_op.deref_mut(ctx).set_loc(loc.clone());
 
-                        let mir_field_addr_op = MirFieldAddrOp::new(field_addr_op);
-                        mir_field_addr_op.set_attr_field_index(
-                            ctx,
-                            dialect_mir::attributes::FieldIndexAttr(*field_idx as u32),
-                        );
+                let mir_field_addr_op = MirFieldAddrOp::new(field_addr_op);
+                mir_field_addr_op.set_attr_field_index(
+                    ctx,
+                    dialect_mir::attributes::FieldIndexAttr(*field_idx as u32),
+                );
 
-                        if let Some(prev) = last_inserted {
-                            field_addr_op.insert_after(ctx, prev);
-                        } else if let Some(prev) = prev_op {
-                            field_addr_op.insert_after(ctx, prev);
-                        } else {
-                            field_addr_op.insert_at_front(block_ptr, ctx);
-                        }
-                        last_inserted = Some(field_addr_op);
+                if let Some(prev) = last_inserted {
+                    field_addr_op.insert_after(ctx, prev);
+                } else if let Some(prev) = prev_op {
+                    field_addr_op.insert_after(ctx, prev);
+                } else {
+                    field_addr_op.insert_at_front(block_ptr, ctx);
+                }
+                last_inserted = Some(field_addr_op);
 
-                        let mut result_val = field_addr_op.deref(ctx).get_result(0);
+                let mut result_val = field_addr_op.deref(ctx).get_result(0);
 
-                        if place.projection.len() > 2 {
-                            for proj in &place.projection[2..] {
-                                if let mir::ProjectionElem::Field(
-                                    nested_field_idx,
-                                    nested_field_ty,
-                                ) = proj
-                                {
-                                    let nested_field_type =
-                                        super::types::translate_type(ctx, nested_field_ty)?;
-                                    let nested_ptr_ty = dialect_mir::types::MirPtrType::get_generic(
-                                        ctx,
-                                        nested_field_type,
-                                        is_mutable,
-                                    );
-                                    let nested_field_addr_op = Operation::new(
-                                        ctx,
-                                        MirFieldAddrOp::get_concrete_op_info(),
-                                        vec![nested_ptr_ty.into()],
-                                        vec![result_val],
-                                        vec![],
-                                        0,
-                                    );
-                                    nested_field_addr_op.deref_mut(ctx).set_loc(loc.clone());
-                                    let mir_nested_op = MirFieldAddrOp::new(nested_field_addr_op);
-                                    mir_nested_op.set_attr_field_index(
-                                        ctx,
-                                        dialect_mir::attributes::FieldIndexAttr(
-                                            *nested_field_idx as u32,
-                                        ),
-                                    );
+                if place.projection.len() > 2 {
+                    for proj in &place.projection[2..] {
+                        if let mir::ProjectionElem::Field(nested_field_idx, nested_field_ty) = proj
+                        {
+                            let nested_field_type =
+                                super::types::translate_type(ctx, nested_field_ty)?;
+                            let nested_ptr_ty = dialect_mir::types::MirPtrType::get_generic(
+                                ctx,
+                                nested_field_type,
+                                is_mutable,
+                            );
+                            let nested_field_addr_op = Operation::new(
+                                ctx,
+                                MirFieldAddrOp::get_concrete_op_info(),
+                                vec![nested_ptr_ty.into()],
+                                vec![result_val],
+                                vec![],
+                                0,
+                            );
+                            nested_field_addr_op.deref_mut(ctx).set_loc(loc.clone());
+                            let mir_nested_op = MirFieldAddrOp::new(nested_field_addr_op);
+                            mir_nested_op.set_attr_field_index(
+                                ctx,
+                                dialect_mir::attributes::FieldIndexAttr(*nested_field_idx as u32),
+                            );
 
-                                    if let Some(prev) = last_inserted {
-                                        nested_field_addr_op.insert_after(ctx, prev);
-                                    }
-                                    last_inserted = Some(nested_field_addr_op);
-                                    result_val = nested_field_addr_op.deref(ctx).get_result(0);
-                                } else {
-                                    break;
-                                }
+                            if let Some(prev) = last_inserted {
+                                nested_field_addr_op.insert_after(ctx, prev);
                             }
+                            last_inserted = Some(nested_field_addr_op);
+                            result_val = nested_field_addr_op.deref(ctx).get_result(0);
+                        } else {
+                            break;
                         }
-
-                        return Ok((None, result_val, last_inserted));
                     }
+                }
+
+                return Ok((None, result_val, last_inserted));
+            }
 
             // For other places, translate to a value and materialize an address.
             let (val, last_inserted) =
@@ -1932,9 +1911,10 @@ pub fn translate_operand(
                                 if let Some(num_str) = b_str
                                     .strip_prefix("Some(")
                                     .and_then(|s| s.strip_suffix(')'))
-                                    && let Ok(byte) = num_str.parse::<u8>() {
-                                        bytes[i] = byte;
-                                    }
+                                    && let Ok(byte) = num_str.parse::<u8>()
+                                {
+                                    bytes[i] = byte;
+                                }
                             }
                             f64::from_le_bytes(bytes)
                         } else {
@@ -1993,9 +1973,10 @@ pub fn translate_operand(
                                 if let Some(num_str) = b_str
                                     .strip_prefix("Some(")
                                     .and_then(|s| s.strip_suffix(')'))
-                                    && let Ok(byte) = num_str.parse::<u8>() {
-                                        bytes[i] = byte;
-                                    }
+                                    && let Ok(byte) = num_str.parse::<u8>()
+                                {
+                                    bytes[i] = byte;
+                                }
                             }
                             f32::from_le_bytes(bytes)
                         } else {
@@ -2162,9 +2143,10 @@ pub fn translate_operand(
                             if let Some(num_str) = b_str
                                 .strip_prefix("Some(")
                                 .and_then(|s| s.strip_suffix(')'))
-                                && let Ok(byte) = num_str.parse::<u8>() {
-                                    bytes.push(byte);
-                                }
+                                && let Ok(byte) = num_str.parse::<u8>()
+                            {
+                                bytes.push(byte);
+                            }
                         }
                         let mut res: u64 = 0;
                         for (i, byte) in bytes.iter().enumerate() {
@@ -2247,9 +2229,10 @@ pub fn translate_operand(
                             if let Some(num_str) = b_str
                                 .strip_prefix("Some(")
                                 .and_then(|s| s.strip_suffix(')'))
-                                && let Ok(byte) = num_str.parse::<u8>() {
-                                    bytes.push(byte);
-                                }
+                                && let Ok(byte) = num_str.parse::<u8>()
+                            {
+                                bytes.push(byte);
+                            }
                         }
 
                         let mut res: u64 = 0;
@@ -2954,9 +2937,13 @@ fn apply_deref_projection(
                 .downcast_ref::<dialect_mir::types::MirTupleType>()
                 .is_some_and(|tt| tt.get_types().is_empty());
             Some(DerefKind::Ptr { pointee, is_zst })
-        } else { ptr_ty_ref.downcast_ref::<dialect_mir::types::MirSliceType>().map(|slice_ty| DerefKind::Slice {
-                element_ty: slice_ty.element_type(),
-            }) }
+        } else {
+            ptr_ty_ref
+                .downcast_ref::<dialect_mir::types::MirSliceType>()
+                .map(|slice_ty| DerefKind::Slice {
+                    element_ty: slice_ty.element_type(),
+                })
+        }
     };
 
     let deref_kind = deref_kind.ok_or_else(|| {
@@ -5329,10 +5316,9 @@ fn enum_variant_field_offsets(
 
             match &layout.fields {
                 rustc_public::abi::FieldsShape::Primitive => Ok(vec![]),
-                rustc_public::abi::FieldsShape::Arbitrary { offsets } => Ok(offsets
-                    .iter()
-                    .map(|offset| offset.bytes())
-                    .collect()),
+                rustc_public::abi::FieldsShape::Arbitrary { offsets } => {
+                    Ok(offsets.iter().map(|offset| offset.bytes()).collect())
+                }
                 other => input_err!(
                     loc,
                     TranslationErr::unsupported(format!(
@@ -5505,14 +5491,15 @@ pub(crate) fn extract_enum_discriminant(
             }
             // If read_uint fails, try raw_bytes
             if let Ok(bytes) = alloc.raw_bytes()
-                && !bytes.is_empty() {
-                    // Convert bytes to usize (little-endian)
-                    let mut value: usize = 0;
-                    for (i, &byte) in bytes.iter().take(8).enumerate() {
-                        value |= (byte as usize) << (i * 8);
-                    }
-                    return value;
+                && !bytes.is_empty()
+            {
+                // Convert bytes to usize (little-endian)
+                let mut value: usize = 0;
+                for (i, &byte) in bytes.iter().take(8).enumerate() {
+                    value |= (byte as usize) << (i * 8);
                 }
+                return value;
+            }
             // Last resort: bytes field directly
             if !alloc.bytes.is_empty() {
                 let mut value: usize = 0;
@@ -5629,27 +5616,29 @@ fn extract_shared_array_info(
         let const_str = format!("{:?}", c);
         // Parse the bytes from the debug string
         if let Some(bytes_part) = const_str.split("bytes: [").nth(1)
-            && let Some(bytes_end) = bytes_part.split(']').next() {
-                let mut bytes = Vec::new();
-                for byte_str in bytes_end.split(',') {
-                    if bytes.len() >= 8 {
-                        break;
-                    }
-                    let b_str = byte_str.trim();
-                    if let Some(num_str) = b_str
-                        .strip_prefix("Some(")
-                        .and_then(|s| s.strip_suffix(')'))
-                        && let Ok(byte) = num_str.parse::<u8>() {
-                            bytes.push(byte);
-                        }
+            && let Some(bytes_end) = bytes_part.split(']').next()
+        {
+            let mut bytes = Vec::new();
+            for byte_str in bytes_end.split(',') {
+                if bytes.len() >= 8 {
+                    break;
                 }
-                // Convert bytes to usize (little-endian)
-                let mut value: usize = 0;
-                for (i, byte) in bytes.iter().enumerate() {
-                    value |= (*byte as usize) << (i * 8);
+                let b_str = byte_str.trim();
+                if let Some(num_str) = b_str
+                    .strip_prefix("Some(")
+                    .and_then(|s| s.strip_suffix(')'))
+                    && let Ok(byte) = num_str.parse::<u8>()
+                {
+                    bytes.push(byte);
                 }
-                return Some(value);
             }
+            // Convert bytes to usize (little-endian)
+            let mut value: usize = 0;
+            for (i, byte) in bytes.iter().enumerate() {
+                value |= (*byte as usize) << (i * 8);
+            }
+            return Some(value);
+        }
         None
     }
 

@@ -256,13 +256,14 @@ fn cast_pointer_to_generic_if_needed(
     };
 
     if let Some(addrspace) = maybe_addrspace
-        && addrspace != ADDRSPACE_GENERIC {
-            let cast_op = llvm::AddrSpaceCastOp::new(ctx, arg, ADDRSPACE_GENERIC);
-            rewriter.insert_operation(ctx, cast_op.get_operation());
-            let casted_val = cast_op.get_operation().deref(ctx).get_result(0);
-            let generic_ptr_ty = llvm_types::PointerType::get_generic(ctx);
-            return Ok((casted_val, generic_ptr_ty.into()));
-        }
+        && addrspace != ADDRSPACE_GENERIC
+    {
+        let cast_op = llvm::AddrSpaceCastOp::new(ctx, arg, ADDRSPACE_GENERIC);
+        rewriter.insert_operation(ctx, cast_op.get_operation());
+        let casted_val = cast_op.get_operation().deref(ctx).get_result(0);
+        let generic_ptr_ty = llvm_types::PointerType::get_generic(ctx);
+        return Ok((casted_val, generic_ptr_ty.into()));
+    }
 
     Ok((arg, arg_ty))
 }

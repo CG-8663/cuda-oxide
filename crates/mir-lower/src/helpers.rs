@@ -329,10 +329,11 @@ pub fn ensure_intrinsic_declared(
     for existing_op in module_block.deref(ctx).iter(ctx) {
         if let Some(existing_func) =
             pliron::operation::Operation::get_op::<llvm::FuncOp>(existing_op, ctx)
-            && existing_func.get_symbol_name(ctx) == sym_name {
-                already_declared = true;
-                break;
-            }
+            && existing_func.get_symbol_name(ctx) == sym_name
+        {
+            already_declared = true;
+            break;
+        }
     }
 
     // If not declared, create a function declaration (no body)
