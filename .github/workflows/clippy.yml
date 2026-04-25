@@ -22,10 +22,5 @@ jobs:
       - name: Clone repository
         uses: actions/checkout@v4
 
-      - name: Install nightly toolchain with clippy
-        run: |
-          rustup toolchain install nightly --component clippy --profile minimal
-          rustup default nightly
-
       - name: Run clippy
         run: cargo clippy --workspace -- -D warnings
