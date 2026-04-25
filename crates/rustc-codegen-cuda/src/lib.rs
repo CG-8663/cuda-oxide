@@ -49,7 +49,7 @@
 //! │   │   │     - Walk MIR call graph transitively                      │     │     │
 //! │   │   │     - Collect all reachable functions from:                 │     │     │
 //! │   │   │       • Local crate                                         │     │     │
-//! │   │   │       • cuda_device (intrinsics)                              │     │     │
+//! │   │   │       • cuda_device (intrinsics)                            │     │     │
 //! │   │   │       • core (iterators, Option, etc.)                      │     │     │
 //! │   │   │     - Filter out: fmt::*, panicking::*, intrinsic stubs     │     │     │
 //! │   │   └─────────────────────────────────────────────────────────────┘     │     │
@@ -179,12 +179,12 @@
 //! │                        CRATE FILTERING FOR DEVICE CODE                          │
 //! │                                                                                 │
 //! │   Allowed crates:                     Blocked crates:                           │
-//! │   ┌────────────────────────────┐      ┌────────────────────────────┐            │
-//! │   │ local (user's kernel code) │      │ std (OS, I/O, threads)     │            │
-//! │   │ cuda_device (GPU intrinsics) │      │ Everything else            │            │
-//! │   │ alloc (if allocator set)   │      │                            │            │
-//! │   │ core (iter, Option, etc.)  │      │                            │            │
-//! │   └────────────────────────────┘      └────────────────────────────┘            │
+//! │   ┌──────────────────────────────┐      ┌────────────────────────────┐          │
+//! │   │ local (user's kernel code)   │      │ std (OS, I/O, threads)     │          │
+//! │   │ cuda_device (GPU intrinsics) │      │ Everything else            │          │
+//! │   │ alloc (if allocator set)     │      │                            │          │
+//! │   │ core (iter, Option, etc.)    │      │                            │          │
+//! │   └──────────────────────────────┘      └────────────────────────────┘          │
 //! │                                                                                 │
 //! │   If kernel calls std function:                                                 │
 //! │     1. Collector doesn't follow the call (std not in allowed list)              │

@@ -7,6 +7,7 @@ target/
 .DS_Store
 *.tar.gz
 .cursor/
+.vscode/
 
 # Internal documentation (lives in docs/, not tracked -- see cuda-oxide-book/ for the book)
 /docs/
