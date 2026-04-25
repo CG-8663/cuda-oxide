@@ -27,7 +27,7 @@ jobs:
         id: cuda-toolkit
         with:
           cuda: "13.0.0"
-          method: local
+          method: network
           sub-packages: '["nvcc", "cudart-dev"]'
 
       - name: Run clippy
