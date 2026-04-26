@@ -877,6 +877,7 @@ impl<'a> ModuleExportState<'a> {
 
         let name = global.get_symbol_name(self.ctx);
         let ty = global.get_type(self.ctx);
+        let address_space = global.get_address_space(self.ctx);
 
         // Check for external linkage (dynamic shared memory)
         let is_external = global
@@ -907,17 +908,18 @@ impl<'a> ModuleExportState<'a> {
             }
         });
 
-        // Shared memory is in address space 3
         if is_external {
-            // External linkage: dynamic shared memory (size determined at launch)
-            // Format: @name = external addrspace(3) global [0 x i8], align N
-            write!(output, "@{name} = external addrspace(3) global ").unwrap();
+            // External linkage: declaration with size determined elsewhere.
+            write!(
+                output,
+                "@{name} = external addrspace({address_space}) global "
+            )
+            .unwrap();
             self.export_type(ty, output)?;
             writeln!(output, ", align {alignment}").unwrap();
         } else {
-            // Internal linkage: static shared memory with known size
-            // Format: @name = addrspace(3) global [N x type] zeroinitializer, align N
-            write!(output, "@{name} = addrspace(3) global ").unwrap();
+            // Internal linkage: static storage in the global's address space.
+            write!(output, "@{name} = addrspace({address_space}) global ").unwrap();
             self.export_type(ty, output)?;
             writeln!(output, " zeroinitializer, align {alignment}").unwrap();
         }

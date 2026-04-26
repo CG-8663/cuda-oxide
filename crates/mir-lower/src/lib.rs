@@ -143,7 +143,7 @@ use pliron::{
     r#type::{TypeObj, type_impls},
 };
 
-use context::{DynamicSmemAlignmentMap, SharedGlobalsMap};
+use context::{DeviceGlobalsMap, DynamicSmemAlignmentMap, SharedGlobalsMap};
 use conversion_interface::MirToLlvmConversion as MirToLlvmConversionInterface;
 use convert::types::convert_type;
 use type_conversion_interface::MirConvertibleType;
@@ -163,6 +163,8 @@ use type_conversion_interface::MirConvertibleType;
 pub struct MirToLlvmConversionDriver {
     /// Shared memory global deduplication across all functions.
     pub shared_globals: SharedGlobalsMap,
+    /// Device global deduplication across all functions.
+    pub device_globals: DeviceGlobalsMap,
     /// Per-kernel dynamic shared memory alignment tracking.
     pub dynamic_smem_alignments: DynamicSmemAlignmentMap,
 }
@@ -223,6 +225,15 @@ impl DialectConversion for MirToLlvmConversionDriver {
                 &mut self.shared_globals,
             );
         }
+        if opid == dialect_mir::ops::MirGlobalAllocOp::get_opid_static() {
+            return convert::ops::memory::convert_global_alloc_dc(
+                ctx,
+                rewriter,
+                op,
+                operands_info,
+                &mut self.device_globals,
+            );
+        }
         if opid == dialect_mir::ops::MirExternSharedOp::get_opid_static() {
             return convert::ops::memory::convert_extern_shared_dc(
                 ctx,
@@ -264,6 +275,7 @@ impl DialectConversion for MirToLlvmConversionDriver {
 pub fn lower_mir_to_llvm(ctx: &mut Context, module_op: Ptr<Operation>) -> Result<()> {
     let mut conversion = MirToLlvmConversionDriver {
         shared_globals: HashMap::new(),
+        device_globals: HashMap::new(),
         dynamic_smem_alignments: HashMap::new(),
     };
     apply_dialect_conversion(ctx, &mut conversion, module_op)

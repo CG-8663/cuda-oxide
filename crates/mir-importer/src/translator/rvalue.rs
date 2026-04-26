@@ -36,8 +36,9 @@ use dialect_mir::attributes::MirCastKindAttr;
 use dialect_mir::ops::{
     MirAddOp, MirBitAndOp, MirBitOrOp, MirBitXorOp, MirCastOp, MirCheckedAddOp, MirCheckedMulOp,
     MirCheckedSubOp, MirConstructArrayOp, MirConstructEnumOp, MirConstructStructOp, MirDivOp,
-    MirEqOp, MirExtractFieldOp, MirGeOp, MirGtOp, MirLeOp, MirLoadOp, MirLtOp, MirMulOp, MirNeOp,
-    MirNegOp, MirNotOp, MirPtrOffsetOp, MirRefOp, MirRemOp, MirShlOp, MirShrOp, MirSubOp,
+    MirEqOp, MirExtractFieldOp, MirGeOp, MirGlobalAllocOp, MirGtOp, MirLeOp, MirLoadOp, MirLtOp,
+    MirMulOp, MirNeOp, MirNegOp, MirNotOp, MirPtrOffsetOp, MirRefOp, MirRemOp, MirShlOp, MirShrOp,
+    MirSubOp,
 };
 use pliron::basic_block::BasicBlock;
 use pliron::builtin::types::{FP32Type, FP64Type, IntegerType, Signedness};
@@ -1689,50 +1690,21 @@ pub fn translate_operand(
                 return Ok((val, Some(shared_alloc.get_operation())));
             }
 
-            // Generic catch-all for static raw pointers (*mut T / *const T)
-            // This handles static mut variables of primitive types (bool, u32, etc.)
-            // that aren't covered by the special SharedArray/Barrier handlers above.
-            //
-            // IMPORTANT: We must exclude null pointer constants (core::ptr::null())
-            // which have all-zero bytes. Null pointers are NOT static allocations.
-            let is_null_pointer = {
-                let const_str = format!("{:?}", constant.const_);
-                if const_str.contains("bytes: [") {
-                    // Check if all bytes are zero
-                    if let Some(bytes_part) = const_str.split("bytes: [").nth(1) {
-                        if let Some(bytes_end) = bytes_part.split(']').next() {
-                            bytes_end.split(',').all(|b| {
-                                let b_str = b.trim();
-                                b_str == "Some(0)" || b_str.is_empty()
-                            })
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            };
-            if let Some(pointee_ty) = get_static_pointer_pointee(&rust_ty) {
-                // Skip null pointers - they should be handled as pointer constants below
-                if is_null_pointer {
-                    // Fall through to pointer constant handling
-                } else {
-                    // Translate the pointee type (e.g., bool -> i1, u32 -> i32)
-                    let elem_ty = types::translate_type(ctx, &pointee_ty)?;
+            // Ordinary Rust `static` / `static mut` values in device code live in
+            // CUDA global memory (addrspace 1). SharedArray/Barrier statics have
+            // already been intercepted above and remain addrspace 3.
+            if let Some(static_def) = static_def_from_constant(constant)? {
+                if let Some((pointee_ty, is_mutable)) = get_static_pointer_info(&rust_ty) {
+                    ensure_zero_initializer(&static_def, loc.clone())?;
 
-                    // Create a shared memory pointer type (addrspace 3)
-                    // Static variables in kernel code are placed in shared memory (per-block)
+                    let global_ty = types::translate_type(ctx, &pointee_ty)?;
                     let ptr_ty =
-                        dialect_mir::types::MirPtrType::get_shared(ctx, elem_ty, true).into();
+                        dialect_mir::types::MirPtrType::get_global(ctx, global_ty, is_mutable)
+                            .into();
 
-                    // Create a MirSharedAllocOp for the static variable
-                    use dialect_mir::ops::MirSharedAllocOp;
                     let op = Operation::new(
                         ctx,
-                        MirSharedAllocOp::get_concrete_op_info(),
+                        MirGlobalAllocOp::get_concrete_op_info(),
                         vec![ptr_ty],
                         vec![],
                         vec![],
@@ -1740,45 +1712,29 @@ pub fn translate_operand(
                     );
                     op.deref_mut(ctx).set_loc(loc);
 
-                    let shared_alloc = MirSharedAllocOp::new(op);
+                    let global_alloc = MirGlobalAllocOp::new(op);
 
-                    // Set attributes: element type, size (1 element for scalar statics)
-                    use pliron::builtin::attributes::{IntegerAttr, StringAttr, TypeAttr};
-                    shared_alloc.set_attr_elem_type(ctx, TypeAttr::new(elem_ty));
-                    let size_attr = IntegerAttr::new(
-                        pliron::builtin::types::IntegerType::get(
-                            ctx,
-                            64,
-                            pliron::builtin::types::Signedness::Signless,
-                        ),
-                        pliron::utils::apint::APInt::from_u64(
-                            1, // Single element for scalar static
-                            std::num::NonZeroUsize::new(64).unwrap(),
-                        ),
-                    );
-                    shared_alloc.set_attr_size(ctx, size_attr);
+                    use pliron::builtin::attributes::{StringAttr, TypeAttr};
+                    global_alloc.set_attr_global_type(ctx, TypeAttr::new(global_ty));
+                    global_alloc
+                        .set_attr_global_key(ctx, StringAttr::new(static_def.name().into()));
 
-                    // Set natural alignment for scalar types (minimum 1 byte)
-                    // For i1 (bool) -> 1, for i8 -> 1, for i16 -> 2, for i32 -> 4, etc.
-                    shared_alloc.set_alignment_value(ctx, 1);
-
-                    // Store the alloc key so lowering can deduplicate multiple references
-                    // to the same static variable
-                    let alloc_key = format!("{:?}", constant.const_);
-                    shared_alloc.set_attr_alloc_key(ctx, StringAttr::new(alloc_key));
+                    if let Some(alignment) = static_alignment(&static_def)? {
+                        global_alloc.set_alignment_value(ctx, alignment);
+                    }
 
                     if let Some(prev) = prev_op {
-                        shared_alloc.get_operation().insert_after(ctx, prev);
+                        global_alloc.get_operation().insert_after(ctx, prev);
                     } else {
-                        shared_alloc.get_operation().insert_at_front(block_ptr, ctx);
+                        global_alloc.get_operation().insert_at_front(block_ptr, ctx);
                     }
 
                     let val = Value::OpResult {
-                        op: shared_alloc.get_operation(),
+                        op: global_alloc.get_operation(),
                         res_idx: 0,
                     };
 
-                    return Ok((val, Some(shared_alloc.get_operation())));
+                    return Ok((val, Some(global_alloc.get_operation())));
                 }
             }
 
@@ -5589,16 +5545,92 @@ fn is_barrier_pointer(ty: &rustc_public::ty::Ty) -> bool {
     }
 }
 
-/// Check if a type is a raw pointer (*mut T or *const T) that could be a static allocation.
-/// Returns Some(pointee_ty) if it's a raw pointer, None otherwise.
+/// Resolve a constant pointer/reference to the Rust static it points at, if any.
 ///
-/// This is a catch-all for static pointers that aren't handled by more specific handlers
-/// (SharedArray, Barrier). Used for `static mut` primitives like `bool`, `u32`, etc.
-fn get_static_pointer_pointee(ty: &rustc_public::ty::Ty) -> Option<rustc_public::ty::Ty> {
+/// Null pointers and pointers to anonymous memory allocations deliberately return
+/// `None`; they should continue through normal constant handling.
+fn static_def_from_constant(
+    constant: &mir::ConstOperand,
+) -> TranslationResult<Option<rustc_public::mir::mono::StaticDef>> {
+    use rustc_public::mir::alloc::GlobalAlloc;
+
+    let ConstantKind::Allocated(alloc) = constant.const_.kind() else {
+        return Ok(None);
+    };
+    if alloc.is_null().unwrap_or(false) {
+        return Ok(None);
+    }
+
+    let Some((_, prov)) = alloc.provenance.ptrs.first() else {
+        return Ok(None);
+    };
+
+    match GlobalAlloc::from(prov.0) {
+        GlobalAlloc::Static(static_def) => Ok(Some(static_def)),
+        _ => Ok(None),
+    }
+}
+
+/// Ordinary device globals are currently emitted as `zeroinitializer`.
+/// Reject non-zero initializers until constant-data export is implemented.
+fn ensure_zero_initializer(
+    static_def: &rustc_public::mir::mono::StaticDef,
+    loc: Location,
+) -> TranslationResult<()> {
+    let alloc = static_def.eval_initializer().map_err(|e| {
+        input_error_noloc!(TranslationErr::unsupported(format!(
+            "Failed to evaluate initializer for device static {}: {:?}",
+            static_def.name(),
+            e
+        )))
+    })?;
+    let bytes = alloc.raw_bytes().map_err(|e| {
+        input_error_noloc!(TranslationErr::unsupported(format!(
+            "Device static {} has unsupported uninitialized bytes: {:?}",
+            static_def.name(),
+            e
+        )))
+    })?;
+
+    if bytes.iter().all(|byte| *byte == 0) {
+        Ok(())
+    } else {
+        input_err!(
+            loc,
+            TranslationErr::unsupported(format!(
+                "Device static {} has a non-zero initializer; cuda-oxide currently supports zero-initialized device statics",
+                static_def.name()
+            ))
+        )
+    }
+}
+
+fn static_alignment(
+    static_def: &rustc_public::mir::mono::StaticDef,
+) -> TranslationResult<Option<u64>> {
+    let alloc = static_def.eval_initializer().map_err(|e| {
+        input_error_noloc!(TranslationErr::unsupported(format!(
+            "Failed to evaluate initializer for device static {}: {:?}",
+            static_def.name(),
+            e
+        )))
+    })?;
+    Ok((alloc.align > 0).then_some(alloc.align))
+}
+
+/// Check if a type is a pointer/reference to a static allocation.
+/// Returns `(pointee_ty, is_mutable)` when the type can carry a static address.
+fn get_static_pointer_info(ty: &rustc_public::ty::Ty) -> Option<(rustc_public::ty::Ty, bool)> {
+    use rustc_public::mir::Mutability;
     use rustc_public::ty::{RigidTy, TyKind};
 
     match ty.kind() {
-        TyKind::RigidTy(RigidTy::RawPtr(pointee_ty, _)) => Some(pointee_ty),
+        TyKind::RigidTy(RigidTy::RawPtr(pointee_ty, mutability)) => {
+            Some((pointee_ty, mutability == Mutability::Mut))
+        }
+        TyKind::RigidTy(RigidTy::Ref(_, pointee_ty, mutability)) => {
+            Some((pointee_ty, mutability == Mutability::Mut))
+        }
         _ => None,
     }
 }

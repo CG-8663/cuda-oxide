@@ -283,6 +283,7 @@ pub fn register(ctx: &mut Context) {
     CaseValuesAttr::register(ctx);
     InsertExtractValueIndicesAttr::register(ctx);
     AlignmentAttr::register(ctx);
+    GlobalAddressSpaceAttr::register(ctx);
     FastmathFlagsAttr::register(ctx);
     LinkageAttr::register(ctx);
     LlvmAtomicOrdering::register(ctx);
@@ -302,6 +303,11 @@ pub struct InsertExtractValueIndicesAttr(pub Vec<u32>);
 #[pliron_attr(name = "llvm.align", format = "$0", verifier = "succ")]
 #[derive(PartialEq, Eq, Clone, Debug, Hash)]
 pub struct AlignmentAttr(pub u32);
+
+/// LLVM global address-space attribute.
+#[pliron_attr(name = "llvm.global_addrspace", format = "$0", verifier = "succ")]
+#[derive(PartialEq, Eq, Clone, Debug, Hash)]
+pub struct GlobalAddressSpaceAttr(pub u32);
 
 #[cfg(test)]
 mod tests {

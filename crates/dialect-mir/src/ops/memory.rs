@@ -686,6 +686,103 @@ impl Verify for MirSharedAllocOp {
 }
 
 // ============================================================================
+// MirGlobalAllocOp
+// ============================================================================
+
+/// MIR device-global address operation.
+///
+/// Represents the address of an ordinary Rust `static` / `static mut` reachable
+/// from device code. This is lowered to an LLVM global in CUDA global memory
+/// (`addrspace(1)`), unlike [`MirSharedAllocOp`] which is block-local shared
+/// memory.
+///
+/// # Attributes
+///
+/// ```text
+/// | Name            | Type        | Description                      |
+/// |-----------------|-------------|----------------------------------|
+/// | `global_type`   | TypeAttr    | Type stored in the global        |
+/// | `global_key`    | StringAttr  | Stable key for deduplication     |
+/// | `global_alignment` | IntegerAttr | Optional alignment            |
+/// ```
+///
+/// # Results
+///
+/// ```text
+/// | Name  | Type       | Description                             |
+/// |-------|------------|-----------------------------------------|
+/// | `ptr` | MirPtrType | Pointer to global memory (addrspace 1) |
+/// ```
+#[pliron_op(
+    name = "mir.global_alloc",
+    format,
+    interfaces = [NOpdsInterface<0>, NResultsInterface<1>, OneResultInterface],
+    attributes = (
+        global_type: pliron::builtin::attributes::TypeAttr,
+        global_key: pliron::builtin::attributes::StringAttr,
+        global_alignment: IntegerAttr
+    )
+)]
+pub struct MirGlobalAllocOp;
+
+impl MirGlobalAllocOp {
+    /// Create a new `MirGlobalAllocOp` wrapper.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        MirGlobalAllocOp { op }
+    }
+
+    /// Get alignment as u64 (returns None if not set, meaning natural alignment).
+    pub fn get_alignment_value(&self, ctx: &Context) -> Option<u64> {
+        self.get_attr_global_alignment(ctx)
+            .map(|attr| attr.value().to_u64())
+    }
+
+    /// Set alignment as u64.
+    pub fn set_alignment_value(&self, ctx: &mut Context, alignment: u64) {
+        use pliron::builtin::types::Signedness;
+        let i64_ty = IntegerType::get(ctx, 64, Signedness::Unsigned);
+        let align_attr = IntegerAttr::new(
+            i64_ty,
+            pliron::utils::apint::APInt::from_u64(
+                alignment,
+                std::num::NonZeroUsize::new(64).unwrap(),
+            ),
+        );
+        self.set_attr_global_alignment(ctx, align_attr);
+    }
+}
+
+impl Verify for MirGlobalAllocOp {
+    fn verify(&self, ctx: &Context) -> Result<(), Error> {
+        let op = &*self.get_operation().deref(ctx);
+
+        if self.get_attr_global_type(ctx).is_none() {
+            return verify_err!(op.loc(), "MirGlobalAllocOp missing global_type attribute");
+        }
+        if self.get_attr_global_key(ctx).is_none() {
+            return verify_err!(op.loc(), "MirGlobalAllocOp missing global_key attribute");
+        }
+
+        let res = op.get_result(0);
+        let res_ty = res.get_type(ctx);
+        let res_ty_obj = res_ty.deref(ctx);
+
+        if let Some(ptr_ty) = res_ty_obj.downcast_ref::<MirPtrType>() {
+            if ptr_ty.address_space != crate::types::address_space::GLOBAL {
+                return verify_err!(
+                    op.loc(),
+                    "MirGlobalAllocOp result must be in global address space (1)"
+                );
+            }
+        } else {
+            return verify_err!(op.loc(), "MirGlobalAllocOp result must be a pointer type");
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================================
 // MirExternSharedOp
 // ============================================================================
 
@@ -816,5 +913,6 @@ pub fn register(ctx: &mut Context) {
     MirRefOp::register(ctx);
     MirPtrOffsetOp::register(ctx);
     MirSharedAllocOp::register(ctx);
+    MirGlobalAllocOp::register(ctx);
     MirExternSharedOp::register(ctx);
 }

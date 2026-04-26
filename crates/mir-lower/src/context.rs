@@ -18,6 +18,12 @@ use std::collections::HashMap;
 /// (identified by a key string), they should all refer to the same global.
 pub type SharedGlobalsMap = HashMap<String, pliron::identifier::Identifier>;
 
+/// Map from ordinary device static keys to LLVM global symbol names.
+///
+/// Ordinary Rust `static` / `static mut` values used from device code live in
+/// CUDA global memory (address space 1), not shared memory.
+pub type DeviceGlobalsMap = HashMap<String, pliron::identifier::Identifier>;
+
 /// Tracking for dynamic shared memory alignment per kernel.
 ///
 /// Maps kernel name to `(symbol_name, max_alignment)`.

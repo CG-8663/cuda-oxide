@@ -51,7 +51,7 @@ use pliron::{
 };
 
 use crate::{
-    attributes::LinkageAttr,
+    attributes::{GlobalAddressSpaceAttr, LinkageAttr},
     op_interfaces::{IsDeclaration, LlvmSymbolName},
     types::{FuncType, PointerType},
 };
@@ -274,7 +274,7 @@ pub enum GlobalOpVerifyErr {
         SingleBlockRegionInterface,
         LlvmSymbolName
     ],
-    attributes = (llvm_global_type: TypeAttr, global_initializer, llvm_global_linkage: LinkageAttr, llvm_alignment: crate::attributes::AlignmentAttr)
+    attributes = (llvm_global_type: TypeAttr, global_initializer, llvm_global_linkage: LinkageAttr, llvm_alignment: crate::attributes::AlignmentAttr, llvm_global_address_space: GlobalAddressSpaceAttr)
 )]
 pub struct GlobalOp;
 
@@ -285,6 +285,19 @@ impl GlobalOp {
         let op = GlobalOp { op };
         op.set_symbol_name(ctx, name);
         op.set_attr_llvm_global_type(ctx, TypeAttr::new(ty));
+        op.set_address_space(ctx, crate::types::address_space::GENERIC);
+        op
+    }
+
+    /// Create a new [`GlobalOp`] in the specified address space.
+    pub fn new_in_address_space(
+        ctx: &mut Context,
+        name: Identifier,
+        ty: Ptr<TypeObj>,
+        address_space: u32,
+    ) -> Self {
+        let op = Self::new(ctx, name, ty);
+        op.set_address_space(ctx, address_space);
         op
     }
 
@@ -309,6 +322,19 @@ impl GlobalOp {
     /// Set alignment as u64.
     pub fn set_alignment(&self, ctx: &mut Context, alignment: u64) {
         self.set_attr_llvm_alignment(ctx, crate::attributes::AlignmentAttr(alignment as u32));
+    }
+
+    /// Get the global's address space.
+    #[must_use]
+    pub fn get_address_space(&self, ctx: &Context) -> u32 {
+        self.get_attr_llvm_global_address_space(ctx)
+            .map(|attr| attr.0)
+            .unwrap_or(crate::types::address_space::GENERIC)
+    }
+
+    /// Set the global's address space.
+    pub fn set_address_space(&self, ctx: &mut Context, address_space: u32) {
+        self.set_attr_llvm_global_address_space(ctx, GlobalAddressSpaceAttr(address_space));
     }
 
     /// Get the initializer value of this global variable.

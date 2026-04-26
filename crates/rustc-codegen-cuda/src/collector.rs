@@ -126,9 +126,10 @@
 //! the framework is upgraded (see metal-oxide for reference).
 
 use rustc_hir::def_id::{DefId, LOCAL_CRATE};
-use rustc_middle::mir::TerminatorKind;
 use rustc_middle::mir::mono::{CodegenUnit, MonoItem};
+use rustc_middle::mir::{Operand, Rvalue, Statement, StatementKind, TerminatorKind};
 use rustc_middle::ty::{Instance, InstanceKind, Ty, TyCtxt, TyKind, TypeVisitableExt, TypingEnv};
+use rustc_span::Span;
 use std::collections::{HashSet, VecDeque};
 
 /// Result of checking if a function should be collected for device compilation.
@@ -414,6 +415,17 @@ pub fn is_device_function(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
     name.contains(DEVICE_PREFIX) && !name.contains(DEVICE_EXTERN_PREFIX)
 }
 
+fn is_shared_array_ty(tcx: TyCtxt<'_>, ty: Ty<'_>) -> bool {
+    let pointee = match ty.kind() {
+        TyKind::RawPtr(pointee, _) | TyKind::Ref(_, pointee, _) => *pointee,
+        _ => return false,
+    };
+    let TyKind::Adt(adt_def, _) = pointee.kind() else {
+        return false;
+    };
+    tcx.def_path_str(adt_def.did()).contains("SharedArray")
+}
+
 /// Checks if an Instance is fully monomorphized (no unresolved type parameters).
 ///
 /// For generic kernels like `scale<T>`, the CGU may contain both:
@@ -596,6 +608,8 @@ struct DeviceCollector<'tcx> {
     device_externs: Vec<DeviceExternDecl>,
     /// DefIds of device externs already seen (prevents duplicates).
     seen_device_externs: HashSet<DefId>,
+    /// Warning keys already emitted (prevents repeated warnings across monomorphizations).
+    emitted_shared_memory_warnings: HashSet<String>,
     /// Print progress to stderr.
     verbose: bool,
 }
@@ -610,6 +624,7 @@ impl<'tcx> DeviceCollector<'tcx> {
             result: Vec::new(),
             device_externs: Vec::new(),
             seen_device_externs: HashSet::new(),
+            emitted_shared_memory_warnings: HashSet::new(),
             verbose,
         }
     }
@@ -669,6 +684,9 @@ impl<'tcx> DeviceCollector<'tcx> {
                 // Walk all basic blocks looking for calls
                 // Pass the caller's instance so we can substitute its args into callees
                 for bb_data in mir.basic_blocks.iter() {
+                    for statement in &bb_data.statements {
+                        self.process_statement_warnings(statement);
+                    }
                     if let Some(ref terminator) = bb_data.terminator {
                         self.process_terminator(terminator, &func.instance);
                     }
@@ -739,6 +757,61 @@ impl<'tcx> DeviceCollector<'tcx> {
         attrs
     }
 
+    fn process_statement_warnings(&mut self, statement: &Statement<'tcx>) {
+        let StatementKind::Assign(assign) = &statement.kind else {
+            return;
+        };
+        self.process_rvalue_warnings(&assign.1, statement.source_info.span);
+    }
+
+    fn process_rvalue_warnings(&mut self, rvalue: &Rvalue<'tcx>, span: Span) {
+        match rvalue {
+            Rvalue::Use(operand)
+            | Rvalue::Repeat(operand, _)
+            | Rvalue::UnaryOp(_, operand)
+            | Rvalue::Cast(_, operand, _)
+            | Rvalue::WrapUnsafeBinder(operand, _) => {
+                self.process_operand_warnings(operand, span);
+            }
+            Rvalue::BinaryOp(_, operands) => {
+                self.process_operand_warnings(&operands.0, span);
+                self.process_operand_warnings(&operands.1, span);
+            }
+            Rvalue::Aggregate(_, operands) => {
+                for operand in operands {
+                    self.process_operand_warnings(operand, span);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn process_operand_warnings(&mut self, operand: &Operand<'tcx>, span: Span) {
+        let Operand::Constant(const_op) = operand else {
+            return;
+        };
+        let Some(static_def_id) = const_op.check_static_ptr(self.tcx) else {
+            return;
+        };
+        if is_shared_array_ty(self.tcx, const_op.ty()) {
+            let static_name = self.tcx.def_path_str(static_def_id);
+            self.warn_once(
+                "shared-array-static",
+                span,
+                format!(
+                    "`static mut {static_name}` uses `SharedArray`, which cuda-oxide lowers to per-block CUDA shared memory, not persistent device global memory"
+                ),
+            );
+        }
+    }
+
+    fn warn_once(&mut self, kind: &str, span: Span, message: String) {
+        let key = format!("{kind}:{span:?}:{message}");
+        if self.emitted_shared_memory_warnings.insert(key) {
+            self.tcx.sess.dcx().span_warn(span, message);
+        }
+    }
+
     /// Process a terminator to find function calls.
     ///
     /// `caller` is the instance of the function containing this terminator.
@@ -777,6 +850,18 @@ impl<'tcx> DeviceCollector<'tcx> {
         let TyKind::FnDef(def_id, args) = ty.kind() else {
             return;
         };
+        let fn_path = self.tcx.def_path_str(*def_id);
+        if fn_path.contains("DynamicSharedArray")
+            && (fn_path.contains("::get")
+                || fn_path.contains("::get_raw")
+                || fn_path.contains("::offset"))
+        {
+            self.warn_once(
+                "dynamic-shared-array",
+                const_op.span,
+                "`DynamicSharedArray` returns CUDA dynamic shared memory; make sure the kernel launch config provides enough `shared_mem_bytes`".to_string(),
+            );
+        }
 
         // CRITICAL: Substitute the caller's args into the callee's args.
         //

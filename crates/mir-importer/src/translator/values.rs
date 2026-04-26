@@ -47,6 +47,7 @@ use pliron::r#type::{TypeObj, Typed};
 use pliron::value::Value;
 use rustc_public::CrateDef;
 use rustc_public::mir;
+use rustc_public::mir::alloc::GlobalAlloc;
 use rustc_public::ty::{ConstantKind, RigidTy, TyKind};
 
 /// Maps MIR locals to their alloca slots.
@@ -460,9 +461,7 @@ fn classify_rvalue(rvalue: &mir::Rvalue, classes: &[SlotAddrSpace]) -> WriteClas
         // result is `addrspace(3)`. The matching `WriteClass::Classified`
         // here keeps the destination slot typed to match, avoiding the
         // otherwise-inevitable `PtrToPtr` narrow-to-generic cast.
-        mir::Rvalue::Use(mir::Operand::Constant(const_op)) => {
-            classify_constant_ty(&const_op.const_.ty())
-        }
+        mir::Rvalue::Use(mir::Operand::Constant(const_op)) => classify_constant(const_op),
         // Every other rvalue shape (aggregates, arithmetic, casts, complex
         // projections, `Ref`/`AddressOf`, …) we decline to reason about
         // here. The matching `Call`-terminator classifier handles the
@@ -472,22 +471,35 @@ fn classify_rvalue(rvalue: &mir::Rvalue, classes: &[SlotAddrSpace]) -> WriteClas
     }
 }
 
-/// Classify a constant operand's type: pointers into known shared-memory
-/// ADTs (`SharedArray`, `Barrier`) are emitted by `rvalue::translate_operand`
-/// as a `mir.shared_alloc` of `addrspace(3)`. Nothing else has a known
-/// address space at this layer.
+/// Classify a constant operand's address space.
 ///
 /// Kept in sync with `rvalue::is_shared_array_pointer` /
-/// `is_barrier_pointer` — those gate the emitter; this gates the classifier.
-fn classify_constant_ty(ty: &rustc_public::ty::Ty) -> WriteClass {
-    let TyKind::RigidTy(RigidTy::RawPtr(pointee, _)) = ty.kind() else {
+/// `is_barrier_pointer` / ordinary static handling — those gate the emitter;
+/// this gates the slot address-space classifier.
+fn classify_constant(const_op: &mir::ConstOperand) -> WriteClass {
+    let ty = const_op.const_.ty();
+    let TyKind::RigidTy(RigidTy::RawPtr(pointee, _) | RigidTy::Ref(_, pointee, _)) = ty.kind()
+    else {
         return WriteClass::Unclassified;
     };
-    let TyKind::RigidTy(RigidTy::Adt(adt_def, _)) = pointee.kind() else {
+
+    if let TyKind::RigidTy(RigidTy::Adt(adt_def, _)) = pointee.kind()
+        && matches!(adt_def.trimmed_name().as_str(), "SharedArray" | "Barrier")
+    {
+        return WriteClass::Classified(address_space::SHARED);
+    }
+
+    let ConstantKind::Allocated(alloc) = const_op.const_.kind() else {
         return WriteClass::Unclassified;
     };
-    match adt_def.trimmed_name().as_str() {
-        "SharedArray" | "Barrier" => WriteClass::Classified(address_space::SHARED),
+    if alloc.is_null().unwrap_or(false) {
+        return WriteClass::Unclassified;
+    }
+    let Some((_, prov)) = alloc.provenance.ptrs.first() else {
+        return WriteClass::Unclassified;
+    };
+    match GlobalAlloc::from(prov.0) {
+        GlobalAlloc::Static(_) => WriteClass::Classified(address_space::GLOBAL),
         _ => WriteClass::Unclassified,
     }
 }

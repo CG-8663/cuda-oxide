@@ -47,7 +47,7 @@
 //! .extern .shared .align 16 .b8 __dynamic_smem_other_kernel[];
 //! ```
 
-use crate::context::{DynamicSmemAlignmentMap, SharedGlobalsMap};
+use crate::context::{DeviceGlobalsMap, DynamicSmemAlignmentMap, SharedGlobalsMap};
 use crate::convert::types::convert_type;
 use crate::helpers;
 use dialect_llvm::ops as llvm;
@@ -358,6 +358,7 @@ fn create_shared_global(
     } else {
         llvm::GlobalOp::new(ctx, name.clone(), array_type.into())
     };
+    global_op.set_address_space(ctx, dialect_llvm::types::address_space::SHARED);
 
     let parent_block = op
         .deref(ctx)
@@ -376,6 +377,119 @@ fn create_shared_global(
     if let Some(key) = alloc_key {
         shared_globals.insert(key.clone(), name.clone());
     }
+
+    Ok(name)
+}
+
+/// Convert `mir.global_alloc` to an LLVM global in CUDA global memory.
+///
+/// Ordinary Rust `static` / `static mut` values have grid scope and
+/// application lifetime, so they live in address space 1 rather than the
+/// per-block shared-memory address space.
+pub fn convert_global_alloc_dc(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    _operands_info: &OperandsInfo,
+    device_globals: &mut DeviceGlobalsMap,
+) -> Result<()> {
+    use pliron::builtin::attributes::{StringAttr, TypeAttr};
+
+    let (global_key, mir_global_type, alignment) = {
+        let global_op = dialect_mir::ops::MirGlobalAllocOp::new(op);
+        let op_ref = op.deref(ctx);
+
+        let global_key_attr = op_ref
+            .attributes
+            .0
+            .get(&"global_key".try_into().unwrap())
+            .ok_or_else(|| {
+                anyhow_to_pliron(anyhow::anyhow!(
+                    "MirGlobalAllocOp missing global_key attribute"
+                ))
+            })?;
+        let global_key_attr = global_key_attr
+            .downcast_ref::<StringAttr>()
+            .ok_or_else(|| anyhow_to_pliron(anyhow::anyhow!("global_key is not a StringAttr")))?;
+        let global_key = String::from((*global_key_attr).clone());
+
+        let global_type_attr = op_ref
+            .attributes
+            .0
+            .get(&"global_type".try_into().unwrap())
+            .ok_or_else(|| {
+                anyhow_to_pliron(anyhow::anyhow!(
+                    "MirGlobalAllocOp missing global_type attribute"
+                ))
+            })?;
+        let global_type_attr = global_type_attr
+            .downcast_ref::<TypeAttr>()
+            .ok_or_else(|| anyhow_to_pliron(anyhow::anyhow!("global_type is not a TypeAttr")))?;
+        let mir_global_type = global_type_attr.get_type(ctx);
+
+        let alignment = global_op.get_alignment_value(ctx).unwrap_or(0);
+
+        (global_key, mir_global_type, alignment)
+    };
+
+    let global_name = if let Some(existing_name) = device_globals.get(&global_key) {
+        existing_name.clone()
+    } else {
+        create_device_global(
+            ctx,
+            op,
+            device_globals,
+            &global_key,
+            mir_global_type,
+            alignment,
+        )?
+    };
+
+    let address_of_op =
+        llvm::AddressOfOp::new(ctx, global_name, dialect_llvm::types::address_space::GLOBAL);
+    rewriter.insert_operation(ctx, address_of_op.get_operation());
+    rewriter.replace_operation(ctx, op, address_of_op.get_operation());
+
+    Ok(())
+}
+
+fn create_device_global(
+    ctx: &mut Context,
+    op: Ptr<Operation>,
+    device_globals: &mut DeviceGlobalsMap,
+    global_key: &str,
+    mir_global_type: Ptr<TypeObj>,
+    alignment: u64,
+) -> Result<pliron::identifier::Identifier> {
+    let llvm_global_type = convert_type(ctx, mir_global_type).map_err(anyhow_to_pliron)?;
+
+    static DEVICE_GLOBAL_COUNTER: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    let counter = DEVICE_GLOBAL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let name: pliron::identifier::Identifier =
+        format!("__device_global_{counter}").try_into().unwrap();
+
+    let global_op = if alignment > 0 {
+        llvm::GlobalOp::new_with_alignment(ctx, name.clone(), llvm_global_type, alignment)
+    } else {
+        llvm::GlobalOp::new(ctx, name.clone(), llvm_global_type)
+    };
+    global_op.set_address_space(ctx, dialect_llvm::types::address_space::GLOBAL);
+
+    let parent_block = op
+        .deref(ctx)
+        .get_parent_block()
+        .ok_or_else(|| anyhow_to_pliron(anyhow::anyhow!("Op has no parent block")))?;
+    let module_op = helpers::get_module_from_block(ctx, parent_block).map_err(anyhow_to_pliron)?;
+    let region = module_op.deref(ctx).get_region(0);
+    let module_block = region
+        .deref(ctx)
+        .iter(ctx)
+        .next()
+        .ok_or_else(|| anyhow_to_pliron(anyhow::anyhow!("Module is empty")))?;
+
+    global_op.get_operation().insert_at_front(module_block, ctx);
+    device_globals.insert(global_key.to_string(), name.clone());
 
     Ok(name)
 }
@@ -516,6 +630,7 @@ fn get_or_create_extern_shared_global(
         array_type.into(),
         max_alignment,
     );
+    global_op.set_address_space(ctx, dialect_llvm::types::address_space::SHARED);
 
     {
         use dialect_llvm::attributes::LinkageAttr;
