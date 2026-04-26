@@ -1,0 +1,15 @@
+[package]
+name = "fuzzer"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Differential codegen fuzzer support for cuda-oxide (rustlantis adapter, trace API)"
+
+# `rustlantis/` is a vendored upstream workspace used as an external program
+# generator. It is invoked via `cargo build` from `tools/mir_generator.py`,
+# not consumed as a Rust dependency, so exclude it from this package.
+exclude = ["rustlantis/"]
+
+[dependencies]

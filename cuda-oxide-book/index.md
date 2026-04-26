@@ -159,6 +159,7 @@ compiler/mir-importer
 compiler/mlir-dialects
 compiler/lowering-pipeline
 compiler/adding-new-intrinsics
+compiler/fuzzing-and-differential-testing
 ```
 
 ```{toctree}

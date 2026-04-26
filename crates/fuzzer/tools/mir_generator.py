@@ -1,0 +1,349 @@
+#!/usr/bin/env python3
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+"""Generate one small rustlantis custom-MIR case for cuda-oxide.
+
+This is a deliberately small Stage 2 adapter. It does not try to support the
+full rustlantis output space. It generates one scalar-only program, extracts the
+first generated custom-MIR function, and rewrites rustlantis' `dump_var(...)`
+terminators into calls to the cuda-oxide harness' generic `dump_var`.
+
+By default it emits a complete `generated_case.rs` module for the
+`rustlantis-smoke` example: imports, adapted MIR function, deterministic call
+arguments, and a `compute_rustlantis_trace()` wrapper.
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+DEFAULT_RUSTLANTIS_DIR = (Path(__file__).resolve().parent.parent / "rustlantis").resolve()
+
+TINY_CONFIG = """\
+bb_max_len = 8
+max_switch_targets = 2
+max_bb_count = 3
+max_bb_count_hard = 6
+max_fn_count = 1
+max_args_count = 3
+var_dump_chance = 1.0
+tuple_max_len = 2
+array_max_len = 2
+struct_max_fields = 2
+adt_max_variants = 2
+composite_count = 0
+adt_count = 0
+
+[backends.llvm]
+type = "llvm"
+toolchain = "nightly"
+flags = ["-Zmir-opt-level=0"]
+"""
+
+
+def run(cmd: list[str], *, cwd: Path) -> str:
+    proc = subprocess.run(
+        cmd,
+        cwd=cwd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr)
+        raise SystemExit(proc.returncode)
+    return proc.stdout
+
+
+def generate_source(rustlantis_dir: Path, seed: int, *, build: bool) -> str:
+    if build:
+        run(["cargo", "build", "-q", "-p", "generate"], cwd=rustlantis_dir)
+
+    generator = rustlantis_dir / "target" / "debug" / "generate"
+    if not generator.exists():
+        raise SystemExit(f"generator not found: {generator}")
+
+    with tempfile.TemporaryDirectory(prefix="rustlantis-cuda-oxide-") as tmp:
+        tmpdir = Path(tmp)
+        (tmpdir / "config.toml").write_text(TINY_CONFIG)
+        return run([str(generator), str(seed)], cwd=tmpdir)
+
+
+def extract_first_custom_mir_fn(source: str) -> str:
+    start = source.find("#[custom_mir")
+    if start < 0:
+        raise SystemExit("no #[custom_mir] function found")
+
+    fn_pos = source.find("pub fn ", start)
+    if fn_pos < 0:
+        raise SystemExit("custom MIR function header not found")
+
+    body_start = source.find("{", fn_pos)
+    if body_start < 0:
+        raise SystemExit("custom MIR function body not found")
+
+    depth = 0
+    for idx in range(body_start, len(source)):
+        ch = source[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : idx + 1]
+
+    raise SystemExit("unterminated custom MIR function")
+
+
+def split_args(args: str) -> list[str]:
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    for idx, ch in enumerate(args):
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(args[start:idx].strip())
+            start = idx + 1
+    last = args[start:].strip()
+    if last:
+        parts.append(last)
+    return parts
+
+
+def normalize_dump_arg(arg: str) -> str:
+    arg = arg.strip()
+    for wrapper in ("Move", "Copy"):
+        prefix = f"{wrapper}("
+        if arg.startswith(prefix) and arg.endswith(")"):
+            return arg[len(prefix) : -1].strip()
+    return arg
+
+
+def collect_types(fn_src: str) -> dict[str, str]:
+    header = re.search(r"pub fn\s+\w+\((?P<args>.*?)\)\s*->", fn_src, re.S)
+    if not header:
+        raise SystemExit("function header parse failed")
+
+    types: dict[str, str] = {}
+    for arg in split_args(header.group("args")):
+        match = re.match(r"(?:mut\s+)?(?P<name>_\d+)\s*:\s*(?P<ty>[^,]+)$", arg.strip())
+        if match:
+            types[match.group("name")] = match.group("ty").strip()
+
+    for match in re.finditer(r"let\s+(?P<name>_\d+)\s*:\s*(?P<ty>[^;]+);", fn_src):
+        types[match.group("name")] = match.group("ty").strip()
+
+    return types
+
+
+def function_args(fn_src: str) -> list[tuple[str, str]]:
+    header = re.search(r"pub fn\s+\w+\((?P<args>.*?)\)\s*->", fn_src, re.S)
+    if not header:
+        raise SystemExit("function header parse failed")
+
+    args: list[tuple[str, str]] = []
+    for arg in split_args(header.group("args")):
+        match = re.match(r"(?:mut\s+)?(?P<name>_\d+)\s*:\s*(?P<ty>[^,]+)$", arg.strip())
+        if not match:
+            raise SystemExit(f"unsupported function argument syntax: {arg}")
+        args.append((match.group("name"), match.group("ty").strip()))
+    return args
+
+
+def return_type(fn_src: str) -> str:
+    match = re.search(r"pub fn\s+\w+\(.*?\)\s*->\s*(?P<ret>[^{]+){", fn_src, re.S)
+    if not match:
+        raise SystemExit("function return type parse failed")
+    return match.group("ret").strip()
+
+
+def dump_tuple(values: list[str]) -> str:
+    moved = [f"Move({value})" for value in values]
+    if len(moved) == 1:
+        return f"({moved[0]},)"
+    return f"({', '.join(moved)})"
+
+
+def tuple_type(types: list[str]) -> str:
+    if len(types) == 1:
+        return f"({types[0]},)"
+    return f"({', '.join(types)})"
+
+
+def format_rust_block(src: str) -> str:
+    lines: list[str] = []
+    indent = 0
+    for raw in src.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("}"):
+            indent = max(indent - 1, 0)
+        lines.append(f"{'    ' * indent}{line}")
+        if line.endswith("{"):
+            indent += 1
+    return "\n".join(lines)
+
+
+def literal_for_type(ty: str, idx: int) -> str:
+    literals = {
+        "bool": ["false", "true"],
+        "i8": ["98_i8", "(-17_i8)", "42_i8"],
+        "i16": ["1234_i16", "(-567_i16)", "42_i16"],
+        "i32": ["10_i32", "(-20_i32)", "42_i32"],
+        "i64": ["10_i64", "(-20_i64)", "42_i64"],
+        "u8": ["98_u8", "17_u8", "42_u8"],
+        "u16": ["1234_u16", "567_u16", "42_u16"],
+        "u32": ["10_u32", "20_u32", "42_u32"],
+        "u64": ["10_u64", "20_u64", "42_u64"],
+    }
+    if ty not in literals:
+        raise SystemExit(f"unsupported function argument type for Stage 2 adapter: {ty}")
+    values = literals[ty]
+    return values[idx % len(values)]
+
+
+def adapt_function(fn_src: str, fn_name: str) -> str:
+    types = collect_types(fn_src)
+    dump_pattern = re.compile(
+        r"Call\((?P<dest>[^=]+)=\s*dump_var\((?P<args>.*?)\),\s*ReturnTo\((?P<target>bb\d+)\),\s*UnwindUnreachable\(\)\)",
+        re.S,
+    )
+    dump_matches = list(dump_pattern.finditer(fn_src))
+    if not dump_matches:
+        raise SystemExit("expected one dump_var call terminator")
+
+    dump_locals: list[tuple[str, list[str]]] = []
+    dump_idx = 0
+
+    def rewrite_dump(match: re.Match[str]) -> str:
+        nonlocal dump_idx
+        raw_args = split_args(match.group("args"))
+        values = [normalize_dump_arg(arg) for arg in raw_args]
+        kept_values = [value for value in values if types.get(value) != "()"]
+        kept_types = [types[value] for value in kept_values]
+        for ty in kept_types:
+            if ty not in {"bool", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"}:
+                raise SystemExit(f"unsupported dumped type for Stage 2 adapter: {ty}")
+
+        if not kept_values:
+            return f"Goto({match.group('target')})"
+
+        local = f"__rl_dump{dump_idx}"
+        dump_idx += 1
+        dump_locals.append((local, kept_types))
+        tuple_expr = dump_tuple(kept_values)
+        return (
+            f"{local} = {tuple_expr};\n"
+            f"Call({match.group('dest').strip()} = dump_var(Move({local})), "
+            f"ReturnTo({match.group('target')}), UnwindUnreachable())"
+        )
+
+    adapted = re.sub(
+        r"#\[custom_mir\(dialect = \"runtime\", phase = \"initial\"\)\]",
+        '#[custom_mir(dialect = "runtime", phase = "initial")]',
+        fn_src,
+        count=1,
+    )
+    adapted = re.sub(
+        r"pub fn\s+\w+\((?P<args>.*?)\)\s*->\s*[^{]+{",
+        lambda match: (
+            f"fn {fn_name}({', '.join(split_args(match.group('args')))}) "
+            f"-> {return_type(fn_src)} {{"
+        ),
+        adapted,
+        count=1,
+        flags=re.S,
+    )
+    adapted = dump_pattern.sub(rewrite_dump, adapted)
+    if dump_locals:
+        local_decls = "\n".join(
+            f"        let {name}: {tuple_type(local_types)};" for name, local_types in dump_locals
+        )
+        adapted = re.sub(
+            r"(type RET\s*=\s*[^;]+;)",
+            lambda match: f"{match.group(1)}\n{local_decls}",
+            adapted,
+            count=1,
+        )
+
+    return format_rust_block(adapted)
+
+
+def generated_module(fn_src: str, fn_name: str, seed: int) -> str:
+    adapted = adapt_function(fn_src, fn_name)
+    args = [literal_for_type(ty, idx) for idx, (_, ty) in enumerate(function_args(fn_src))]
+    call_args = ", ".join(args)
+
+    return "\n".join(
+        [
+            "/*",
+            " * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
+            " * SPDX-License-Identifier: Apache-2.0",
+            " */",
+            "",
+            "// AUTO-GENERATED by crates/fuzzer/tools/mir_generator.py.",
+            f"// rustlantis seed: {seed}",
+            "// Adapted dump calls update the fuzzer crate's global trace state.",
+            "",
+            "#![allow(unused_assignments, unused_parens, overflowing_literals)]",
+            "",
+            "use core::intrinsics::mir::*;",
+            "use fuzzer::{dump_var, trace_finish, trace_reset};",
+            "",
+            adapted,
+            "",
+            "#[inline(never)]",
+            "pub fn compute_rustlantis_trace() -> u64 {",
+            "    trace_reset();",
+            f"    let _ = {fn_name}({call_args});",
+            "    trace_finish()",
+            "}",
+        ]
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--seed", type=int, default=83)
+    parser.add_argument("--fn-name", default="fn1")
+    parser.add_argument("--rustlantis-dir", type=Path, default=DEFAULT_RUSTLANTIS_DIR)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--no-build", action="store_true")
+    parser.add_argument(
+        "--function-only",
+        action="store_true",
+        help="emit only the adapted custom-MIR function instead of a generated_case.rs module",
+    )
+    args = parser.parse_args()
+
+    source = generate_source(args.rustlantis_dir, args.seed, build=not args.no_build)
+    fn_src = extract_first_custom_mir_fn(source)
+    adapted = (
+        adapt_function(fn_src, args.fn_name)
+        if args.function_only
+        else generated_module(fn_src, args.fn_name, args.seed)
+    )
+
+    if args.output:
+        args.output.write_text(adapted + "\n")
+    else:
+        print(adapted)
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
