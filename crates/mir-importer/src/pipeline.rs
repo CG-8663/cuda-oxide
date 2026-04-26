@@ -921,3 +921,104 @@ impl std::fmt::Display for PipelineError {
 }
 
 impl std::error::Error for PipelineError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dialect_llvm::export::AsDeviceExtern;
+    use std::{fs, path::PathBuf};
+
+    fn write_temp_ll(name: &str, contents: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "cuda_oxide_mir_importer_{}_{}.ll",
+            std::process::id(),
+            name
+        ));
+        fs::write(&path, contents).expect("write temp LLVM IR");
+        path
+    }
+
+    #[test]
+    fn test_pipeline_config_default_values() {
+        let config = PipelineConfig::default();
+
+        assert_eq!(config.output_name, "kernel");
+        assert!(config.verbose);
+        assert!(!config.show_mir_dialect);
+        assert!(!config.show_llvm_dialect);
+        assert!(!config.emit_ltoir);
+        assert_eq!(config.ltoir_arch, "sm_100");
+        assert!(!config.emit_nvvm_ir);
+    }
+
+    #[test]
+    fn test_device_extern_decl_converts_to_export_decl() {
+        let decl = DeviceExternDecl {
+            export_name: "device_add".to_string(),
+            param_types: vec!["ptr".to_string(), "i32".to_string()],
+            return_type: "void".to_string(),
+            attrs: DeviceExternAttrs {
+                is_convergent: true,
+                is_pure: false,
+                is_readonly: true,
+            },
+        };
+
+        let exported = decl.as_device_extern();
+
+        assert_eq!(exported.export_name, "device_add");
+        assert_eq!(exported.param_types, ["ptr", "i32"]);
+        assert_eq!(exported.return_type, "void");
+        assert!(exported.attrs.is_convergent);
+        assert!(!exported.attrs.is_pure);
+        assert!(exported.attrs.is_readonly);
+    }
+
+    #[test]
+    fn test_feature_detection_reads_llvm_ir_snippets() {
+        let path = write_temp_ll(
+            "features",
+            r#"
+                call void asm sideeffect "wgmma.fence.sync.aligned", ""()
+                call void @llvm.nvvm.tcgen05.alloc()
+                call void asm sideeffect "cluster.sync.aligned", ""()
+                call void asm sideeffect "cp.async.bulk.tensor.2d.shared::cluster.global", ""()
+            "#,
+        );
+
+        assert!(contains_wgmma_features(&path));
+        assert!(contains_blackwell_features(&path));
+        assert!(contains_cluster_features(&path));
+        assert!(contains_tma_features(&path));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_tma_multicast_detection_requires_cta_mask() {
+        let multicast = write_temp_ll(
+            "tma_multicast",
+            "call void @llvm.nvvm.cp.async.bulk.tensor.g2s.tile(i32 0, i1 1, i1 false)",
+        );
+        let unicast = write_temp_ll(
+            "tma_unicast",
+            "call void @llvm.nvvm.cp.async.bulk.tensor.g2s.tile(i32 0, i1 0, i1 false)",
+        );
+
+        assert!(contains_tma_multicast(&multicast));
+        assert!(!contains_tma_multicast(&unicast));
+
+        let _ = fs::remove_file(multicast);
+        let _ = fs::remove_file(unicast);
+    }
+
+    #[test]
+    fn test_select_target_prefers_required_architecture() {
+        assert_eq!(select_target(DetectedFeatures::Blackwell), "sm_100a");
+        assert_eq!(select_target(DetectedFeatures::TmaMulticast), "sm_100a");
+        assert_eq!(select_target(DetectedFeatures::Wgmma), "sm_90a");
+        assert_eq!(select_target(DetectedFeatures::Tma), "sm_100");
+        assert_eq!(select_target(DetectedFeatures::Cluster), "sm_90");
+        assert_eq!(select_target(DetectedFeatures::Basic), "sm_80");
+    }
+}

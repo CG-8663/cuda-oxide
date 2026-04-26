@@ -1,4 +1,9 @@
 <p align="center">
+  <a href="https://github.com/NVlabs/cuda-oxide/actions/workflows/clippy.yml"><img alt="Build" src="https://img.shields.io/github/actions/workflow/status/NVlabs/cuda-oxide/clippy.yml?event=push&label=build"></a>
+  <a href="https://github.com/NVlabs/cuda-oxide/actions/workflows/unit-tests.yml"><img alt="Unit tests" src="https://img.shields.io/github/actions/workflow/status/NVlabs/cuda-oxide/unit-tests.yml?event=push&label=unit%20tests"></a>
+  <a href="https://github.com/NVlabs/cuda-oxide/actions/workflows/cargo-deny.yml"><img alt="cargo-deny" src="https://img.shields.io/github/actions/workflow/status/NVlabs/cuda-oxide/cargo-deny.yml?event=push&label=cargo-deny"></a>
+  <a href="https://github.com/NVlabs/cuda-oxide/actions/workflows/codeql.yml"><img alt="CodeQL" src="https://img.shields.io/github/actions/workflow/status/NVlabs/cuda-oxide/codeql.yml?event=push&label=codeql"></a>
+  <br>
   <img src="assets/logo.png" alt="cuda-oxide logo" width="100%">
 </p>
 

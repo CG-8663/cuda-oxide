@@ -1693,49 +1693,47 @@ pub fn translate_operand(
             // Ordinary Rust `static` / `static mut` values in device code live in
             // CUDA global memory (addrspace 1). SharedArray/Barrier statics have
             // already been intercepted above and remain addrspace 3.
-            if let Some(static_def) = static_def_from_constant(constant)? {
-                if let Some((pointee_ty, is_mutable)) = get_static_pointer_info(&rust_ty) {
-                    ensure_zero_initializer(&static_def, loc.clone())?;
+            if let Some(static_def) = static_def_from_constant(constant)?
+                && let Some((pointee_ty, is_mutable)) = get_static_pointer_info(&rust_ty)
+            {
+                ensure_zero_initializer(&static_def, loc.clone())?;
 
-                    let global_ty = types::translate_type(ctx, &pointee_ty)?;
-                    let ptr_ty =
-                        dialect_mir::types::MirPtrType::get_global(ctx, global_ty, is_mutable)
-                            .into();
+                let global_ty = types::translate_type(ctx, &pointee_ty)?;
+                let ptr_ty =
+                    dialect_mir::types::MirPtrType::get_global(ctx, global_ty, is_mutable).into();
 
-                    let op = Operation::new(
-                        ctx,
-                        MirGlobalAllocOp::get_concrete_op_info(),
-                        vec![ptr_ty],
-                        vec![],
-                        vec![],
-                        0,
-                    );
-                    op.deref_mut(ctx).set_loc(loc);
+                let op = Operation::new(
+                    ctx,
+                    MirGlobalAllocOp::get_concrete_op_info(),
+                    vec![ptr_ty],
+                    vec![],
+                    vec![],
+                    0,
+                );
+                op.deref_mut(ctx).set_loc(loc);
 
-                    let global_alloc = MirGlobalAllocOp::new(op);
+                let global_alloc = MirGlobalAllocOp::new(op);
 
-                    use pliron::builtin::attributes::{StringAttr, TypeAttr};
-                    global_alloc.set_attr_global_type(ctx, TypeAttr::new(global_ty));
-                    global_alloc
-                        .set_attr_global_key(ctx, StringAttr::new(static_def.name().into()));
+                use pliron::builtin::attributes::{StringAttr, TypeAttr};
+                global_alloc.set_attr_global_type(ctx, TypeAttr::new(global_ty));
+                global_alloc.set_attr_global_key(ctx, StringAttr::new(static_def.name()));
 
-                    if let Some(alignment) = static_alignment(&static_def)? {
-                        global_alloc.set_alignment_value(ctx, alignment);
-                    }
-
-                    if let Some(prev) = prev_op {
-                        global_alloc.get_operation().insert_after(ctx, prev);
-                    } else {
-                        global_alloc.get_operation().insert_at_front(block_ptr, ctx);
-                    }
-
-                    let val = Value::OpResult {
-                        op: global_alloc.get_operation(),
-                        res_idx: 0,
-                    };
-
-                    return Ok((val, Some(global_alloc.get_operation())));
+                if let Some(alignment) = static_alignment(&static_def)? {
+                    global_alloc.set_alignment_value(ctx, alignment);
                 }
+
+                if let Some(prev) = prev_op {
+                    global_alloc.get_operation().insert_after(ctx, prev);
+                } else {
+                    global_alloc.get_operation().insert_at_front(block_ptr, ctx);
+                }
+
+                let val = Value::OpResult {
+                    op: global_alloc.get_operation(),
+                    res_idx: 0,
+                };
+
+                return Ok((val, Some(global_alloc.get_operation())));
             }
 
             let const_ty_ptr = types::translate_type(ctx, &rust_ty)?;

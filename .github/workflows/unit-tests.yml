@@ -1,0 +1,41 @@
+---
+name: unit-tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rust-unit-tests:
+    name: cargo test -p ${{ matrix.package }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - dialect-llvm
+          - dialect-mir
+          - dialect-nvvm
+          - mir-importer
+          - mir-lower
+
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v4
+
+      - name: Run crate unit tests
+        run: |
+          sysroot="$(rustc --print sysroot)"
+          export LIBRARY_PATH="${sysroot}/lib:${LIBRARY_PATH:-}"
+          export LD_LIBRARY_PATH="${sysroot}/lib:${LD_LIBRARY_PATH:-}"
+          cargo test -p ${{ matrix.package }} --all-targets
