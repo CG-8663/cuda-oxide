@@ -14,8 +14,8 @@
 
 use dialect_llvm::types as llvm_types;
 use dialect_mir::types::{
-    MirArrayType, MirDisjointSliceType, MirEnumType, MirPtrType, MirSliceType, MirStructType,
-    MirTupleType,
+    MirArrayType, MirDisjointSliceType, MirEnumType, MirFP16Type, MirPtrType, MirSliceType,
+    MirStructType, MirTupleType,
 };
 use pliron::builtin::types::{FP32Type, FP64Type, IntegerType, Signedness};
 use pliron::derive::type_interface_impl;
@@ -29,6 +29,16 @@ use super::types::{
 // =============================================================================
 // `dialect-mir` types
 // =============================================================================
+
+#[type_interface_impl]
+impl MirConvertibleType for MirFP16Type {}
+
+#[type_interface_impl]
+impl MirTypeConversion for MirFP16Type {
+    fn converter(&self) -> ConvertMirTypeFn {
+        |_ty, ctx| Ok(llvm_types::HalfType::get(ctx).into())
+    }
+}
 
 #[type_interface_impl]
 impl MirConvertibleType for MirDisjointSliceType {}
@@ -216,6 +226,16 @@ impl MirTypeConversion for FP64Type {
 // =============================================================================
 // LLVM Dialect Types (passthrough / recursive element conversion)
 // =============================================================================
+
+#[type_interface_impl]
+impl MirConvertibleType for llvm_types::HalfType {}
+
+#[type_interface_impl]
+impl MirTypeConversion for llvm_types::HalfType {
+    fn converter(&self) -> ConvertMirTypeFn {
+        |ty, _ctx| Ok(ty)
+    }
+}
 
 #[type_interface_impl]
 impl MirConvertibleType for llvm_types::PointerType {}

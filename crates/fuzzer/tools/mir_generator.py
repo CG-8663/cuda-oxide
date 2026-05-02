@@ -204,10 +204,15 @@ def literal_for_type(ty: str, idx: int) -> str:
         "i16": ["1234_i16", "(-567_i16)", "42_i16"],
         "i32": ["10_i32", "(-20_i32)", "42_i32"],
         "i64": ["10_i64", "(-20_i64)", "42_i64"],
+        "i128": ["10_i128", "(-20_i128)", "42_i128"],
+        "isize": ["10_isize", "(-20_isize)", "42_isize"],
         "u8": ["98_u8", "17_u8", "42_u8"],
         "u16": ["1234_u16", "567_u16", "42_u16"],
         "u32": ["10_u32", "20_u32", "42_u32"],
         "u64": ["10_u64", "20_u64", "42_u64"],
+        "u128": ["10_u128", "20_u128", "42_u128"],
+        "usize": ["10_usize", "20_usize", "42_usize"],
+        "char": ["'a'", "'\\u{3a9}'", "'\\u{1f980}'"],
     }
     if ty not in literals:
         raise SystemExit(f"unsupported function argument type for Stage 2 adapter: {ty}")
@@ -235,7 +240,22 @@ def adapt_function(fn_src: str, fn_name: str) -> str:
         kept_values = [value for value in values if types.get(value) != "()"]
         kept_types = [types[value] for value in kept_values]
         for ty in kept_types:
-            if ty not in {"bool", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"}:
+            if ty not in {
+                "bool",
+                "i8",
+                "i16",
+                "i32",
+                "i64",
+                "i128",
+                "isize",
+                "u8",
+                "u16",
+                "u32",
+                "u64",
+                "u128",
+                "usize",
+                "char",
+            }:
                 raise SystemExit(f"unsupported dumped type for Stage 2 adapter: {ty}")
 
         if not kept_values:

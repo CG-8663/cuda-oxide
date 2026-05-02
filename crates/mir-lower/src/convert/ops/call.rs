@@ -35,10 +35,13 @@
 //! we insert `addrspacecast` to convert them to generic pointers at the call site.
 
 use crate::convert::types::{convert_type, is_zero_sized_type};
+use crate::helpers;
+use dialect_llvm::op_interfaces::CastOpInterface;
 use dialect_llvm::ops as llvm;
 use dialect_llvm::types as llvm_types;
 use dialect_mir::ops::MirCallOp;
 use dialect_mir::types::{MirDisjointSliceType, MirSliceType, MirStructType, MirTupleType};
+use pliron::builtin::attributes::IntegerAttr;
 use pliron::builtin::op_interfaces::CallOpCallable;
 use pliron::builtin::types::{IntegerType, Signedness};
 use pliron::context::{Context, Ptr};
@@ -50,7 +53,9 @@ use pliron::op::Op;
 use pliron::operation::Operation;
 use pliron::result::Result;
 use pliron::r#type::{TypeObj, Typed};
+use pliron::utils::apint::APInt;
 use pliron::value::Value;
+use std::num::NonZeroUsize;
 
 /// Generic address space (can alias any memory).
 const ADDRSPACE_GENERIC: u32 = 0;
@@ -58,6 +63,44 @@ const ADDRSPACE_GENERIC: u32 = 0;
 /// Prefix added by `#[device] extern "C"` proc-macro for internal detection.
 /// Stripped during lowering so LLVM IR uses the original symbol name.
 const DEVICE_EXTERN_PREFIX: &str = "cuda_oxide_device_extern_";
+
+const RUST_BIT_CALLEE_ROTATE_LEFT: &str = "__cuda_oxide_rust_intrinsic_rotate_left";
+const RUST_BIT_CALLEE_ROTATE_RIGHT: &str = "__cuda_oxide_rust_intrinsic_rotate_right";
+const RUST_BIT_CALLEE_CTPOP: &str = "__cuda_oxide_rust_intrinsic_ctpop";
+const RUST_BIT_CALLEE_CTLZ: &str = "__cuda_oxide_rust_intrinsic_ctlz";
+const RUST_BIT_CALLEE_CTLZ_NONZERO: &str = "__cuda_oxide_rust_intrinsic_ctlz_nonzero";
+const RUST_BIT_CALLEE_CTTZ: &str = "__cuda_oxide_rust_intrinsic_cttz";
+const RUST_BIT_CALLEE_CTTZ_NONZERO: &str = "__cuda_oxide_rust_intrinsic_cttz_nonzero";
+const RUST_BIT_CALLEE_BSWAP: &str = "__cuda_oxide_rust_intrinsic_bswap";
+const RUST_BIT_CALLEE_BITREVERSE: &str = "__cuda_oxide_rust_intrinsic_bitreverse";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RustBitIntrinsic {
+    RotateLeft,
+    RotateRight,
+    Ctpop,
+    Ctlz { zero_undef: bool },
+    Cttz { zero_undef: bool },
+    Bswap,
+    Bitreverse,
+}
+
+impl RustBitIntrinsic {
+    fn from_marker_callee(callee: &str) -> Option<Self> {
+        match callee {
+            RUST_BIT_CALLEE_ROTATE_LEFT => Some(Self::RotateLeft),
+            RUST_BIT_CALLEE_ROTATE_RIGHT => Some(Self::RotateRight),
+            RUST_BIT_CALLEE_CTPOP => Some(Self::Ctpop),
+            RUST_BIT_CALLEE_CTLZ => Some(Self::Ctlz { zero_undef: false }),
+            RUST_BIT_CALLEE_CTLZ_NONZERO => Some(Self::Ctlz { zero_undef: true }),
+            RUST_BIT_CALLEE_CTTZ => Some(Self::Cttz { zero_undef: false }),
+            RUST_BIT_CALLEE_CTTZ_NONZERO => Some(Self::Cttz { zero_undef: true }),
+            RUST_BIT_CALLEE_BSWAP => Some(Self::Bswap),
+            RUST_BIT_CALLEE_BITREVERSE => Some(Self::Bitreverse),
+            _ => None,
+        }
+    }
+}
 
 fn anyhow_to_pliron(e: anyhow::Error) -> pliron::result::Error {
     pliron::create_error!(
@@ -81,7 +124,7 @@ pub fn convert(
     op: Ptr<Operation>,
     operands_info: &OperandsInfo,
 ) -> Result<()> {
-    let callee_ident: pliron::identifier::Identifier = {
+    let callee_name: String = {
         let mir_call = MirCallOp::new(op);
         let callee_attr = match mir_call.get_attr_callee(ctx) {
             Some(a) => a,
@@ -92,8 +135,14 @@ pub fn convert(
                 );
             }
         };
-        let callee_name: String = (*callee_attr).clone().into();
+        (*callee_attr).clone().into()
+    };
 
+    if let Some(intrinsic) = RustBitIntrinsic::from_marker_callee(&callee_name) {
+        return convert_rust_bit_intrinsic(ctx, rewriter, op, intrinsic);
+    }
+
+    let callee_ident: pliron::identifier::Identifier = {
         let resolved_name = resolve_device_extern_symbol(&callee_name);
 
         resolved_name
@@ -141,6 +190,174 @@ pub fn convert(
     }
 
     Ok(())
+}
+
+/// Lower marker calls for rustc's integer bit intrinsics to LLVM intrinsics.
+///
+/// Rust methods like `u128::rotate_left` call `core::intrinsics::rotate_left`
+/// in libcore. The importer preserves that as a marker `mir.call`; here we
+/// recover the concrete integer width and emit the corresponding overloaded
+/// LLVM intrinsic.
+fn convert_rust_bit_intrinsic(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    intrinsic: RustBitIntrinsic,
+) -> Result<()> {
+    let loc = op.deref(ctx).loc();
+    if op.deref(ctx).get_num_results() != 1 {
+        return pliron::input_err!(loc, "Rust bit intrinsic call must have one result");
+    }
+
+    let args: Vec<Value> = op.deref(ctx).operands().collect();
+    let Some(&value) = args.first() else {
+        return pliron::input_err!(loc, "Rust bit intrinsic call missing integer operand");
+    };
+
+    let value_ty = value.get_type(ctx);
+    let value_width = integer_bit_width(ctx, value_ty, loc.clone())?;
+    let mir_result_ty = op.deref(ctx).get_result(0).get_type(ctx);
+    let result_type = convert_type(ctx, mir_result_ty).map_err(anyhow_to_pliron)?;
+
+    if matches!(intrinsic, RustBitIntrinsic::Bswap) && value_width == 8 {
+        // LLVM has no useful byte swap for a single byte; Rust's semantics are identity.
+        let bitcast = llvm::BitcastOp::new(ctx, value, result_type);
+        rewriter.insert_operation(ctx, bitcast.get_operation());
+        rewriter.replace_operation(ctx, op, bitcast.get_operation());
+        return Ok(());
+    }
+
+    let (intrinsic_name, intrinsic_args, intrinsic_result_ty) = match intrinsic {
+        RustBitIntrinsic::RotateLeft | RustBitIntrinsic::RotateRight => {
+            if args.len() != 2 {
+                return pliron::input_err!(
+                    loc,
+                    "rotate intrinsic requires value and shift operands"
+                );
+            }
+            let (shift, _) =
+                cast_integer_value_to_type(ctx, rewriter, args[1], value_ty, loc.clone())?;
+            let suffix = match intrinsic {
+                RustBitIntrinsic::RotateLeft => "fshl",
+                RustBitIntrinsic::RotateRight => "fshr",
+                _ => unreachable!(),
+            };
+            (
+                format!("llvm_{suffix}_i{value_width}"),
+                vec![value, value, shift],
+                value_ty,
+            )
+        }
+        RustBitIntrinsic::Ctpop => (format!("llvm_ctpop_i{value_width}"), vec![value], value_ty),
+        RustBitIntrinsic::Ctlz { zero_undef } => {
+            let zero_undef = create_i1_constant(ctx, rewriter, zero_undef);
+            (
+                format!("llvm_ctlz_i{value_width}"),
+                vec![value, zero_undef],
+                value_ty,
+            )
+        }
+        RustBitIntrinsic::Cttz { zero_undef } => {
+            let zero_undef = create_i1_constant(ctx, rewriter, zero_undef);
+            (
+                format!("llvm_cttz_i{value_width}"),
+                vec![value, zero_undef],
+                value_ty,
+            )
+        }
+        RustBitIntrinsic::Bswap => (format!("llvm_bswap_i{value_width}"), vec![value], value_ty),
+        RustBitIntrinsic::Bitreverse => (
+            format!("llvm_bitreverse_i{value_width}"),
+            vec![value],
+            value_ty,
+        ),
+    };
+
+    let arg_types = intrinsic_args
+        .iter()
+        .map(|arg| arg.get_type(ctx))
+        .collect::<Vec<_>>();
+    let func_ty = llvm_types::FuncType::get(ctx, intrinsic_result_ty, arg_types, false);
+    let parent_block = op.deref(ctx).get_parent_block().ok_or_else(|| {
+        pliron::input_error!(loc.clone(), "Rust bit intrinsic call has no parent block")
+    })?;
+    helpers::ensure_intrinsic_declared(ctx, parent_block, &intrinsic_name, func_ty)
+        .map_err(|e| pliron::input_error!(loc.clone(), "Failed to declare intrinsic: {e}"))?;
+
+    let sym_name: pliron::identifier::Identifier = intrinsic_name
+        .as_str()
+        .try_into()
+        .map_err(|e| pliron::input_error!(loc.clone(), "Invalid intrinsic name: {:?}", e))?;
+    let llvm_call = llvm::CallOp::new(
+        ctx,
+        CallOpCallable::Direct(sym_name),
+        func_ty,
+        intrinsic_args,
+    );
+    rewriter.insert_operation(ctx, llvm_call.get_operation());
+
+    let call_result = llvm_call.get_operation().deref(ctx).get_result(0);
+    let (_, final_op) =
+        cast_integer_value_to_type(ctx, rewriter, call_result, result_type, loc.clone())?;
+    let replacement = final_op.unwrap_or_else(|| llvm_call.get_operation());
+    rewriter.replace_operation(ctx, op, replacement);
+
+    Ok(())
+}
+
+fn integer_bit_width(
+    ctx: &Context,
+    ty: Ptr<TypeObj>,
+    loc: pliron::location::Location,
+) -> Result<u32> {
+    let ty_ref = ty.deref(ctx);
+    let Some(int_ty) = ty_ref.downcast_ref::<IntegerType>() else {
+        return pliron::input_err!(loc, "expected integer type for Rust bit intrinsic");
+    };
+    Ok(int_ty.width())
+}
+
+fn create_i1_constant(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    value: bool,
+) -> Value {
+    let i1_ty = IntegerType::get(ctx, 1, Signedness::Signless);
+    let width = NonZeroUsize::new(1).expect("1 is non-zero");
+    let apint = APInt::from_u64(u64::from(value), width);
+    let attr = IntegerAttr::new(i1_ty, apint);
+    let const_op = llvm::ConstantOp::new(ctx, attr.into());
+    rewriter.insert_operation(ctx, const_op.get_operation());
+    const_op.get_operation().deref(ctx).get_result(0)
+}
+
+fn cast_integer_value_to_type(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    value: Value,
+    target_ty: Ptr<TypeObj>,
+    loc: pliron::location::Location,
+) -> Result<(Value, Option<Ptr<Operation>>)> {
+    let source_width = integer_bit_width(ctx, value.get_type(ctx), loc.clone())?;
+    let target_width = integer_bit_width(ctx, target_ty, loc)?;
+
+    if source_width == target_width {
+        return Ok((value, None));
+    }
+
+    let cast_op = if source_width < target_width {
+        let zext = llvm::ZExtOp::new(ctx, value, target_ty);
+        let nneg_key: pliron::identifier::Identifier = "llvm_nneg_flag".try_into().unwrap();
+        zext.get_operation().deref_mut(ctx).attributes.0.insert(
+            nneg_key,
+            pliron::builtin::attributes::BoolAttr::new(false).into(),
+        );
+        zext.get_operation()
+    } else {
+        llvm::TruncOp::new(ctx, value, target_ty).get_operation()
+    };
+    rewriter.insert_operation(ctx, cast_op);
+    Ok((cast_op.deref(ctx).get_result(0), Some(cast_op)))
 }
 
 /// Flatten arguments according to ABI rules.

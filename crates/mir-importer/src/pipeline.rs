@@ -524,11 +524,7 @@ fn llvm_type_string_to_pliron(ctx: &mut Context, type_str: &str) -> Ptr<pliron::
     match type_str {
         "float" => FP32Type::get(ctx).into(),
         "double" => FP64Type::get(ctx).into(),
-        "half" => {
-            // half is f16, but pliron may not have a direct type
-            // For now, use i16 as a fallback (will be handled in export)
-            IntegerType::get(ctx, 16, Signedness::Signless).into()
-        }
+        "half" => dialect_llvm::types::HalfType::get(ctx).into(),
         "i1" => IntegerType::get(ctx, 1, Signedness::Signless).into(),
         "i8" => IntegerType::get(ctx, 8, Signedness::Signless).into(),
         "i16" => IntegerType::get(ctx, 16, Signedness::Signless).into(),

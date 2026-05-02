@@ -61,7 +61,9 @@ fn get_binary_operands(op: Ptr<Operation>, ctx: &Context) -> Result<(Value, Valu
 /// Check if a value has floating-point type.
 fn is_float_type(ctx: &Context, val: Value) -> bool {
     let ty = val.get_type(ctx);
-    ty.deref(ctx).is::<FP32Type>() || ty.deref(ctx).is::<FP64Type>()
+    ty.deref(ctx).is::<dialect_llvm::types::HalfType>()
+        || ty.deref(ctx).is::<FP32Type>()
+        || ty.deref(ctx).is::<FP64Type>()
 }
 
 /// Check if a binary operation's integer operands were signed before type conversion.

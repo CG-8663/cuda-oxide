@@ -6,21 +6,85 @@
 //! Attributes belonging to the LLVM dialect.
 
 use std::fmt::Display;
+use std::hash::{Hash, Hasher};
 
 use combine::parser::char::spaces;
 use combine::{Parser, choice};
 use thiserror::Error;
 
 use pliron::attribute::Attribute;
+use pliron::builtin::attr_interfaces::{FloatAttr, TypedAttrInterface};
 use pliron::builtin::attributes::IntegerAttr;
 use pliron::common_traits::Verify;
-use pliron::context::Context;
-use pliron::derive::{format, pliron_attr};
+use pliron::context::{Context, Ptr};
+use pliron::derive::{attr_interface_impl, format, pliron_attr};
 use pliron::location::Located;
 use pliron::parsable::{IntoParseResult, Parsable};
 use pliron::printable::Printable;
 use pliron::result::Result;
+use pliron::r#type::{TypeObj, Typed};
+use pliron::utils::apfloat::{self, Float, GetSemantics};
 use pliron::{impl_printable_for_display, input_error, verify_err_noloc};
+
+use crate::types::HalfType;
+
+#[pliron_attr(name = "llvm.half_attr", format = "$0", verifier = "succ")]
+#[derive(PartialEq, Clone, Debug)]
+pub struct FPHalfAttr(pub apfloat::Half);
+
+impl FPHalfAttr {
+    pub fn from_bits(bits: u16) -> Self {
+        FPHalfAttr(<apfloat::Half as Float>::from_bits(bits as u128))
+    }
+
+    pub fn to_bits(&self) -> u16 {
+        self.0.to_bits() as u16
+    }
+}
+
+impl Hash for FPHalfAttr {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.to_bits().hash(state);
+    }
+}
+
+impl Typed for FPHalfAttr {
+    fn get_type(&self, ctx: &Context) -> Ptr<TypeObj> {
+        HalfType::get(ctx).into()
+    }
+}
+
+#[attr_interface_impl]
+impl TypedAttrInterface for FPHalfAttr {
+    fn get_type(&self, ctx: &Context) -> Ptr<TypeObj> {
+        HalfType::get(ctx).into()
+    }
+}
+
+#[attr_interface_impl]
+impl FloatAttr for FPHalfAttr {
+    fn get_inner(&self) -> &dyn apfloat::DynFloat {
+        &self.0
+    }
+
+    fn build_from(&self, df: Box<dyn apfloat::DynFloat>) -> Box<dyn FloatAttr> {
+        let df = df
+            .downcast::<apfloat::Half>()
+            .expect("Expected a half precision float");
+        Box::new(FPHalfAttr(*df))
+    }
+
+    fn get_semantics(&self) -> apfloat::Semantics {
+        Self::get_semantics_static()
+    }
+
+    fn get_semantics_static() -> apfloat::Semantics
+    where
+        Self: Sized,
+    {
+        <apfloat::Half as GetSemantics>::get_semantics()
+    }
+}
 
 bitflags::bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -276,6 +340,7 @@ pub enum LlvmAtomicRmwKind {
 }
 
 pub fn register(ctx: &mut Context) {
+    FPHalfAttr::register(ctx);
     IntegerOverflowFlagsAttr::register(ctx);
     ICmpPredicateAttr::register(ctx);
     FCmpPredicateAttr::register(ctx);

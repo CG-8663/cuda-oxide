@@ -23,6 +23,7 @@
 //! Float constants (f32, f64) pass through unchanged.
 
 use dialect_llvm::ops as llvm;
+use dialect_mir::attributes::MirFP16Attr;
 use dialect_mir::ops::{MirConstantOp, MirFloatConstantOp, MirUndefOp};
 use pliron::builtin::types::{IntegerType, Signedness};
 use pliron::context::{Context, Ptr};
@@ -86,13 +87,16 @@ pub(crate) fn convert_float(
     _operands_info: &OperandsInfo,
 ) -> Result<()> {
     enum FloatAttr {
+        F16(MirFP16Attr),
         F32(pliron::builtin::attributes::FPSingleAttr),
         F64(pliron::builtin::attributes::FPDoubleAttr),
     }
 
     let float_attr = {
         let mir_const = MirFloatConstantOp::new(op);
-        if let Some(attr) = mir_const.get_attr_float_value(ctx) {
+        if let Some(attr) = mir_const.get_attr_float_value_f16(ctx) {
+            FloatAttr::F16(attr.clone())
+        } else if let Some(attr) = mir_const.get_attr_float_value(ctx) {
             FloatAttr::F32(attr.clone())
         } else if let Some(attr) = mir_const.get_attr_float_value_f64(ctx) {
             FloatAttr::F64(attr.clone())
@@ -105,6 +109,10 @@ pub(crate) fn convert_float(
     };
 
     let llvm_const = match float_attr {
+        FloatAttr::F16(attr) => llvm::ConstantOp::new(
+            ctx,
+            dialect_llvm::attributes::FPHalfAttr::from_bits(attr.to_bits()).into(),
+        ),
         FloatAttr::F32(attr) => llvm::ConstantOp::new(ctx, attr.into()),
         FloatAttr::F64(attr) => llvm::ConstantOp::new(ctx, attr.into()),
     };

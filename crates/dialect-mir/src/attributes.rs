@@ -5,9 +5,16 @@
 
 //! Attributes belonging to the MIR dialect.
 
+use std::hash::{Hash, Hasher};
+
 use pliron::attribute::Attribute;
-use pliron::context::Context;
-use pliron_derive::pliron_attr;
+use pliron::builtin::attr_interfaces::{FloatAttr, TypedAttrInterface};
+use pliron::context::{Context, Ptr};
+use pliron::derive::{attr_interface_impl, pliron_attr};
+use pliron::r#type::{TypeObj, Typed};
+use pliron::utils::apfloat::{self, Float, GetSemantics};
+
+use crate::types::MirFP16Type;
 
 /// MIR cast kind — preserves the semantic intent of the cast from Rust MIR.
 ///
@@ -54,9 +61,69 @@ pub struct FieldIndexAttr(pub u32);
 #[derive(PartialEq, Eq, Clone, Debug, Hash)]
 pub struct VariantIndexAttr(pub u32);
 
+/// IEEE 754 binary16 floating-point attribute for Rust MIR `f16` constants.
+#[pliron_attr(name = "mir.fp16_attr", format = "$0", verifier = "succ")]
+#[derive(PartialEq, Clone, Debug)]
+pub struct MirFP16Attr(pub apfloat::Half);
+
+impl MirFP16Attr {
+    pub fn from_bits(bits: u16) -> Self {
+        MirFP16Attr(<apfloat::Half as Float>::from_bits(bits as u128))
+    }
+
+    pub fn to_bits(&self) -> u16 {
+        self.0.to_bits() as u16
+    }
+}
+
+impl Hash for MirFP16Attr {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.to_bits().hash(state);
+    }
+}
+
+impl Typed for MirFP16Attr {
+    fn get_type(&self, ctx: &Context) -> Ptr<TypeObj> {
+        MirFP16Type::get(ctx).into()
+    }
+}
+
+#[attr_interface_impl]
+impl TypedAttrInterface for MirFP16Attr {
+    fn get_type(&self, ctx: &Context) -> Ptr<TypeObj> {
+        MirFP16Type::get(ctx).into()
+    }
+}
+
+#[attr_interface_impl]
+impl FloatAttr for MirFP16Attr {
+    fn get_inner(&self) -> &dyn apfloat::DynFloat {
+        &self.0
+    }
+
+    fn build_from(&self, df: Box<dyn apfloat::DynFloat>) -> Box<dyn FloatAttr> {
+        let df = df
+            .downcast::<apfloat::Half>()
+            .expect("Expected a half precision float");
+        Box::new(MirFP16Attr(*df))
+    }
+
+    fn get_semantics(&self) -> apfloat::Semantics {
+        Self::get_semantics_static()
+    }
+
+    fn get_semantics_static() -> apfloat::Semantics
+    where
+        Self: Sized,
+    {
+        <apfloat::Half as GetSemantics>::get_semantics()
+    }
+}
+
 pub fn register(ctx: &mut Context) {
     MirCastKindAttr::register(ctx);
     MutabilityAttr::register(ctx);
     FieldIndexAttr::register(ctx);
     VariantIndexAttr::register(ctx);
+    MirFP16Attr::register(ctx);
 }

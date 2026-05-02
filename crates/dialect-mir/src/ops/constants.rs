@@ -25,6 +25,8 @@ use pliron::{
 };
 use pliron_derive::pliron_op;
 
+use crate::attributes::MirFP16Attr;
+
 // ============================================================================
 // MirConstantOp
 // ============================================================================
@@ -110,11 +112,12 @@ impl Verify for MirConstantOp {
 /// ```text
 /// | Name             | Type         | Description                        |
 /// |------------------|--------------|-----------------------------------|
+/// | `float_value_f16`| MirFP16Attr  | The f16 floating-point constant   |
 /// | `float_value`    | FPSingleAttr | The f32 floating-point constant   |
 /// | `float_value_f64`| FPDoubleAttr | The f64 floating-point constant   |
 /// ```
 ///
-/// Only one of `float_value` or `float_value_f64` should be set.
+/// Only one float attribute should be set.
 ///
 /// # Results
 ///
@@ -126,13 +129,13 @@ impl Verify for MirConstantOp {
 ///
 /// # Verification
 ///
-/// - Must have either `float_value` or `float_value_f64` attribute.
+/// - Must have exactly one float attribute.
 /// - Result type must match the value attribute type.
 #[pliron_op(
     name = "mir.float_constant",
     format,
     interfaces = [NOpdsInterface<0>, NResultsInterface<1>, OneResultInterface],
-    attributes = (float_value: FPSingleAttr, float_value_f64: FPDoubleAttr)
+    attributes = (float_value_f16: MirFP16Attr, float_value: FPSingleAttr, float_value_f64: FPDoubleAttr)
 )]
 pub struct MirFloatConstantOp;
 
@@ -147,17 +150,22 @@ impl Verify for MirFloatConstantOp {
     fn verify(&self, ctx: &Context) -> Result<(), Error> {
         let op = &*self.get_operation().deref(ctx);
 
-        // Check for either f32 or f64 attribute and get the value type
-        let val_ty = if let Some(attr) = self.get_attr_float_value(ctx) {
-            attr.get_type(ctx)
-        } else if let Some(attr) = self.get_attr_float_value_f64(ctx) {
-            attr.get_type(ctx)
-        } else {
+        let attrs = [
+            self.get_attr_float_value_f16(ctx)
+                .map(|attr| Typed::get_type(&*attr, ctx)),
+            self.get_attr_float_value(ctx)
+                .map(|attr| attr.get_type(ctx)),
+            self.get_attr_float_value_f64(ctx)
+                .map(|attr| attr.get_type(ctx)),
+        ];
+        let set_count = attrs.iter().filter(|attr| attr.is_some()).count();
+        if set_count != 1 {
             return verify_err!(
                 op.loc(),
-                "MirFloatConstantOp missing float_value or float_value_f64 attribute"
+                "MirFloatConstantOp must have exactly one float value attribute"
             );
         };
+        let val_ty = attrs.into_iter().flatten().next().unwrap();
 
         let res = op.get_result(0);
         let res_ty = res.get_type(ctx);

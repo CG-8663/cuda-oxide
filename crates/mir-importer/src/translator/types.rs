@@ -14,6 +14,7 @@
 //! | `i32`, `u64`, etc.  | `IntegerType` (with signedness)     |
 //! | `f32`, `f64`        | `FP32Type`, `FP64Type`              |
 //! | `bool`              | `i1` (signless)                     |
+//! | `char`              | `ui32`                              |
 //! | `(A, B, C)`         | `MirTupleType`                      |
 //! | `[T; N]`            | `ArrayType`                         |
 //! | `*const T`, `*mut T`| `MirPtrType` (generic addrspace)    |
@@ -310,6 +311,14 @@ pub fn translate_type(
             )
             .into())
         }
+        rustc_public::ty::TyKind::RigidTy(rustc_public::ty::RigidTy::Char) => {
+            Ok(pliron::builtin::types::IntegerType::get(
+                ctx,
+                32,
+                pliron::builtin::types::Signedness::Unsigned,
+            )
+            .into())
+        }
         // The never type `!` represents computations that never complete (e.g., panic, infinite loop).
         // We translate it to an empty tuple (unit) since the code path is unreachable anyway.
         // This is used by things like Option::unwrap_failed() which returns `!`.
@@ -325,9 +334,7 @@ pub fn translate_type(
                     Ok(pliron::builtin::types::FP64Type::get(ctx).into())
                 }
                 rustc_public::ty::FloatTy::F16 => {
-                    input_err_noloc!(TranslationErr::unsupported(
-                        "f16 (half precision) not yet supported"
-                    ))
+                    Ok(dialect_mir::types::MirFP16Type::get(ctx).into())
                 }
                 rustc_public::ty::FloatTy::F128 => {
                     input_err_noloc!(TranslationErr::unsupported(
@@ -672,7 +679,8 @@ pub fn translate_type(
                         rustc_public::ty::RigidTy::Int(_)
                         | rustc_public::ty::RigidTy::Uint(_)
                         | rustc_public::ty::RigidTy::Float(_)
-                        | rustc_public::ty::RigidTy::Bool,
+                        | rustc_public::ty::RigidTy::Bool
+                        | rustc_public::ty::RigidTy::Char,
                     ) = self_ty.kind()
                     {
                         return translate_type(ctx, self_ty);

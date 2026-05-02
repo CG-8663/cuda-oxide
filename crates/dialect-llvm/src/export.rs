@@ -40,9 +40,9 @@ use std::collections::HashMap;
 use std::fmt::Write;
 
 use crate::{
-    attributes::{GepIndexAttr, ICmpPredicateAttr},
+    attributes::{FPHalfAttr, GepIndexAttr, ICmpPredicateAttr},
     ops::{self, FuncOp, atomic::LlvmAtomicOpInterface},
-    types::{FuncType, PointerType, StructType, VoidType},
+    types::{FuncType, HalfType, PointerType, StructType, VoidType},
 };
 use pliron::builtin::type_interfaces::FunctionTypeInterface;
 
@@ -1154,6 +1154,8 @@ impl<'a> ModuleExportState<'a> {
                             val_attr.downcast_ref::<IntegerAttr>()
                         {
                             int_attr.value().to_string_unsigned_decimal()
+                        } else if let Some(fp16_attr) = val_attr.downcast_ref::<FPHalfAttr>() {
+                            format_half_literal(fp16_attr.to_bits())
                         } else if let Some(fp32_attr) = val_attr.downcast_ref::<FPSingleAttr>() {
                             let float_val: f32 = fp32_attr.clone().into();
                             format_float_literal(f64::from(float_val))
@@ -2140,6 +2142,8 @@ impl<'a> ModuleExportState<'a> {
                     // by splitting on '_', which broke for values with underscore grouping
                     // (e.g., 1u64 << 46 = 0x4000_0000_0000 would become 0x4000 = 16384).
                     int_attr.value().to_string_unsigned_decimal()
+                } else if let Some(fp16_attr) = val_attr.downcast_ref::<FPHalfAttr>() {
+                    format_half_literal(fp16_attr.to_bits())
                 } else if let Some(fp32_attr) = val_attr.downcast_ref::<FPSingleAttr>() {
                     // Float constant (f32) - format as LLVM float literal
                     let float_val: f32 = fp32_attr.clone().into();
@@ -2258,6 +2262,8 @@ impl<'a> ModuleExportState<'a> {
             }
         } else if ty_ref.is::<VoidType>() {
             write!(output, "void").unwrap();
+        } else if ty_ref.is::<HalfType>() {
+            write!(output, "half").unwrap();
         } else if ty_ref.is::<FP32Type>() {
             write!(output, "float").unwrap();
         } else if ty_ref.is::<FP64Type>() {
@@ -2286,6 +2292,10 @@ impl<'a> ModuleExportState<'a> {
         }
         Ok(())
     }
+}
+
+fn format_half_literal(bits: u16) -> String {
+    format!("0xH{bits:04X}")
 }
 
 /// Format a float value as an LLVM IR literal.

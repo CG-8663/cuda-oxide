@@ -33,6 +33,7 @@ use super::types;
 use crate::error::{TranslationErr, TranslationResult};
 use crate::translator::values::ValueMap;
 use dialect_mir::attributes::MirCastKindAttr;
+use dialect_mir::attributes::MirFP16Attr;
 use dialect_mir::ops::{
     MirAddOp, MirBitAndOp, MirBitOrOp, MirBitXorOp, MirCastOp, MirCheckedAddOp, MirCheckedMulOp,
     MirCheckedSubOp, MirConstructArrayOp, MirConstructEnumOp, MirConstructStructOp, MirDivOp,
@@ -40,6 +41,7 @@ use dialect_mir::ops::{
     MirMulOp, MirNeOp, MirNegOp, MirNotOp, MirPtrOffsetOp, MirRefOp, MirRemOp, MirShlOp, MirShrOp,
     MirSubOp,
 };
+use dialect_mir::types::MirFP16Type;
 use pliron::basic_block::BasicBlock;
 use pliron::builtin::types::{FP32Type, FP64Type, IntegerType, Signedness};
 use pliron::context::{Context, Ptr};
@@ -1789,10 +1791,11 @@ pub fn translate_operand(
                 .deref(ctx)
                 .is::<dialect_mir::types::MirStructType>();
 
-            // Check if this is a float type (f32 or f64)
+            // Check if this is a float type (f16, f32, or f64)
+            let is_float_16 = const_ty_ptr.deref(ctx).is::<MirFP16Type>();
             let is_float_32 = const_ty_ptr.deref(ctx).is::<FP32Type>();
             let is_float_64 = const_ty_ptr.deref(ctx).is::<FP64Type>();
-            let is_float = is_float_32 || is_float_64;
+            let is_float = is_float_16 || is_float_32 || is_float_64;
 
             // Check if this is an enum type
             let is_enum = const_ty_ptr
@@ -1848,10 +1851,49 @@ pub fn translate_operand(
                     loc,
                 )
             } else if is_float {
-                // Parse bytes for float (f32 or f64)
+                // Parse bytes for float (f16, f32, or f64)
                 use dialect_mir::ops::MirFloatConstantOp;
 
-                if is_float_64 {
+                if is_float_16 {
+                    let bytes = constant_bytes(constant, "f16", loc.clone())?;
+                    if bytes.len() < 2 {
+                        return input_err!(
+                            loc,
+                            TranslationErr::unsupported(format!(
+                                "f16 constant needs 2 bytes, found {}",
+                                bytes.len()
+                            ))
+                        );
+                    }
+                    let bits = read_uint_from_bytes(&bytes[..2]) as u16;
+                    let float_attr = MirFP16Attr::from_bits(bits);
+
+                    let op = Operation::new(
+                        ctx,
+                        MirFloatConstantOp::get_concrete_op_info(),
+                        vec![const_ty_ptr],
+                        vec![],
+                        vec![],
+                        0,
+                    );
+                    op.deref_mut(ctx).set_loc(loc);
+
+                    let float_op = MirFloatConstantOp::new(op);
+                    float_op.set_attr_float_value_f16(ctx, float_attr);
+
+                    if let Some(prev) = prev_op {
+                        float_op.get_operation().insert_after(ctx, prev);
+                    } else {
+                        float_op.get_operation().insert_at_front(block_ptr, ctx);
+                    }
+
+                    let val = Value::OpResult {
+                        op: float_op.get_operation(),
+                        res_idx: 0,
+                    };
+
+                    Ok((val, Some(float_op.get_operation())))
+                } else if is_float_64 {
                     // Handle f64 (8 bytes)
                     let float_val = if const_str.contains("bytes: [") {
                         if let Some(bytes_part) = const_str.split("bytes: [").nth(1) {
@@ -2171,42 +2213,6 @@ pub fn translate_operand(
                 Ok((ptr_val_result, Some(cast_op)))
             } else if const_ty_ptr.deref(ctx).is::<IntegerType>() {
                 // Integer constant
-                let int_val = if const_str.contains("bytes: [") {
-                    if let Some(bytes_part) = const_str.split("bytes: [").nth(1) {
-                        let bytes_end = bytes_part.split(']').next().unwrap_or("");
-                        let mut bytes = Vec::new();
-                        for byte_str in bytes_end.split(',') {
-                            if bytes.len() >= 8 {
-                                break; // Max 8 bytes for u64
-                            }
-                            let b_str = byte_str.trim();
-                            if let Some(num_str) = b_str
-                                .strip_prefix("Some(")
-                                .and_then(|s| s.strip_suffix(')'))
-                                && let Ok(byte) = num_str.parse::<u8>()
-                            {
-                                bytes.push(byte);
-                            }
-                        }
-
-                        let mut res: u64 = 0;
-                        for (i, byte) in bytes.iter().enumerate() {
-                            res |= (*byte as u64) << (i * 8);
-                        }
-                        res as i64
-                    } else {
-                        0
-                    }
-                } else {
-                    let val_str_base = const_str.split(':').next().unwrap_or("0").trim();
-                    let val_str = val_str_base.split('_').next().unwrap_or("0").trim();
-                    let val_clean: String = val_str
-                        .chars()
-                        .filter(|c| c.is_ascii_digit() || *c == '-')
-                        .collect();
-                    val_clean.parse().unwrap_or(0)
-                };
-
                 let (width_val, signedness) = {
                     let const_ty_obj = const_ty_ptr.deref(ctx);
                     let int_ty = const_ty_obj
@@ -2215,8 +2221,25 @@ pub fn translate_operand(
                     (int_ty.width(), int_ty.signedness())
                 };
 
+                let byte_size = (width_val as usize).div_ceil(8);
+                let int_val = constant_bytes(constant, "integer", loc.clone())
+                    .ok()
+                    .and_then(|bytes| {
+                        (bytes.len() >= byte_size)
+                            .then(|| read_uint_from_bytes(&bytes[..byte_size]))
+                    })
+                    .unwrap_or_else(|| {
+                        let val_str_base = const_str.split(':').next().unwrap_or("0").trim();
+                        let val_str = val_str_base.split('_').next().unwrap_or("0").trim();
+                        let val_clean: String = val_str
+                            .chars()
+                            .filter(|c| c.is_ascii_digit() || *c == '-')
+                            .collect();
+                        val_clean.parse::<i128>().unwrap_or(0) as u128
+                    });
+
                 let width = NonZeroUsize::new(width_val as usize).unwrap();
-                let apint = APInt::from_u64(int_val as u64, width);
+                let apint = APInt::from_u128(int_val, width);
 
                 let int_attr = pliron::builtin::attributes::IntegerAttr::new(
                     pliron::builtin::types::IntegerType::get(ctx, width_val, signedness),
@@ -3728,6 +3751,8 @@ fn translate_ptr_to_array_constant(
         let elem_obj = element_ty_ptr.deref(ctx);
         if let Some(int_ty) = elem_obj.downcast_ref::<IntegerType>() {
             (int_ty.width() as usize).div_ceil(8)
+        } else if elem_obj.is::<MirFP16Type>() {
+            2
         } else if elem_obj.is::<FP32Type>() {
             4
         } else if elem_obj.is::<FP64Type>() {
@@ -3827,6 +3852,7 @@ fn translate_ptr_to_array_constant(
     enum ElemKind {
         F64,
         F32,
+        F16,
         Int { width: u32, signedness: Signedness },
     }
     let elem_kind = {
@@ -3835,6 +3861,8 @@ fn translate_ptr_to_array_constant(
             ElemKind::F64
         } else if elem_obj.is::<FP32Type>() {
             ElemKind::F32
+        } else if elem_obj.is::<MirFP16Type>() {
+            ElemKind::F16
         } else if let Some(int_ty) = elem_obj.downcast_ref::<IntegerType>() {
             ElemKind::Int {
                 width: int_ty.width(),
@@ -3923,12 +3951,39 @@ fn translate_ptr_to_array_constant(
                     Some(float_op.get_operation()),
                 )
             }
-            ElemKind::Int { width, signedness } => {
-                let mut val: u64 = 0;
-                for (j, &b) in chunk.iter().enumerate() {
-                    val |= (b as u64) << (j * 8);
+            ElemKind::F16 => {
+                let bits = read_uint_from_bytes(chunk) as u16;
+                let float_attr = MirFP16Attr::from_bits(bits);
+
+                use dialect_mir::ops::MirFloatConstantOp;
+                let op = Operation::new(
+                    ctx,
+                    MirFloatConstantOp::get_concrete_op_info(),
+                    vec![element_ty_ptr],
+                    vec![],
+                    vec![],
+                    0,
+                );
+                op.deref_mut(ctx).set_loc(loc.clone());
+                let float_op = MirFloatConstantOp::new(op);
+                float_op.set_attr_float_value_f16(ctx, float_attr);
+
+                if let Some(prev) = last_op {
+                    float_op.get_operation().insert_after(ctx, prev);
+                } else {
+                    float_op.get_operation().insert_at_front(block_ptr, ctx);
                 }
-                let apint = APInt::from_u64(val, NonZeroUsize::new(width as usize).unwrap());
+                (
+                    Value::OpResult {
+                        op: float_op.get_operation(),
+                        res_idx: 0,
+                    },
+                    Some(float_op.get_operation()),
+                )
+            }
+            ElemKind::Int { width, signedness } => {
+                let val = read_uint_from_bytes(chunk);
+                let apint = APInt::from_u128(val, NonZeroUsize::new(width as usize).unwrap());
                 let int_attr = pliron::builtin::attributes::IntegerAttr::new(
                     IntegerType::get(ctx, width, signedness),
                     apint,
@@ -4145,6 +4200,7 @@ fn translate_struct_constant(
             ZstStruct, // Struct ZST like PhantomData<T>
             ZstTuple,  // Tuple ZST like ()
             Integer { width: u32, signedness: Signedness },
+            Float16,
             Float32,
             Pointer,
             Unsupported,
@@ -4166,6 +4222,8 @@ fn translate_struct_constant(
                     width: int_ty.width(),
                     signedness: int_ty.signedness(),
                 }
+            } else if field_ty.is::<MirFP16Type>() {
+                FieldTypeKind::Float16
             } else if field_ty.is::<FP32Type>() {
                 FieldTypeKind::Float32
             } else if field_ty.is::<dialect_mir::types::MirPtrType>() {
@@ -4245,15 +4303,11 @@ fn translate_struct_constant(
                     );
                 };
 
-                // Parse the integer value
-                let mut int_val: i64 = 0;
-                for (i, &byte) in field_bytes.iter().enumerate() {
-                    int_val |= (byte as i64) << (i * 8);
-                }
+                let int_val = read_uint_from_bytes(field_bytes);
 
                 // Create the constant operation
                 let width_nz = NonZeroUsize::new(width as usize).unwrap();
-                let apint = APInt::from_u64(int_val as u64, width_nz);
+                let apint = APInt::from_u128(int_val, width_nz);
                 let int_attr = pliron::builtin::attributes::IntegerAttr::new(
                     IntegerType::get(ctx, width, signedness),
                     apint,
@@ -4282,6 +4336,53 @@ fn translate_struct_constant(
                 current_prev_op = Some(const_op.get_operation());
                 field_values.push(Value::OpResult {
                     op: const_op.get_operation(),
+                    res_idx: 0,
+                });
+
+                byte_offset += byte_size;
+            }
+
+            FieldTypeKind::Float16 => {
+                let byte_size = 2;
+
+                let field_bytes = if byte_offset + byte_size <= bytes.len() {
+                    &bytes[byte_offset..byte_offset + byte_size]
+                } else {
+                    return input_err!(
+                        loc,
+                        TranslationErr::unsupported(format!(
+                            "Struct constant has insufficient bytes for f16 field {}",
+                            field_idx
+                        ))
+                    );
+                };
+
+                let bits = read_uint_from_bytes(field_bytes) as u16;
+                let float_attr = MirFP16Attr::from_bits(bits);
+
+                use dialect_mir::ops::MirFloatConstantOp;
+                let op = Operation::new(
+                    ctx,
+                    MirFloatConstantOp::get_concrete_op_info(),
+                    vec![field_ty_ptr],
+                    vec![],
+                    vec![],
+                    0,
+                );
+                op.deref_mut(ctx).set_loc(loc.clone());
+
+                let float_op = MirFloatConstantOp::new(op);
+                float_op.set_attr_float_value_f16(ctx, float_attr);
+
+                if let Some(prev) = current_prev_op {
+                    float_op.get_operation().insert_after(ctx, prev);
+                } else {
+                    float_op.get_operation().insert_at_front(block_ptr, ctx);
+                }
+
+                current_prev_op = Some(float_op.get_operation());
+                field_values.push(Value::OpResult {
+                    op: float_op.get_operation(),
                     res_idx: 0,
                 });
 
@@ -4675,6 +4776,7 @@ fn translate_constant_value_from_bytes(
 
     enum ValueKind {
         Integer { width: u32, signedness: Signedness },
+        Float16,
         Float32,
         Float64,
         Pointer,
@@ -4688,6 +4790,8 @@ fn translate_constant_value_from_bytes(
                 width: int_ty.width(),
                 signedness: int_ty.signedness(),
             }
+        } else if ty_ref.is::<MirFP16Type>() {
+            ValueKind::Float16
         } else if ty_ref.is::<FP32Type>() {
             ValueKind::Float32
         } else if ty_ref.is::<FP64Type>() {
@@ -4702,15 +4806,6 @@ fn translate_constant_value_from_bytes(
     match value_kind {
         ValueKind::Integer { width, signedness } => {
             let byte_size = (width as usize).div_ceil(8);
-            if width > 64 {
-                return input_err!(
-                    loc,
-                    TranslationErr::unsupported(format!(
-                        "Integer field constants wider than 64 bits are not yet supported (width={})",
-                        width
-                    ))
-                );
-            }
             if bytes.len() < byte_size {
                 return input_err!(
                     loc,
@@ -4722,9 +4817,9 @@ fn translate_constant_value_from_bytes(
                 );
             }
 
-            let int_val = read_uint_from_bytes(&bytes[..byte_size]) as u64;
+            let int_val = read_uint_from_bytes(&bytes[..byte_size]);
             let width_nz = NonZeroUsize::new(width as usize).unwrap();
-            let apint = APInt::from_u64(int_val, width_nz);
+            let apint = APInt::from_u128(int_val, width_nz);
             let int_attr = pliron::builtin::attributes::IntegerAttr::new(
                 IntegerType::get(ctx, width, signedness),
                 apint,
@@ -4755,6 +4850,47 @@ fn translate_constant_value_from_bytes(
                     res_idx: 0,
                 },
                 Some(const_op.get_operation()),
+            ))
+        }
+        ValueKind::Float16 => {
+            if bytes.len() < 2 {
+                return input_err!(
+                    loc,
+                    TranslationErr::unsupported(format!(
+                        "f16 constant needs 2 bytes, found {}",
+                        bytes.len()
+                    ))
+                );
+            }
+
+            let bits = read_uint_from_bytes(&bytes[..2]) as u16;
+            let float_attr = MirFP16Attr::from_bits(bits);
+
+            use dialect_mir::ops::MirFloatConstantOp;
+            let op = Operation::new(
+                ctx,
+                MirFloatConstantOp::get_concrete_op_info(),
+                vec![ty_ptr],
+                vec![],
+                vec![],
+                0,
+            );
+            op.deref_mut(ctx).set_loc(loc.clone());
+            let float_op = MirFloatConstantOp::new(op);
+            float_op.set_attr_float_value_f16(ctx, float_attr);
+
+            if let Some(prev) = prev_op {
+                float_op.get_operation().insert_after(ctx, prev);
+            } else {
+                float_op.get_operation().insert_at_front(block_ptr, ctx);
+            }
+
+            Ok((
+                Value::OpResult {
+                    op: float_op.get_operation(),
+                    res_idx: 0,
+                },
+                Some(float_op.get_operation()),
             ))
         }
         ValueKind::Float32 => {

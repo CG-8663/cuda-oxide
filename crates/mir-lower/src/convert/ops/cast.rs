@@ -52,7 +52,8 @@ use dialect_mir::attributes::MirCastKindAttr;
 use dialect_mir::ops::MirCastOp;
 use dialect_mir::types::{MirArrayType, MirPtrType};
 use pliron::builtin::op_interfaces::CallOpCallable;
-use pliron::builtin::types::{FP32Type, FP64Type, IntegerType, Signedness};
+use pliron::builtin::type_interfaces::FloatTypeInterface;
+use pliron::builtin::types::{IntegerType, Signedness};
 use pliron::context::{Context, Ptr};
 use pliron::irbuild::dialect_conversion::{DialectConversionRewriter, OperandsInfo};
 use pliron::irbuild::inserter::Inserter;
@@ -61,7 +62,7 @@ use pliron::location::Located;
 use pliron::op::Op;
 use pliron::operation::Operation;
 use pliron::result::Result;
-use pliron::r#type::Typed;
+use pliron::r#type::{Typed, type_cast};
 
 /// Convert a MIR cast operation to the appropriate LLVM cast instruction.
 ///
@@ -266,15 +267,17 @@ fn convert_float_to_int(
         })?;
     let int_suffix = format!("i{}", int_width);
 
-    let float_suffix = if val_ty.deref(ctx).is::<FP32Type>() {
-        "f32"
-    } else if val_ty.deref(ctx).is::<FP64Type>() {
-        "f64"
-    } else {
-        return pliron::input_err!(
-            op.deref(ctx).loc(),
-            "FloatToInt: source type is not f32 or f64"
-        );
+    let float_suffix = match float_bit_width(ctx, val_ty) {
+        Ok(16) => "f16",
+        Ok(32) => "f32",
+        Ok(64) => "f64",
+        Ok(bits) => {
+            return pliron::input_err!(
+                op.deref(ctx).loc(),
+                "FloatToInt: unsupported source float width {bits}"
+            );
+        }
+        Err(err) => return Err(err),
     };
 
     let intrinsic_name = if is_signed {
@@ -443,13 +446,13 @@ fn convert_float_to_float(
     llvm_ty: Ptr<pliron::r#type::TypeObj>,
     val_ty: Ptr<pliron::r#type::TypeObj>,
 ) -> Result<Ptr<Operation>> {
-    let src_is_f32 = val_ty.deref(ctx).is::<FP32Type>();
-    let dst_is_f32 = llvm_ty.deref(ctx).is::<FP32Type>();
+    let src_width = float_bit_width(ctx, val_ty)?;
+    let dst_width = float_bit_width(ctx, llvm_ty)?;
 
     let flags_key: pliron::identifier::Identifier = "llvm_fast_math_flags".try_into().unwrap();
     let flags = dialect_llvm::attributes::FastmathFlagsAttr::default();
 
-    if src_is_f32 && !dst_is_f32 {
+    if src_width < dst_width {
         let op = llvm::FPExtOp::new(ctx, val, llvm_ty);
         op.get_operation()
             .deref_mut(ctx)
@@ -457,7 +460,7 @@ fn convert_float_to_float(
             .0
             .insert(flags_key, flags.into());
         Ok(op.get_operation())
-    } else if !src_is_f32 && dst_is_f32 {
+    } else if src_width > dst_width {
         let op = llvm::FPTruncOp::new(ctx, val, llvm_ty);
         op.get_operation()
             .deref_mut(ctx)
@@ -468,6 +471,14 @@ fn convert_float_to_float(
     } else {
         Ok(llvm::BitcastOp::new(ctx, val, llvm_ty).get_operation())
     }
+}
+
+fn float_bit_width(ctx: &Context, ty: Ptr<pliron::r#type::TypeObj>) -> Result<usize> {
+    let ty_ref = ty.deref(ctx);
+    let Some(float_ty) = type_cast::<dyn FloatTypeInterface>(&**ty_ref) else {
+        return pliron::input_err_noloc!("expected floating-point type");
+    };
+    Ok(float_ty.get_semantics().bits)
 }
 
 #[cfg(test)]

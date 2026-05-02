@@ -20,6 +20,7 @@
 //! | `dialect-mir` Type              | `dialect-llvm` Type               | Notes                       |
 //! |---------------------------------|-----------------------------------|-----------------------------|
 //! | `IntegerType` (signed/unsigned) | `IntegerType` (signless)          | Width preserved             |
+//! | `MirFP16Type`                   | `HalfType`                        | Rust `f16` → LLVM `half`    |
 //! | `FP32Type`, `FP64Type`          | Same (builtin)                    | Pass-through                |
 //! | `MirPtrType`                    | `PointerType`                     | Address space preserved     |
 //! | `MirSliceType`                  | `StructType { ptr, i64 }`         | Fat pointer                 |
@@ -407,6 +408,9 @@ fn get_type_size(ctx: &Context, ty: Ptr<TypeObj>) -> u64 {
     }
 
     // Float types
+    if ty_ref.is::<llvm_types::HalfType>() {
+        return 2;
+    }
     if ty_ref.is::<FP32Type>() {
         return 4;
     }

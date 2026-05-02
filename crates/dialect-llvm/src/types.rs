@@ -6,7 +6,7 @@
 //! [Type]s defined in the LLVM dialect.
 
 use combine::{Parser, between, optional, token};
-use pliron::builtin::type_interfaces::FunctionTypeInterface;
+use pliron::builtin::type_interfaces::{FloatTypeInterface, FunctionTypeInterface};
 use pliron::derive::{pliron_type, type_interface_impl};
 use pliron::{
     common_traits::Verify,
@@ -22,11 +22,24 @@ use pliron::{
     printable::{self, ListSeparator, Printable},
     result::Result,
     r#type::{Type, TypeObj, TypePtr},
+    utils::apfloat::{self, GetSemantics, Semantics},
     verify_err_noloc,
 };
 use thiserror::Error;
 
 use std::hash::Hash;
+
+/// LLVM IR `half` type.
+#[pliron_type(name = "llvm.half", format, generate_get = true, verifier = "succ")]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct HalfType;
+
+#[type_interface_impl]
+impl FloatTypeInterface for HalfType {
+    fn get_semantics(&self) -> Semantics {
+        <apfloat::Half as GetSemantics>::get_semantics()
+    }
+}
 
 /// Represents a c-like struct type.
 /// Limitations and warnings on its usage are similar to the upstream MLIR LLVM dialect.
@@ -537,6 +550,7 @@ impl FunctionTypeInterface for FuncType {
 }
 
 pub fn register(ctx: &mut Context) {
+    HalfType::register(ctx);
     VoidType::register(ctx);
     ArrayType::register(ctx);
     VectorType::register(ctx);

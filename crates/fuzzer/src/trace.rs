@@ -91,8 +91,34 @@ fn trace_write_i64(val: i64) {
 }
 
 #[inline]
+fn trace_write_u128(val: u128) {
+    trace_write_u64((val & 0xffff_ffff_ffff_ffff) as u64);
+    trace_write_u64((val >> 64) as u64);
+}
+
+#[inline]
+fn trace_write_i128(val: i128) {
+    trace_write_u128(val as u128);
+}
+
+#[inline]
+fn trace_write_usize(val: usize) {
+    trace_write_u64(val as u64);
+}
+
+#[inline]
+fn trace_write_isize(val: isize) {
+    trace_write_u64(val as u64);
+}
+
+#[inline]
 fn trace_write_bool(val: bool) {
     trace_write_u8(val as u8);
+}
+
+#[inline]
+fn trace_write_char(val: char) {
+    trace_write_u32(val as u32);
 }
 
 /// Scalar values that can be folded into the trace.
@@ -119,10 +145,15 @@ impl_trace_value! {
     i16 => trace_write_i16,
     i32 => trace_write_i32,
     i64 => trace_write_i64,
+    i128 => trace_write_i128,
+    isize => trace_write_isize,
     u8 => trace_write_u8,
     u16 => trace_write_u16,
     u32 => trace_write_u32,
     u64 => trace_write_u64,
+    u128 => trace_write_u128,
+    usize => trace_write_usize,
+    char => trace_write_char,
 }
 
 /// Aggregates of scalar values that can be folded into the trace in one call.

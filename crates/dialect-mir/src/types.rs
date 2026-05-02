@@ -5,14 +5,27 @@
 
 //! MIR dialect types.
 
-use pliron::common_traits::Verify;
+use pliron::builtin::type_interfaces::FloatTypeInterface;
 use pliron::context::Context;
 use pliron::context::Ptr;
+use pliron::derive::{pliron_type, type_interface_impl};
 use pliron::location::Location;
 use pliron::result::Error;
 use pliron::r#type::{Type, TypeObj, TypePtr};
-use pliron::verify_err;
-use pliron_derive::pliron_type;
+use pliron::utils::apfloat::{self, GetSemantics, Semantics};
+use pliron::{common_traits::Verify, verify_err};
+
+/// IEEE 754 binary16 type as it appears in Rust MIR (`f16`).
+#[pliron_type(name = "mir.fp16", format, generate_get = true, verifier = "succ")]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct MirFP16Type;
+
+#[type_interface_impl]
+impl FloatTypeInterface for MirFP16Type {
+    fn get_semantics(&self) -> Semantics {
+        <apfloat::Half as GetSemantics>::get_semantics()
+    }
+}
 
 /// A tuple type.
 ///
@@ -661,6 +674,7 @@ impl Verify for MirEnumType {
 
 /// Register dialect types.
 pub fn register(ctx: &mut Context) {
+    MirFP16Type::register(ctx);
     MirTupleType::register(ctx);
     MirPtrType::register(ctx);
     MirSliceType::register(ctx);

@@ -1498,6 +1498,22 @@ fn try_dispatch_intrinsic(
     loc: Location,
     substs_contains: &impl Fn(&str) -> bool,
 ) -> TranslationResult<Option<Ptr<Operation>>> {
+    if let Some(intrinsic) = intrinsics::bitops::RustBitIntrinsic::from_core_path(name) {
+        return Ok(Some(intrinsics::bitops::emit_rust_bit_intrinsic(
+            ctx,
+            body,
+            intrinsic,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?));
+    }
+
     match name {
         // =================================================================
         // Compiler Hints
