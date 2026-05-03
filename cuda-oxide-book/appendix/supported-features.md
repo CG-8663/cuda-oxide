@@ -80,6 +80,7 @@ data is drawn from the project's internal tracking sheet and the test suite.
 | PTX Output | **Full** | Default output: Rust MIR → `dialect-mir` → `mem2reg` → `dialect-llvm` → LLVM IR → `llc` → PTX. Targets sm_80 through sm_100a. |
 | NVVM IR Output | **Full** | Alternative output for libNVVM consumption with NVVM metadata. |
 | LTOIR Output | **Full** | Device-side LTO for linking with CUDA C++. Via `--dlto` flag or `CUDA_OXIDE_EMIT_LTOIR`. |
+| Float Math Intrinsics (libdevice) | **Full** | Rust `f32`/`f64` math methods (`sin`, `cos`, `exp`, `pow`, `sqrt`, ...) lower to CUDA libdevice (`__nv_*`). cuda-oxide auto-detects libdevice usage and emits NVVM IR; `cuda_host::ltoir::load_kernel_module` builds the cubin via libNVVM + nvJitLink at runtime. |
 | Pipeline Inspection | **Full** | `cargo oxide pipeline <example>` shows IR at each compilation stage. |
 | cuda-gdb Debug Support | **Full** | Build with debug info and launch `cuda-gdb`. `breakpoint()` intrinsic for programmatic breakpoints. |
 

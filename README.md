@@ -220,11 +220,13 @@ cargo oxide run gemm_sol
 | Crate               | Description                                                               |
 |---------------------|---------------------------------------------------------------------------|
 | `cuda-device`       | Device intrinsics (`thread::*`, `warp::*`, barriers)                      |
-| `cuda-host`         | Host utilities (`cuda_launch!`, `cuda_launch_async!`)                     |
+| `cuda-host`         | Host utilities (`cuda_launch!`, `cuda_launch_async!`, `ltoir` helper)     |
 | `cuda-macros`       | Proc macros (`#[kernel]`, `#[device]`, `gpu_printf!`)                     |
 | `cuda-bindings`     | Raw `bindgen` FFI bindings to `cuda.h`                                    |
 | `cuda-core`         | Safe RAII wrappers (`CudaContext`, `CudaStream`, `DeviceBuffer<T>`)       |
 | `cuda-async`        | Async execution layer (`DeviceOperation`, `DeviceFuture`, `DeviceBox<T>`) |
+| `libnvvm-sys`       | `dlopen` bindings to libNVVM (used by `cuda-host::ltoir`)                 |
+| `nvjitlink-sys`     | `dlopen` bindings to nvJitLink (used by `cuda-host::ltoir`)               |
 
 ### Compiler Crates
 

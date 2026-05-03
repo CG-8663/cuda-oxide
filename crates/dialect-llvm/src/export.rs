@@ -126,6 +126,9 @@ pub trait ExportBackendConfig {
     /// Whether to emit `!nvvm.annotations` for ALL kernels.
     /// When false, only kernels with special attributes get annotations.
     fn emit_all_kernel_annotations(&self) -> bool;
+
+    /// Whether kernel definitions should use the `ptx_kernel` calling convention.
+    fn emit_ptx_kernel_keyword(&self) -> bool;
 }
 
 /// Default PTX export configuration.
@@ -153,6 +156,10 @@ impl ExportBackendConfig for PtxExportConfig {
 
     fn emit_all_kernel_annotations(&self) -> bool {
         false
+    }
+
+    fn emit_ptx_kernel_keyword(&self) -> bool {
+        true
     }
 }
 
@@ -191,6 +198,10 @@ impl ExportBackendConfig for NvvmExportConfig {
 
     fn emit_all_kernel_annotations(&self) -> bool {
         true // Emit annotations for all kernels
+    }
+
+    fn emit_ptx_kernel_keyword(&self) -> bool {
+        false
     }
 }
 
@@ -248,7 +259,8 @@ fn export_module_with_externs_impl(
 ) -> Result<String, String> {
     let mut output = String::new();
     let emit_all_annotations = config.emit_all_kernel_annotations();
-    let mut state = ModuleExportState::new(ctx, emit_all_annotations);
+    let emit_ptx_kernel_keyword = config.emit_ptx_kernel_keyword();
+    let mut state = ModuleExportState::new(ctx, emit_all_annotations, emit_ptx_kernel_keyword);
 
     // 1. Header
     writeln!(
@@ -494,7 +506,8 @@ pub fn export_module_to_string_with_config(
 ) -> Result<String, String> {
     let mut output = String::new();
     let emit_all_annotations = config.emit_all_kernel_annotations();
-    let mut state = ModuleExportState::new(ctx, emit_all_annotations);
+    let emit_ptx_kernel_keyword = config.emit_ptx_kernel_keyword();
+    let mut state = ModuleExportState::new(ctx, emit_all_annotations, emit_ptx_kernel_keyword);
 
     // 1. Header
     writeln!(
@@ -834,12 +847,14 @@ struct ModuleExportState<'a> {
     all_kernels: Vec<KernelInfo>,
     /// Whether to track all kernels (set by backend config)
     track_all_kernels: bool,
+    /// Whether to print `ptx_kernel` on kernel definitions.
+    emit_ptx_kernel_keyword: bool,
     /// Track device function names for @llvm.used (standalone device fn compilation)
     device_functions: Vec<String>,
 }
 
 impl<'a> ModuleExportState<'a> {
-    fn new(ctx: &'a Context, track_all_kernels: bool) -> Self {
+    fn new(ctx: &'a Context, track_all_kernels: bool, emit_ptx_kernel_keyword: bool) -> Self {
         Self {
             ctx,
             convergent_used: false,
@@ -847,6 +862,7 @@ impl<'a> ModuleExportState<'a> {
             launch_bounds_kernels: Vec::new(),
             all_kernels: Vec::new(),
             track_all_kernels,
+            emit_ptx_kernel_keyword,
             device_functions: Vec::new(),
         }
     }
@@ -1063,7 +1079,7 @@ impl<'a> ModuleExportState<'a> {
 
         if let Some(entry_block) = entry_block_opt {
             write!(output, "define ").unwrap();
-            if is_kernel {
+            if is_kernel && self.emit_ptx_kernel_keyword {
                 write!(output, "ptx_kernel ").unwrap();
             }
             self.export_type(ret_ty, output)?;
@@ -1685,6 +1701,17 @@ impl<'a> ModuleExportState<'a> {
             }
             id if id == ops::FRemOp::get_opid_static() => {
                 self.export_binop("frem", op, value_names, output)?;
+            }
+            id if id == ops::FNegOp::get_opid_static() => {
+                let res = op_ref.get_result(0);
+                let res_name = value_names.get(&res).unwrap();
+                let arg = op_ref.get_operand(0);
+
+                write!(output, "  {res_name} = fneg ").unwrap();
+                self.export_type(arg.get_type(self.ctx), output)?;
+                write!(output, " ").unwrap();
+                self.export_value(arg, value_names, output)?;
+                writeln!(output).unwrap();
             }
             id if id == ops::SDivOp::get_opid_static() => {
                 self.export_binop("sdiv", op, value_names, output)?;

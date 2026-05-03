@@ -14,6 +14,7 @@
 //! |---------------|-----------------------------------|----------------------------------------------|
 //! | Integer Arith | `add`, `sub`, `mul`, `div`, `rem` | `add`, `sub`, `mul`, `sdiv`/`udiv`, `srem`/`urem` |
 //! | Float Arith   | `add`, `sub`, `mul`, `div`, `rem` | `fadd`, `fsub`, `fmul`, `fdiv`, `frem`       |
+//! | Unary         | `neg`, `not`                      | `fneg` / `sub 0, x`, `xor`                   |
 //! | Bitwise       | `and`, `or`, `xor`, `not`         | `and`, `or`, `xor`                           |
 //! | Shifts        | `shl`, `shr`                      | `shl`, `lshr`/`ashr`                         |
 //! | Comparison    | `lt`, `le`, `gt`, `ge`, `eq`, `ne`| `icmp` (signed/unsigned predicates), `fcmp`   |
@@ -32,6 +33,7 @@ use dialect_llvm::attributes::{
 };
 use dialect_llvm::op_interfaces::{BinArithOp, CastOpInterface, IntBinArithOpWithOverflowFlag};
 use dialect_llvm::ops as llvm;
+use pliron::builtin::attributes::IntegerAttr;
 use pliron::builtin::types::{FP32Type, FP64Type, IntegerType, Signedness};
 use pliron::context::{Context, Ptr};
 use pliron::irbuild::dialect_conversion::{DialectConversionRewriter, OperandsInfo};
@@ -515,6 +517,55 @@ pub(crate) fn convert_bitxor(
 ) -> Result<()> {
     let (lhs, rhs) = get_binary_operands(op, ctx)?;
     let llvm_op = llvm::XorOp::new(ctx, lhs, rhs).get_operation();
+    rewriter.insert_operation(ctx, llvm_op);
+    rewriter.replace_operation(ctx, op, llvm_op);
+    Ok(())
+}
+
+/// Convert `mir.neg` to `llvm.fneg` for floats or `0 - x` for integers.
+///
+/// LLVM has a dedicated floating-point negation op. Integer negation is a
+/// subtraction from zero, which also matches how LLVM represents integer `neg`.
+pub(crate) fn convert_neg(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    _operands_info: &OperandsInfo,
+) -> Result<()> {
+    use pliron::utils::apint::APInt;
+    use std::num::NonZeroUsize;
+
+    let operand = op.deref(ctx).get_operand(0);
+    let operand_ty = operand.get_type(ctx);
+
+    let llvm_op = if is_float_type(ctx, operand) {
+        llvm::FNegOp::new_with_fast_math_flags(ctx, operand, FastmathFlagsAttr::default())
+            .get_operation()
+    } else {
+        let width = operand_ty
+            .deref(ctx)
+            .downcast_ref::<IntegerType>()
+            .ok_or_else(|| {
+                pliron::input_error!(
+                    op.deref(ctx).loc(),
+                    "NEG only supports integer or float types"
+                )
+            })?
+            .width();
+
+        let zero_ty = IntegerType::get(ctx, width, Signedness::Signless);
+        let zero_attr = IntegerAttr::new(
+            zero_ty,
+            APInt::from_u128(0, NonZeroUsize::new(width as usize).unwrap()),
+        );
+        let zero_op = llvm::ConstantOp::new(ctx, zero_attr.into()).get_operation();
+        rewriter.insert_operation(ctx, zero_op);
+        let zero = zero_op.deref(ctx).get_result(0);
+
+        let flags = IntegerOverflowFlagsAttr::default();
+        llvm::SubOp::new_with_overflow_flag(ctx, zero, operand, flags).get_operation()
+    };
+
     rewriter.insert_operation(ctx, llvm_op);
     rewriter.replace_operation(ctx, op, llvm_op);
     Ok(())

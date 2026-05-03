@@ -13,30 +13,12 @@ use super::super::helpers;
 use crate::error::TranslationResult;
 use crate::translator::types;
 use crate::translator::values::ValueMap;
+use dialect_mir::rust_intrinsics;
 use pliron::basic_block::BasicBlock;
 use pliron::context::{Context, Ptr};
 use pliron::location::Location;
 use pliron::operation::Operation;
 use rustc_public::mir;
-
-/// Marker call used for `core::intrinsics::rotate_left`.
-pub const CALLEE_ROTATE_LEFT: &str = "__cuda_oxide_rust_intrinsic_rotate_left";
-/// Marker call used for `core::intrinsics::rotate_right`.
-pub const CALLEE_ROTATE_RIGHT: &str = "__cuda_oxide_rust_intrinsic_rotate_right";
-/// Marker call used for `core::intrinsics::ctpop`.
-pub const CALLEE_CTPOP: &str = "__cuda_oxide_rust_intrinsic_ctpop";
-/// Marker call used for `core::intrinsics::ctlz`.
-pub const CALLEE_CTLZ: &str = "__cuda_oxide_rust_intrinsic_ctlz";
-/// Marker call used for `core::intrinsics::ctlz_nonzero`.
-pub const CALLEE_CTLZ_NONZERO: &str = "__cuda_oxide_rust_intrinsic_ctlz_nonzero";
-/// Marker call used for `core::intrinsics::cttz`.
-pub const CALLEE_CTTZ: &str = "__cuda_oxide_rust_intrinsic_cttz";
-/// Marker call used for `core::intrinsics::cttz_nonzero`.
-pub const CALLEE_CTTZ_NONZERO: &str = "__cuda_oxide_rust_intrinsic_cttz_nonzero";
-/// Marker call used for `core::intrinsics::bswap`.
-pub const CALLEE_BSWAP: &str = "__cuda_oxide_rust_intrinsic_bswap";
-/// Marker call used for `core::intrinsics::bitreverse`.
-pub const CALLEE_BITREVERSE: &str = "__cuda_oxide_rust_intrinsic_bitreverse";
 
 /// Bit intrinsic calls from libcore that lower cleanly to LLVM integer intrinsics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,23 +70,23 @@ impl RustBitIntrinsic {
         }
     }
 
-    /// Return the internal marker name used until MIR-to-LLVM lowering.
-    pub fn marker_callee(self) -> &'static str {
+    /// Return the internal placeholder name used until MIR-to-LLVM lowering.
+    pub fn placeholder_callee(self) -> &'static str {
         match self {
-            Self::RotateLeft => CALLEE_ROTATE_LEFT,
-            Self::RotateRight => CALLEE_ROTATE_RIGHT,
-            Self::Ctpop => CALLEE_CTPOP,
-            Self::Ctlz { zero_undef: false } => CALLEE_CTLZ,
-            Self::Ctlz { zero_undef: true } => CALLEE_CTLZ_NONZERO,
-            Self::Cttz { zero_undef: false } => CALLEE_CTTZ,
-            Self::Cttz { zero_undef: true } => CALLEE_CTTZ_NONZERO,
-            Self::Bswap => CALLEE_BSWAP,
-            Self::Bitreverse => CALLEE_BITREVERSE,
+            Self::RotateLeft => rust_intrinsics::CALLEE_ROTATE_LEFT,
+            Self::RotateRight => rust_intrinsics::CALLEE_ROTATE_RIGHT,
+            Self::Ctpop => rust_intrinsics::CALLEE_CTPOP,
+            Self::Ctlz { zero_undef: false } => rust_intrinsics::CALLEE_CTLZ,
+            Self::Ctlz { zero_undef: true } => rust_intrinsics::CALLEE_CTLZ_NONZERO,
+            Self::Cttz { zero_undef: false } => rust_intrinsics::CALLEE_CTTZ,
+            Self::Cttz { zero_undef: true } => rust_intrinsics::CALLEE_CTTZ_NONZERO,
+            Self::Bswap => rust_intrinsics::CALLEE_BSWAP,
+            Self::Bitreverse => rust_intrinsics::CALLEE_BITREVERSE,
         }
     }
 }
 
-/// Emit a marker `mir.call` for a rustc bitop intrinsic.
+/// Emit a placeholder `mir.call` for a rustc bitop intrinsic.
 ///
 /// The real LLVM intrinsic is chosen later, after MIR type conversion knows the
 /// exact integer width to use for the overloaded `llvm.*.iN` name.
@@ -126,7 +108,7 @@ pub fn emit_rust_bit_intrinsic(
     helpers::emit_function_call(
         ctx,
         body,
-        intrinsic.marker_callee(),
+        intrinsic.placeholder_callee(),
         args,
         destination,
         return_type,

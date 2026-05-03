@@ -11,10 +11,17 @@
  *       -Wl,-rpath,/usr/local/cuda/nvvm/lib64
  *
  * Usage:
- *   ./compile_ltoir <input.ll> <arch> [output.ltoir]
+ *   ./compile_ltoir <input.ll> <arch> [output.ltoir] [--libdevice <path>]
  *
- * Example:
+ * Examples:
  *   ./compile_ltoir device_ffi_test.ll sm_120 device_ffi_test.ltoir
+ *   ./compile_ltoir kernel.ll sm_90 kernel.ltoir \
+ *       --libdevice /usr/local/cuda/nvvm/libdevice/libdevice.10.bc
+ *
+ * --libdevice <path> adds CUDA's `libdevice.10.bc` to the libNVVM program
+ * before compiling, so any `__nv_*` math symbols in the input are resolved
+ * during this step. The resulting LTOIR is self-contained and `link_ltoir`
+ * does not need to add libdevice separately.
  */
 
 #include <stdio.h>
@@ -48,16 +55,38 @@ static void check_nvvm(nvvmResult result, const char* msg, nvvmProgram prog) {
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s <input.ll> <arch> [output.ltoir]\n", argv[0]);
+        fprintf(stderr,
+                "Usage: %s <input.ll> <arch> [output.ltoir] [--libdevice <path>]\n",
+                argv[0]);
         fprintf(stderr, "  arch: sm_100, sm_120, etc.\n");
         fprintf(stderr, "\nExample:\n");
         fprintf(stderr, "  %s device_ffi_test.ll sm_120 device_ffi_test.ltoir\n", argv[0]);
+        fprintf(stderr,
+                "  %s kernel.ll sm_120 kernel.ltoir --libdevice "
+                "/usr/local/cuda/nvvm/libdevice/libdevice.10.bc\n",
+                argv[0]);
         return 1;
     }
 
     const char* inputFile = argv[1];
     const char* arch = argv[2];
-    const char* outputFile = argc > 3 ? argv[3] : NULL;
+    const char* outputFile = NULL;
+    const char* libdeviceFile = NULL;
+
+    // Positional output file is optional and must come before --libdevice.
+    int argi = 3;
+    if (argi < argc && argv[argi][0] != '-') {
+        outputFile = argv[argi++];
+    }
+    while (argi < argc) {
+        if (strcmp(argv[argi], "--libdevice") == 0 && argi + 1 < argc) {
+            libdeviceFile = argv[argi + 1];
+            argi += 2;
+        } else {
+            fprintf(stderr, "Error: unknown argument: %s\n", argv[argi]);
+            return 1;
+        }
+    }
 
     // Print libNVVM version info
     int major, minor;
@@ -92,7 +121,49 @@ int main(int argc, char** argv) {
     nvvmProgram prog;
     check_nvvm(nvvmCreateProgram(&prog), "nvvmCreateProgram", NULL);
 
-    // Add module
+    // Optionally add libdevice. libNVVM will inline the requested __nv_*
+    // entry points during the -gen-lto compile, so the output LTOIR has
+    // no dangling math symbols left for nvJitLink to resolve.
+    char* libdeviceBuffer = NULL;
+    size_t libdeviceSize = 0;
+    if (libdeviceFile) {
+        FILE* lf = fopen(libdeviceFile, "rb");
+        if (!lf) {
+            fprintf(stderr, "Error: Cannot open libdevice file %s\n", libdeviceFile);
+            nvvmDestroyProgram(&prog);
+            free(buffer);
+            return 1;
+        }
+        fseek(lf, 0, SEEK_END);
+        libdeviceSize = ftell(lf);
+        fseek(lf, 0, SEEK_SET);
+        libdeviceBuffer = malloc(libdeviceSize);
+        fread(libdeviceBuffer, 1, libdeviceSize, lf);
+        fclose(lf);
+        printf("Read %zu bytes of libdevice from %s\n", libdeviceSize, libdeviceFile);
+
+        nvvmResult ldResult = nvvmAddModuleToProgram(prog, libdeviceBuffer, libdeviceSize,
+                                                     "libdevice.10.bc");
+        if (ldResult != NVVM_SUCCESS) {
+            fprintf(stderr, "nvvmAddModuleToProgram(libdevice) failed: %s\n",
+                    nvvmGetErrorString(ldResult));
+            size_t logSize;
+            if (nvvmGetProgramLogSize(prog, &logSize) == NVVM_SUCCESS && logSize > 1) {
+                char* log = malloc(logSize);
+                if (nvvmGetProgramLog(prog, log) == NVVM_SUCCESS) {
+                    fprintf(stderr, "Log:\n%s\n", log);
+                }
+                free(log);
+            }
+            nvvmDestroyProgram(&prog);
+            free(buffer);
+            free(libdeviceBuffer);
+            return 1;
+        }
+        printf("Libdevice added successfully\n");
+    }
+
+    // Add main module
     nvvmResult addResult = nvvmAddModuleToProgram(prog, buffer, size, inputFile);
     if (addResult != NVVM_SUCCESS) {
         fprintf(stderr, "nvvmAddModuleToProgram failed: %s\n", nvvmGetErrorString(addResult));
@@ -106,6 +177,7 @@ int main(int argc, char** argv) {
         }
         nvvmDestroyProgram(&prog);
         free(buffer);
+        free(libdeviceBuffer);
         return 1;
     }
     printf("Module added successfully\n");
@@ -136,6 +208,7 @@ int main(int argc, char** argv) {
         }
         nvvmDestroyProgram(&prog);
         free(buffer);
+        free(libdeviceBuffer);
         return 1;
     }
     printf("Compilation successful!\n");
@@ -174,6 +247,7 @@ int main(int argc, char** argv) {
     // Cleanup
     free(result);
     free(buffer);
+    free(libdeviceBuffer);
     nvvmDestroyProgram(&prog);
 
     printf("\n=== LLVM IR -> LTOIR compilation succeeded! ===\n");

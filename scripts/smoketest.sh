@@ -35,7 +35,7 @@ set -uo pipefail
 
 TCGEN05_EXAMPLES=(gemm_sol tcgen05 tcgen05_matmul)
 WGMMA_EXAMPLES=(wgmma)
-LTOIR_EXAMPLES=(cpp_consumes_rust_device device_ffi_test mathdx_ffi_test)
+LTOIR_EXAMPLES=(cpp_consumes_rust_device device_ffi_test mathdx_ffi_test primitive_stress)
 
 classify() {
     local ex="$1" cat

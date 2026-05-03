@@ -29,9 +29,9 @@ use dialect_mir::ops::{
     MirCondBranchOp, MirConstantOp, MirConstructArrayOp, MirConstructEnumOp, MirConstructStructOp,
     MirConstructTupleOp, MirDivOp, MirEnumPayloadOp, MirEqOp, MirExtractArrayElementOp,
     MirExtractFieldOp, MirFieldAddrOp, MirFloatConstantOp, MirGeOp, MirGetDiscriminantOp,
-    MirGotoOp, MirGtOp, MirInsertFieldOp, MirLeOp, MirLoadOp, MirLtOp, MirMulOp, MirNeOp, MirNotOp,
-    MirPtrOffsetOp, MirRefOp, MirRemOp, MirReturnOp, MirShlOp, MirShrOp, MirStorageDeadOp,
-    MirStorageLiveOp, MirStoreOp, MirSubOp, MirUndefOp, MirUnreachableOp,
+    MirGotoOp, MirGtOp, MirInsertFieldOp, MirLeOp, MirLoadOp, MirLtOp, MirMulOp, MirNeOp, MirNegOp,
+    MirNotOp, MirPtrOffsetOp, MirRefOp, MirRemOp, MirReturnOp, MirShlOp, MirShrOp,
+    MirStorageDeadOp, MirStorageLiveOp, MirStoreOp, MirSubOp, MirUndefOp, MirUnreachableOp,
 };
 use dialect_nvvm::ops::{
     Barrier0Op, BreakpointOp, ClcQueryGetFirstCtaidXOp, ClcQueryGetFirstCtaidYOp,
@@ -248,6 +248,18 @@ impl MirToLlvmConversion for MirNotOp {
         operands_info: &OperandsInfo,
     ) -> Result<()> {
         super::ops::arithmetic::convert_not(ctx, rewriter, self.get_operation(), operands_info)
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for MirNegOp {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::ops::arithmetic::convert_neg(ctx, rewriter, self.get_operation(), operands_info)
     }
 }
 

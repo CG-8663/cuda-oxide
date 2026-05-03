@@ -51,6 +51,7 @@
 //! ```
 
 pub mod launch;
+pub mod ltoir;
 pub mod tiling;
 
 pub use launch::{CudaKernel, GenericCudaKernel, HasLength, ReadOnly, Scalar, WriteOnly};

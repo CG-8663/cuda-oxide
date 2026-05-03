@@ -11,3 +11,6 @@ repository.workspace = true
 half = { workspace = true }
 cuda-macros = { workspace = true }
 cuda-core = { workspace = true }
+libnvvm-sys = { workspace = true }
+nvjitlink-sys = { workspace = true }
+thiserror = { workspace = true }

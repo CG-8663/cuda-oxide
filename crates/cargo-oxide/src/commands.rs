@@ -571,6 +571,52 @@ pub fn doctor(ctx: &Context) {
         }
     }
 
+    // 4b. libNVVM + nvJitLink + libdevice (only required when a kernel uses
+    // CUDA libdevice math, e.g. sin/cos/exp/pow). All three ship with the
+    // CUDA Toolkit; checking them here surfaces missing or split packagings
+    // before a runtime failure inside `cuda_host::ltoir::load_kernel_module`.
+    print!("libNVVM (libnvvm.so)... ");
+    match libnvvm_sys::LibNvvm::load() {
+        Ok(nvvm) => match nvvm.version() {
+            Ok((major, minor)) => println!("✓ libNVVM {}.{}", major, minor),
+            Err(_) => println!("✓ (version query failed but library loaded)"),
+        },
+        Err(e) => {
+            println!("✗ {}", e);
+            eprintln!("  Required only when kernels call CUDA libdevice math");
+            eprintln!("  (sin/cos/exp/pow/...). Ships with the CUDA Toolkit at");
+            eprintln!("  <CUDA>/nvvm/lib64/libnvvm.so. No separate download.");
+            ok = false;
+        }
+    }
+
+    print!("nvJitLink (libnvJitLink.so)... ");
+    match nvjitlink_sys::LibNvJitLink::load() {
+        Ok(nvj) => match nvj.version() {
+            Some((major, minor)) => println!("✓ nvJitLink {}.{}", major, minor),
+            None => println!("✓ (version symbol not exported on this CTK)"),
+        },
+        Err(e) => {
+            println!("✗ {}", e);
+            eprintln!("  Required only when kernels call CUDA libdevice math.");
+            eprintln!("  Ships with the CUDA Toolkit at <CUDA>/lib64/libnvJitLink.so.");
+            ok = false;
+        }
+    }
+
+    print!("libdevice (libdevice.10.bc)... ");
+    match cuda_host::ltoir::find_libdevice() {
+        Ok(path) => println!("✓ {}", path.display()),
+        Err(e) => {
+            println!("✗ {}", e);
+            eprintln!("  Required only when kernels call CUDA libdevice math.");
+            eprintln!("  Ships with the CUDA Toolkit at");
+            eprintln!("  <CUDA>/nvvm/libdevice/libdevice.10.bc. Override the search");
+            eprintln!("  with `CUDA_OXIDE_LIBDEVICE=<path>` if you have it elsewhere.");
+            ok = false;
+        }
+    }
+
     // 5. llc (LLVM static compiler for PTX)
     //
     // cuda-oxide requires LLVM 21+: earlier releases reject modern TMA /
@@ -1021,7 +1067,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {{
         format!(
             r#"use cuda_device::{{kernel, thread, DisjointSlice}};
 use cuda_core::{{CudaContext, DeviceBuffer, LaunchConfig}};
-use cuda_host::cuda_launch;
+use cuda_host::{{cuda_launch, ltoir}};
 
 #[kernel]
 pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {{
@@ -1043,9 +1089,11 @@ fn main() {{
     let b_dev = DeviceBuffer::from_host(&stream, &b_host).unwrap();
     let mut c_dev = DeviceBuffer::<f32>::zeroed(&stream, N).unwrap();
 
-    let module = ctx
-        .load_module_from_file("{name}.ptx")
-        .expect("Failed to load PTX module");
+    // Loads `{name}.ptx` directly when cuda-oxide produced PTX, or builds a
+    // cubin from `{name}.ll` when cuda-oxide auto-detected libdevice math
+    // (`sin`, `pow`, `exp`, ...). Requires CUDA Toolkit on the host.
+    let module = ltoir::load_kernel_module(&ctx, "{name}")
+        .expect("Failed to load kernel module");
 
     cuda_launch! {{
         kernel: vecadd,

@@ -1514,6 +1514,42 @@ fn try_dispatch_intrinsic(
         )?));
     }
 
+    if let Some(intrinsic) = intrinsics::saturating::RustSaturatingIntrinsic::from_core_path(name) {
+        return Ok(Some(
+            intrinsics::saturating::emit_rust_saturating_intrinsic(
+                ctx,
+                body,
+                intrinsic,
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?,
+        ));
+    }
+
+    if let Some(intrinsic) = intrinsics::float_math::RustFloatMathIntrinsic::from_core_path(name) {
+        return Ok(Some(
+            intrinsics::float_math::emit_rust_float_math_intrinsic(
+                ctx,
+                body,
+                intrinsic,
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?,
+        ));
+    }
+
     match name {
         // =================================================================
         // Compiler Hints

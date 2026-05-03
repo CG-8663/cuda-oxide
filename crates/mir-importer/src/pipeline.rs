@@ -110,6 +110,7 @@ impl dialect_llvm::export::AsDeviceExtern for DeviceExternDecl {
         }
     }
 }
+use pliron::builtin::op_interfaces::{CallOpCallable, CallOpInterface, SymbolOpInterface};
 use pliron::context::{Context, Ptr};
 use pliron::identifier::Legaliser;
 use pliron::linked_list::ContainsLinkedList;
@@ -351,11 +352,32 @@ pub fn run_pipeline(
         eprintln!("dialect-llvm verification successful ✓");
     }
 
+    // Detect CUDA libdevice usage.
+    //
+    // Lowering the rustc float-math intrinsics emits `__nv_*` libdevice
+    // calls (e.g. `__nv_sinf`, `__nv_pow`). `llc` cannot resolve those — they
+    // need libNVVM + nvJitLink + `libdevice.10.bc`, which the example owns
+    // (see `examples/device_ffi_test/tools/`). When we see them we:
+    //   1. Force NVVM IR mode so the `.ll` is suitable for libNVVM input.
+    //   2. Skip the `llc → .ptx` step, because the resulting PTX would have
+    //      unresolved `__nv_*` extern calls and `cuModuleLoad` would reject
+    //      it.
+    // The example is then expected to feed the `.ll` through the LTOIR
+    // pipeline (compile_ltoir + link_ltoir) and load the resulting cubin.
+    let needs_libdevice = module_uses_libdevice(&ctx, module_op_ptr);
+    let emit_nvvm_ir = config.emit_nvvm_ir || needs_libdevice;
+    if needs_libdevice && !config.emit_nvvm_ir && config.verbose {
+        eprintln!(
+            "\n=== Detected CUDA libdevice (`__nv_*`) calls; \
+             auto-emitting NVVM IR (skip llc) ==="
+        );
+    }
+
     // Step 7: Export to LLVM IR
     if config.verbose {
         let mode = if config.emit_ltoir {
             "LTOIR"
-        } else if config.emit_nvvm_ir {
+        } else if emit_nvvm_ir {
             "NVVM IR"
         } else {
             "PTX"
@@ -369,7 +391,7 @@ pub fn run_pipeline(
         device_externs,
         &ll_path,
         config.emit_ltoir,
-        config.emit_nvvm_ir,
+        emit_nvvm_ir,
     )?;
     if config.verbose {
         eprintln!("LLVM IR written to {}", ll_path.display());
@@ -383,6 +405,21 @@ pub fn run_pipeline(
              that can be compiled to LTOIR via libNVVM."
                 .to_string(),
         ))
+    } else if needs_libdevice {
+        // Skip llc -- see `needs_libdevice` comment above. Return a
+        // would-be ptx_path so callers see a stable shape; the file does
+        // not exist and the example must build its own cubin from `ll_path`.
+        let ptx_path = config
+            .output_dir
+            .join(format!("{}.ptx", config.output_name));
+        if config.verbose {
+            eprintln!("\n=== Skipping llc (libdevice present); example owns LTOIR build ===");
+        }
+        Ok(CompilationResult {
+            ll_path,
+            ptx_path,
+            target: "libdevice".to_string(),
+        })
     } else {
         // PTX mode: invoke llc
         if config.verbose {
@@ -406,6 +443,47 @@ pub fn run_pipeline(
             target,
         })
     }
+}
+
+/// Returns true when lowering emitted CUDA libdevice calls.
+///
+/// Float math intrinsics (sin, cos, exp, log, pow, …) lower to `__nv_*`
+/// entry points from `libdevice.10.bc`. `llc` cannot resolve these; they
+/// need libNVVM + nvJitLink + libdevice. When we see any `__nv_*` symbol
+/// the example owns the LTOIR build (see `examples/device_ffi_test/tools/`).
+fn module_uses_libdevice(ctx: &Context, module_op_ptr: Ptr<Operation>) -> bool {
+    op_uses_libdevice(ctx, module_op_ptr)
+}
+
+/// Recursively scan for declared or called CUDA libdevice functions.
+fn op_uses_libdevice(ctx: &Context, op_ptr: Ptr<Operation>) -> bool {
+    if let Some(func) = Operation::get_op::<dialect_llvm::ops::FuncOp>(op_ptr, ctx)
+        && func.get_symbol_name(ctx).starts_with("__nv_")
+    {
+        return true;
+    }
+
+    if let Some(call) = Operation::get_op::<dialect_llvm::ops::CallOp>(op_ptr, ctx)
+        && let CallOpCallable::Direct(callee) = call.callee(ctx)
+        && callee.to_string().starts_with("__nv_")
+    {
+        return true;
+    }
+
+    let op_ref = op_ptr.deref(ctx);
+    for region in op_ref.regions() {
+        let region_ref = region.deref(ctx);
+        for block in region_ref.iter(ctx) {
+            let block_ref = block.deref(ctx);
+            for child_op in block_ref.iter(ctx) {
+                if op_uses_libdevice(ctx, child_op) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
 }
 
 /// Recursively verifies an operation and all nested operations.

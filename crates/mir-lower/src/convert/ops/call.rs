@@ -40,10 +40,11 @@ use dialect_llvm::op_interfaces::CastOpInterface;
 use dialect_llvm::ops as llvm;
 use dialect_llvm::types as llvm_types;
 use dialect_mir::ops::MirCallOp;
+use dialect_mir::rust_intrinsics;
 use dialect_mir::types::{MirDisjointSliceType, MirSliceType, MirStructType, MirTupleType};
 use pliron::builtin::attributes::IntegerAttr;
 use pliron::builtin::op_interfaces::CallOpCallable;
-use pliron::builtin::types::{IntegerType, Signedness};
+use pliron::builtin::types::{FP32Type, FP64Type, IntegerType, Signedness};
 use pliron::context::{Context, Ptr};
 use pliron::irbuild::dialect_conversion::{DialectConversionRewriter, OperandsInfo};
 use pliron::irbuild::inserter::Inserter;
@@ -64,17 +65,7 @@ const ADDRSPACE_GENERIC: u32 = 0;
 /// Stripped during lowering so LLVM IR uses the original symbol name.
 const DEVICE_EXTERN_PREFIX: &str = "cuda_oxide_device_extern_";
 
-const RUST_BIT_CALLEE_ROTATE_LEFT: &str = "__cuda_oxide_rust_intrinsic_rotate_left";
-const RUST_BIT_CALLEE_ROTATE_RIGHT: &str = "__cuda_oxide_rust_intrinsic_rotate_right";
-const RUST_BIT_CALLEE_CTPOP: &str = "__cuda_oxide_rust_intrinsic_ctpop";
-const RUST_BIT_CALLEE_CTLZ: &str = "__cuda_oxide_rust_intrinsic_ctlz";
-const RUST_BIT_CALLEE_CTLZ_NONZERO: &str = "__cuda_oxide_rust_intrinsic_ctlz_nonzero";
-const RUST_BIT_CALLEE_CTTZ: &str = "__cuda_oxide_rust_intrinsic_cttz";
-const RUST_BIT_CALLEE_CTTZ_NONZERO: &str = "__cuda_oxide_rust_intrinsic_cttz_nonzero";
-const RUST_BIT_CALLEE_BSWAP: &str = "__cuda_oxide_rust_intrinsic_bswap";
-const RUST_BIT_CALLEE_BITREVERSE: &str = "__cuda_oxide_rust_intrinsic_bitreverse";
-
-/// Internal marker for rustc bit intrinsics that need LLVM intrinsic calls.
+/// Internal placeholder for rustc bit intrinsics that need LLVM intrinsic calls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RustBitIntrinsic {
     RotateLeft,
@@ -87,19 +78,191 @@ enum RustBitIntrinsic {
 }
 
 impl RustBitIntrinsic {
-    /// Convert an importer marker name back into the intrinsic it represents.
-    fn from_marker_callee(callee: &str) -> Option<Self> {
+    /// Convert an importer placeholder name back into the intrinsic it represents.
+    fn from_placeholder_callee(callee: &str) -> Option<Self> {
         match callee {
-            RUST_BIT_CALLEE_ROTATE_LEFT => Some(Self::RotateLeft),
-            RUST_BIT_CALLEE_ROTATE_RIGHT => Some(Self::RotateRight),
-            RUST_BIT_CALLEE_CTPOP => Some(Self::Ctpop),
-            RUST_BIT_CALLEE_CTLZ => Some(Self::Ctlz { zero_undef: false }),
-            RUST_BIT_CALLEE_CTLZ_NONZERO => Some(Self::Ctlz { zero_undef: true }),
-            RUST_BIT_CALLEE_CTTZ => Some(Self::Cttz { zero_undef: false }),
-            RUST_BIT_CALLEE_CTTZ_NONZERO => Some(Self::Cttz { zero_undef: true }),
-            RUST_BIT_CALLEE_BSWAP => Some(Self::Bswap),
-            RUST_BIT_CALLEE_BITREVERSE => Some(Self::Bitreverse),
+            rust_intrinsics::CALLEE_ROTATE_LEFT => Some(Self::RotateLeft),
+            rust_intrinsics::CALLEE_ROTATE_RIGHT => Some(Self::RotateRight),
+            rust_intrinsics::CALLEE_CTPOP => Some(Self::Ctpop),
+            rust_intrinsics::CALLEE_CTLZ => Some(Self::Ctlz { zero_undef: false }),
+            rust_intrinsics::CALLEE_CTLZ_NONZERO => Some(Self::Ctlz { zero_undef: true }),
+            rust_intrinsics::CALLEE_CTTZ => Some(Self::Cttz { zero_undef: false }),
+            rust_intrinsics::CALLEE_CTTZ_NONZERO => Some(Self::Cttz { zero_undef: true }),
+            rust_intrinsics::CALLEE_BSWAP => Some(Self::Bswap),
+            rust_intrinsics::CALLEE_BITREVERSE => Some(Self::Bitreverse),
             _ => None,
+        }
+    }
+}
+
+/// Internal placeholder for rustc saturating arithmetic intrinsics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RustSaturatingIntrinsic {
+    Add,
+    Sub,
+}
+
+impl RustSaturatingIntrinsic {
+    /// Convert an importer placeholder name back into the intrinsic it represents.
+    fn from_placeholder_callee(callee: &str) -> Option<Self> {
+        match callee {
+            rust_intrinsics::CALLEE_SATURATING_ADD => Some(Self::Add),
+            rust_intrinsics::CALLEE_SATURATING_SUB => Some(Self::Sub),
+            _ => None,
+        }
+    }
+}
+
+/// Internal placeholder for rustc float math intrinsics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RustFloatMathIntrinsic {
+    SqrtF32,
+    SqrtF64,
+    PowiF32,
+    PowiF64,
+    SinF32,
+    SinF64,
+    CosF32,
+    CosF64,
+    TanF32,
+    TanF64,
+    PowfF32,
+    PowfF64,
+    ExpF32,
+    ExpF64,
+    Exp2F32,
+    Exp2F64,
+    LogF32,
+    LogF64,
+    Log2F32,
+    Log2F64,
+    Log10F32,
+    Log10F64,
+    FmaF32,
+    FmaF64,
+    FmuladdF32,
+    FmuladdF64,
+    FloorF32,
+    FloorF64,
+    CeilF32,
+    CeilF64,
+    TruncF32,
+    TruncF64,
+    RoundF32,
+    RoundF64,
+    RoundevenF32,
+    RoundevenF64,
+    Fabs,
+    CopysignF32,
+    CopysignF64,
+}
+
+impl RustFloatMathIntrinsic {
+    /// Convert an importer placeholder name back into the intrinsic it represents.
+    fn from_placeholder_callee(callee: &str) -> Option<Self> {
+        match callee {
+            rust_intrinsics::CALLEE_SQRT_F32 => Some(Self::SqrtF32),
+            rust_intrinsics::CALLEE_SQRT_F64 => Some(Self::SqrtF64),
+            rust_intrinsics::CALLEE_POWI_F32 => Some(Self::PowiF32),
+            rust_intrinsics::CALLEE_POWI_F64 => Some(Self::PowiF64),
+            rust_intrinsics::CALLEE_SIN_F32 => Some(Self::SinF32),
+            rust_intrinsics::CALLEE_SIN_F64 => Some(Self::SinF64),
+            rust_intrinsics::CALLEE_COS_F32 => Some(Self::CosF32),
+            rust_intrinsics::CALLEE_COS_F64 => Some(Self::CosF64),
+            rust_intrinsics::CALLEE_TAN_F32 => Some(Self::TanF32),
+            rust_intrinsics::CALLEE_TAN_F64 => Some(Self::TanF64),
+            rust_intrinsics::CALLEE_POWF_F32 => Some(Self::PowfF32),
+            rust_intrinsics::CALLEE_POWF_F64 => Some(Self::PowfF64),
+            rust_intrinsics::CALLEE_EXP_F32 => Some(Self::ExpF32),
+            rust_intrinsics::CALLEE_EXP_F64 => Some(Self::ExpF64),
+            rust_intrinsics::CALLEE_EXP2_F32 => Some(Self::Exp2F32),
+            rust_intrinsics::CALLEE_EXP2_F64 => Some(Self::Exp2F64),
+            rust_intrinsics::CALLEE_LOG_F32 => Some(Self::LogF32),
+            rust_intrinsics::CALLEE_LOG_F64 => Some(Self::LogF64),
+            rust_intrinsics::CALLEE_LOG2_F32 => Some(Self::Log2F32),
+            rust_intrinsics::CALLEE_LOG2_F64 => Some(Self::Log2F64),
+            rust_intrinsics::CALLEE_LOG10_F32 => Some(Self::Log10F32),
+            rust_intrinsics::CALLEE_LOG10_F64 => Some(Self::Log10F64),
+            rust_intrinsics::CALLEE_FMA_F32 => Some(Self::FmaF32),
+            rust_intrinsics::CALLEE_FMA_F64 => Some(Self::FmaF64),
+            rust_intrinsics::CALLEE_FMULADD_F32 => Some(Self::FmuladdF32),
+            rust_intrinsics::CALLEE_FMULADD_F64 => Some(Self::FmuladdF64),
+            rust_intrinsics::CALLEE_FLOOR_F32 => Some(Self::FloorF32),
+            rust_intrinsics::CALLEE_FLOOR_F64 => Some(Self::FloorF64),
+            rust_intrinsics::CALLEE_CEIL_F32 => Some(Self::CeilF32),
+            rust_intrinsics::CALLEE_CEIL_F64 => Some(Self::CeilF64),
+            rust_intrinsics::CALLEE_TRUNC_F32 => Some(Self::TruncF32),
+            rust_intrinsics::CALLEE_TRUNC_F64 => Some(Self::TruncF64),
+            rust_intrinsics::CALLEE_ROUND_F32 => Some(Self::RoundF32),
+            rust_intrinsics::CALLEE_ROUND_F64 => Some(Self::RoundF64),
+            rust_intrinsics::CALLEE_ROUNDEVEN_F32 => Some(Self::RoundevenF32),
+            rust_intrinsics::CALLEE_ROUNDEVEN_F64 => Some(Self::RoundevenF64),
+            rust_intrinsics::CALLEE_FABS => Some(Self::Fabs),
+            rust_intrinsics::CALLEE_COPYSIGN_F32 => Some(Self::CopysignF32),
+            rust_intrinsics::CALLEE_COPYSIGN_F64 => Some(Self::CopysignF64),
+            _ => None,
+        }
+    }
+
+    /// CUDA libdevice function name for this Rust math intrinsic.
+    fn libdevice_name(
+        self,
+        ctx: &Context,
+        result_ty: Ptr<TypeObj>,
+        loc: pliron::location::Location,
+    ) -> Result<&'static str> {
+        match self {
+            Self::SqrtF32 => Ok("__nv_sqrtf"),
+            Self::SqrtF64 => Ok("__nv_sqrt"),
+            Self::PowiF32 => Ok("__nv_powif"),
+            Self::PowiF64 => Ok("__nv_powi"),
+            Self::SinF32 => Ok("__nv_sinf"),
+            Self::SinF64 => Ok("__nv_sin"),
+            Self::CosF32 => Ok("__nv_cosf"),
+            Self::CosF64 => Ok("__nv_cos"),
+            Self::TanF32 => Ok("__nv_tanf"),
+            Self::TanF64 => Ok("__nv_tan"),
+            Self::PowfF32 => Ok("__nv_powf"),
+            Self::PowfF64 => Ok("__nv_pow"),
+            Self::ExpF32 => Ok("__nv_expf"),
+            Self::ExpF64 => Ok("__nv_exp"),
+            Self::Exp2F32 => Ok("__nv_exp2f"),
+            Self::Exp2F64 => Ok("__nv_exp2"),
+            Self::LogF32 => Ok("__nv_logf"),
+            Self::LogF64 => Ok("__nv_log"),
+            Self::Log2F32 => Ok("__nv_log2f"),
+            Self::Log2F64 => Ok("__nv_log2"),
+            Self::Log10F32 => Ok("__nv_log10f"),
+            Self::Log10F64 => Ok("__nv_log10"),
+            Self::FmaF32 | Self::FmuladdF32 => Ok("__nv_fmaf"),
+            Self::FmaF64 | Self::FmuladdF64 => Ok("__nv_fma"),
+            Self::FloorF32 => Ok("__nv_floorf"),
+            Self::FloorF64 => Ok("__nv_floor"),
+            Self::CeilF32 => Ok("__nv_ceilf"),
+            Self::CeilF64 => Ok("__nv_ceil"),
+            Self::TruncF32 => Ok("__nv_truncf"),
+            Self::TruncF64 => Ok("__nv_trunc"),
+            Self::RoundF32 => Ok("__nv_roundf"),
+            Self::RoundF64 => Ok("__nv_round"),
+            Self::RoundevenF32 => Ok("__nv_rintf"),
+            Self::RoundevenF64 => Ok("__nv_rint"),
+            Self::Fabs => fabs_libdevice_name(ctx, result_ty, loc),
+            Self::CopysignF32 => Ok("__nv_copysignf"),
+            Self::CopysignF64 => Ok("__nv_copysign"),
+        }
+    }
+
+    /// Number of operands expected by the libdevice function.
+    fn arg_count(self) -> usize {
+        match self {
+            Self::PowiF32
+            | Self::PowiF64
+            | Self::PowfF32
+            | Self::PowfF64
+            | Self::CopysignF32
+            | Self::CopysignF64 => 2,
+            Self::FmaF32 | Self::FmaF64 | Self::FmuladdF32 | Self::FmuladdF64 => 3,
+            _ => 1,
         }
     }
 }
@@ -140,8 +303,16 @@ pub fn convert(
         (*callee_attr).clone().into()
     };
 
-    if let Some(intrinsic) = RustBitIntrinsic::from_marker_callee(&callee_name) {
+    if let Some(intrinsic) = RustBitIntrinsic::from_placeholder_callee(&callee_name) {
         return convert_rust_bit_intrinsic(ctx, rewriter, op, intrinsic);
+    }
+
+    if let Some(intrinsic) = RustSaturatingIntrinsic::from_placeholder_callee(&callee_name) {
+        return convert_rust_saturating_intrinsic(ctx, rewriter, op, operands_info, intrinsic);
+    }
+
+    if let Some(intrinsic) = RustFloatMathIntrinsic::from_placeholder_callee(&callee_name) {
+        return convert_rust_float_math_intrinsic(ctx, rewriter, op, intrinsic);
     }
 
     let callee_ident: pliron::identifier::Identifier = {
@@ -194,10 +365,10 @@ pub fn convert(
     Ok(())
 }
 
-/// Lower marker calls for rustc's integer bit intrinsics to LLVM intrinsics.
+/// Lower placeholder calls for rustc's integer bit intrinsics to LLVM intrinsics.
 ///
 /// Rust methods like `u128::rotate_left` call `core::intrinsics::rotate_left`
-/// in libcore. The importer preserves that as a marker `mir.call`; here we
+/// in libcore. The importer preserves that as a placeholder `mir.call`; here we
 /// recover the concrete integer width and emit the corresponding overloaded
 /// LLVM intrinsic.
 fn convert_rust_bit_intrinsic(
@@ -307,6 +478,128 @@ fn convert_rust_bit_intrinsic(
     Ok(())
 }
 
+/// Lower placeholder calls for rustc's saturating integer intrinsics.
+///
+/// Rust preserves signedness in the original MIR type. The converted LLVM value
+/// is signless, so this uses `operands_info` to choose `sadd/ssub` versus
+/// `uadd/usub`.
+fn convert_rust_saturating_intrinsic(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    operands_info: &OperandsInfo,
+    intrinsic: RustSaturatingIntrinsic,
+) -> Result<()> {
+    let loc = op.deref(ctx).loc();
+    if op.deref(ctx).get_num_results() != 1 {
+        return pliron::input_err!(loc, "Rust saturating intrinsic call must have one result");
+    }
+
+    let args: Vec<Value> = op.deref(ctx).operands().collect();
+    if args.len() != 2 {
+        return pliron::input_err!(
+            loc,
+            "Rust saturating intrinsic requires left and right operands"
+        );
+    }
+
+    let lhs = args[0];
+    let rhs = args[1];
+    let lhs_ty = lhs.get_type(ctx);
+    let width = integer_bit_width(ctx, lhs_ty, loc.clone())?;
+    let is_signed =
+        if let Some(int_ty) = operands_info.lookup_most_recent_of_type::<IntegerType>(ctx, lhs) {
+            int_ty.signedness() == Signedness::Signed
+        } else {
+            return pliron::input_err!(loc, "expected integer type for Rust saturating intrinsic");
+        };
+
+    let (rhs, _) = cast_integer_value_to_type(ctx, rewriter, rhs, lhs_ty, loc.clone())?;
+    let op_stem = match (is_signed, intrinsic) {
+        (true, RustSaturatingIntrinsic::Add) => "sadd",
+        (false, RustSaturatingIntrinsic::Add) => "uadd",
+        (true, RustSaturatingIntrinsic::Sub) => "ssub",
+        (false, RustSaturatingIntrinsic::Sub) => "usub",
+    };
+    let intrinsic_name = format!("llvm_{op_stem}_sat_i{width}");
+    let func_ty = llvm_types::FuncType::get(ctx, lhs_ty, vec![lhs_ty, lhs_ty], false);
+    let parent_block = op.deref(ctx).get_parent_block().ok_or_else(|| {
+        pliron::input_error!(
+            loc.clone(),
+            "Rust saturating intrinsic call has no parent block"
+        )
+    })?;
+    helpers::ensure_intrinsic_declared(ctx, parent_block, &intrinsic_name, func_ty)
+        .map_err(|e| pliron::input_error!(loc.clone(), "Failed to declare intrinsic: {e}"))?;
+
+    let sym_name: pliron::identifier::Identifier = intrinsic_name
+        .as_str()
+        .try_into()
+        .map_err(|e| pliron::input_error!(loc.clone(), "Invalid intrinsic name: {:?}", e))?;
+    let llvm_call = llvm::CallOp::new(
+        ctx,
+        CallOpCallable::Direct(sym_name),
+        func_ty,
+        vec![lhs, rhs],
+    );
+    rewriter.insert_operation(ctx, llvm_call.get_operation());
+
+    let result_mir_ty = op.deref(ctx).get_result(0).get_type(ctx);
+    let result_ty = convert_type(ctx, result_mir_ty).map_err(anyhow_to_pliron)?;
+    let call_result = llvm_call.get_operation().deref(ctx).get_result(0);
+    let (_, final_op) =
+        cast_integer_value_to_type(ctx, rewriter, call_result, result_ty, loc.clone())?;
+    let replacement = final_op.unwrap_or_else(|| llvm_call.get_operation());
+    rewriter.replace_operation(ctx, op, replacement);
+
+    Ok(())
+}
+
+/// Lower placeholder calls for rustc's `f32` / `f64` math intrinsics to libdevice.
+fn convert_rust_float_math_intrinsic(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    intrinsic: RustFloatMathIntrinsic,
+) -> Result<()> {
+    let loc = op.deref(ctx).loc();
+    if op.deref(ctx).get_num_results() != 1 {
+        return pliron::input_err!(loc, "Rust float math intrinsic call must have one result");
+    }
+
+    let args: Vec<Value> = op.deref(ctx).operands().collect();
+    let expected_args = intrinsic.arg_count();
+    if args.len() != expected_args {
+        return pliron::input_err!(
+            loc,
+            "Rust float math intrinsic requires {expected_args} operand(s)"
+        );
+    }
+
+    let result_mir_ty = op.deref(ctx).get_result(0).get_type(ctx);
+    let result_ty = convert_type(ctx, result_mir_ty).map_err(anyhow_to_pliron)?;
+    let intrinsic_name = intrinsic.libdevice_name(ctx, result_ty, loc.clone())?;
+    let arg_types = args.iter().map(|arg| arg.get_type(ctx)).collect::<Vec<_>>();
+    let func_ty = llvm_types::FuncType::get(ctx, result_ty, arg_types, false);
+    let parent_block = op.deref(ctx).get_parent_block().ok_or_else(|| {
+        pliron::input_error!(
+            loc.clone(),
+            "Rust float math intrinsic call has no parent block"
+        )
+    })?;
+    helpers::ensure_intrinsic_declared(ctx, parent_block, &intrinsic_name, func_ty)
+        .map_err(|e| pliron::input_error!(loc.clone(), "Failed to declare intrinsic: {e}"))?;
+
+    let sym_name: pliron::identifier::Identifier = intrinsic_name
+        .try_into()
+        .map_err(|e| pliron::input_error!(loc.clone(), "Invalid intrinsic name: {:?}", e))?;
+    let llvm_call = llvm::CallOp::new(ctx, CallOpCallable::Direct(sym_name), func_ty, args);
+    rewriter.insert_operation(ctx, llvm_call.get_operation());
+    rewriter.replace_operation(ctx, op, llvm_call.get_operation());
+
+    Ok(())
+}
+
 /// Read the width from an integer type, or report a useful lowering error.
 fn integer_bit_width(
     ctx: &Context,
@@ -318,6 +611,25 @@ fn integer_bit_width(
         return pliron::input_err!(loc, "expected integer type for Rust bit intrinsic");
     };
     Ok(int_ty.width())
+}
+
+/// Return the libdevice `fabs` entry point for the concrete float type.
+fn fabs_libdevice_name(
+    ctx: &Context,
+    ty: Ptr<TypeObj>,
+    loc: pliron::location::Location,
+) -> Result<&'static str> {
+    let ty_ref = ty.deref(ctx);
+    if ty_ref.is::<FP32Type>() {
+        Ok("__nv_fabsf")
+    } else if ty_ref.is::<FP64Type>() {
+        Ok("__nv_fabs")
+    } else {
+        pliron::input_err!(
+            loc,
+            "expected f32 or f64 type for Rust float math intrinsic"
+        )
+    }
 }
 
 /// Insert the `i1` flag operand used by `llvm.ctlz` and `llvm.cttz`.

@@ -7,6 +7,7 @@
 
 pub mod attributes;
 pub mod ops;
+pub mod rust_intrinsics;
 pub mod types;
 
 use pliron::context::Context;
