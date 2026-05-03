@@ -587,7 +587,7 @@ fn convert_rust_float_math_intrinsic(
             "Rust float math intrinsic call has no parent block"
         )
     })?;
-    helpers::ensure_intrinsic_declared(ctx, parent_block, &intrinsic_name, func_ty)
+    helpers::ensure_intrinsic_declared(ctx, parent_block, intrinsic_name, func_ty)
         .map_err(|e| pliron::input_error!(loc.clone(), "Failed to declare intrinsic: {e}"))?;
 
     let sym_name: pliron::identifier::Identifier = intrinsic_name
@@ -851,5 +851,72 @@ mod tests {
             resolve_device_extern_symbol("cuda_oxide_kernel_my_kernel"),
             "cuda_oxide_kernel_my_kernel"
         );
+    }
+
+    /// Sample of the Rust float-math placeholder → libdevice symbol mapping.
+    /// This locks the table down so a typo in either the intrinsic enum or
+    /// the libdevice symbol surfaces as a unit-test failure rather than a
+    /// runtime "symbol not found" error after a long compile cycle.
+    #[test]
+    fn test_float_math_placeholder_round_trip() {
+        let cases: &[(&str, RustFloatMathIntrinsic)] = &[
+            (rust_intrinsics::CALLEE_SQRT_F32, RustFloatMathIntrinsic::SqrtF32),
+            (rust_intrinsics::CALLEE_SQRT_F64, RustFloatMathIntrinsic::SqrtF64),
+            (rust_intrinsics::CALLEE_POWI_F32, RustFloatMathIntrinsic::PowiF32),
+            (rust_intrinsics::CALLEE_POWI_F64, RustFloatMathIntrinsic::PowiF64),
+            (rust_intrinsics::CALLEE_FMA_F32, RustFloatMathIntrinsic::FmaF32),
+            (rust_intrinsics::CALLEE_FMULADD_F64, RustFloatMathIntrinsic::FmuladdF64),
+            (rust_intrinsics::CALLEE_FABS, RustFloatMathIntrinsic::Fabs),
+            (rust_intrinsics::CALLEE_COPYSIGN_F32, RustFloatMathIntrinsic::CopysignF32),
+            (rust_intrinsics::CALLEE_LOG2_F64, RustFloatMathIntrinsic::Log2F64),
+        ];
+
+        for (name, expected) in cases {
+            assert_eq!(
+                RustFloatMathIntrinsic::from_placeholder_callee(name),
+                Some(*expected),
+                "placeholder `{name}` did not round-trip"
+            );
+        }
+
+        assert_eq!(
+            RustFloatMathIntrinsic::from_placeholder_callee("not_a_placeholder"),
+            None,
+        );
+    }
+
+    #[test]
+    fn test_float_math_arg_count() {
+        assert_eq!(RustFloatMathIntrinsic::SqrtF32.arg_count(), 1);
+        assert_eq!(RustFloatMathIntrinsic::Fabs.arg_count(), 1);
+        assert_eq!(RustFloatMathIntrinsic::FloorF64.arg_count(), 1);
+        assert_eq!(RustFloatMathIntrinsic::PowiF32.arg_count(), 2);
+        assert_eq!(RustFloatMathIntrinsic::PowfF64.arg_count(), 2);
+        assert_eq!(RustFloatMathIntrinsic::CopysignF32.arg_count(), 2);
+        assert_eq!(RustFloatMathIntrinsic::FmaF32.arg_count(), 3);
+        assert_eq!(RustFloatMathIntrinsic::FmuladdF64.arg_count(), 3);
+    }
+
+    /// `Fabs` is the only float-math intrinsic whose libdevice name depends on
+    /// the result type (the others are width-suffixed in the enum itself).
+    /// Ensure both float widths are dispatched correctly and that anything
+    /// else is rejected.
+    #[test]
+    fn test_fabs_libdevice_name_dispatches_on_float_width() {
+        let mut ctx = Context::new();
+        let f32_ty = FP32Type::get(&ctx).into();
+        let f64_ty = FP64Type::get(&ctx).into();
+        let i32_ty = IntegerType::get(&mut ctx, 32, Signedness::Signless).into();
+        let loc = pliron::location::Location::Unknown;
+
+        assert_eq!(
+            fabs_libdevice_name(&ctx, f32_ty, loc.clone()).unwrap(),
+            "__nv_fabsf"
+        );
+        assert_eq!(
+            fabs_libdevice_name(&ctx, f64_ty, loc.clone()).unwrap(),
+            "__nv_fabs"
+        );
+        assert!(fabs_libdevice_name(&ctx, i32_ty, loc).is_err());
     }
 }

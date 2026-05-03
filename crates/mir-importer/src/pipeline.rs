@@ -1095,4 +1095,107 @@ mod tests {
         assert_eq!(select_target(DetectedFeatures::Cluster), "sm_90");
         assert_eq!(select_target(DetectedFeatures::Basic), "sm_80");
     }
+
+    /// Build a minimal `dialect-llvm` module containing a single function
+    /// declaration named `name`. The module is intentionally empty otherwise;
+    /// the auto-detect logic only inspects the symbol name on declarations
+    /// and on direct call sites.
+    fn build_module_with_func_decl(ctx: &mut Context, name: &str) -> Ptr<Operation> {
+        use dialect_llvm::ops::FuncOp as LlvmFuncOp;
+        use dialect_llvm::types::FuncType as LlvmFuncType;
+        use pliron::basic_block::BasicBlock;
+        use pliron::builtin::ops::ModuleOp;
+        use pliron::builtin::types::{IntegerType, Signedness};
+
+        dialect_llvm::register(ctx);
+        let module = ModuleOp::new(ctx, "test_module".try_into().unwrap());
+        let module_ptr = module.get_operation();
+        let module_region = module_ptr.deref(ctx).get_region(0);
+
+        let module_block = {
+            let region_ref = module_region.deref(ctx);
+            if let Some(first_block) = region_ref.iter(ctx).next() {
+                first_block
+            } else {
+                drop(region_ref);
+                let new_block = BasicBlock::new(ctx, None, vec![]);
+                new_block.insert_at_back(module_region, ctx);
+                new_block
+            }
+        };
+
+        let i32_ty = IntegerType::get(ctx, 32, Signedness::Signless);
+        let func_ty = LlvmFuncType::get(ctx, i32_ty.into(), vec![i32_ty.into()], false);
+        let func = LlvmFuncOp::new(ctx, name.try_into().unwrap(), func_ty);
+        func.get_operation().insert_at_back(module_block, ctx);
+
+        module_ptr
+    }
+
+    #[test]
+    fn test_module_uses_libdevice_detects_nv_func_decl() {
+        let mut ctx = Context::new();
+        let module_ptr = build_module_with_func_decl(&mut ctx, "__nv_sqrtf");
+        assert!(
+            module_uses_libdevice(&ctx, module_ptr),
+            "module containing `__nv_*` function declaration must be flagged"
+        );
+    }
+
+    #[test]
+    fn test_module_uses_libdevice_ignores_unrelated_funcs() {
+        let mut ctx = Context::new();
+        let module_ptr = build_module_with_func_decl(&mut ctx, "kernel_main");
+        assert!(
+            !module_uses_libdevice(&ctx, module_ptr),
+            "module without any `__nv_*` symbols must not be flagged"
+        );
+    }
+
+    #[test]
+    fn test_module_uses_libdevice_does_not_match_partial_prefix() {
+        // "__nvm_foo" starts with "__nv" but not "__nv_". The detection rule
+        // is the full `__nv_` prefix, so this must not trigger auto-detect.
+        let mut ctx = Context::new();
+        let module_ptr = build_module_with_func_decl(&mut ctx, "__nvm_foo");
+        assert!(
+            !module_uses_libdevice(&ctx, module_ptr),
+            "names starting with `__nv` but not `__nv_` must not be flagged"
+        );
+    }
+
+    /// `module_uses_libdevice` must also fire when the libdevice symbol
+    /// appears as the callee of a direct `CallOp` -- this is the realistic
+    /// case where a normal kernel calls `__nv_sqrtf`. The auto-detect
+    /// recursion has to walk through the module region and visit the
+    /// `CallOp` even when no enclosing `FuncOp` matches the prefix rule.
+    #[test]
+    fn test_module_uses_libdevice_detects_direct_nv_call() {
+        use dialect_llvm::ops::CallOp as LlvmCallOp;
+        use dialect_llvm::types::FuncType as LlvmFuncType;
+        use pliron::basic_block::BasicBlock;
+        use pliron::builtin::ops::ModuleOp;
+        use pliron::builtin::types::{IntegerType, Signedness};
+
+        let mut ctx = Context::new();
+        dialect_llvm::register(&mut ctx);
+
+        let module = ModuleOp::new(&mut ctx, "test_module".try_into().unwrap());
+        let module_ptr = module.get_operation();
+        let module_region = module_ptr.deref(&ctx).get_region(0);
+        let module_block = BasicBlock::new(&mut ctx, None, vec![]);
+        module_block.insert_at_back(module_region, &ctx);
+
+        let i32_ty = IntegerType::get(&mut ctx, 32, Signedness::Signless);
+        let callee_ty = LlvmFuncType::get(&mut ctx, i32_ty.into(), vec![], false);
+        let callee_ident: pliron::identifier::Identifier = "__nv_sqrtf".try_into().unwrap();
+        let nv_call =
+            LlvmCallOp::new(&mut ctx, CallOpCallable::Direct(callee_ident), callee_ty, vec![]);
+        nv_call.get_operation().insert_at_back(module_block, &ctx);
+
+        assert!(
+            module_uses_libdevice(&ctx, module_ptr),
+            "direct call to a `__nv_*` symbol must be detected"
+        );
+    }
 }
