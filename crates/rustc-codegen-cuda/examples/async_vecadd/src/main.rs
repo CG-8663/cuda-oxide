@@ -37,7 +37,7 @@ pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use cuda_async::device_box::DeviceBox;
-    use cuda_async::device_context::init_device_contexts;
+    use cuda_async::device_context::{init_device_contexts, load_kernel_module_async};
     use cuda_async::device_operation::DeviceOperation;
     use cuda_core::LaunchConfig;
     use cuda_core::memory::{malloc_async, memcpy_dtoh_async, memcpy_htod_async};
@@ -48,8 +48,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Initialize the async device context (round-robin pool of 4 streams).
     init_device_contexts(0, 1)?;
 
-    // 2. Load the PTX module into the thread-local kernel cache.
-    let module = cuda_async::device_context::load_module_from_file("async_vecadd.ptx", 0)?;
+    // 2. Load the kernel module into the thread-local kernel cache.
+    //    `load_kernel_module_async` accepts a stem name and transparently
+    //    picks `.cubin` / `.ptx` / `.ll` (with libdevice link) under the hood.
+    let module = load_kernel_module_async("async_vecadd", 0)?;
 
     const N: usize = 1024;
     let a_host: Vec<f32> = (0..N).map(|i| i as f32).collect();

@@ -133,7 +133,8 @@ cargo oxide doctor
 cargo oxide run vecadd
 ```
 
-`cargo oxide doctor` validates your Rust toolchain, CUDA toolkit, LLVM
+`cargo oxide doctor` validates your Rust toolchain, CUDA toolkit (including
+libNVVM / nvJitLink / libdevice for kernels that use math intrinsics), LLVM
 installation, and codegen backend. If everything is configured correctly,
 `cargo oxide run vecadd` compiles a Rust kernel to PTX, launches it on the GPU,
 and prints a success message.

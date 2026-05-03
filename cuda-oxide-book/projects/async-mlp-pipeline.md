@@ -300,9 +300,7 @@ const BLOCK: u32 = 16;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_device_contexts(0, 1)?;
-    let module = cuda_async::device_context::load_module_from_file(
-        "async_mlp.ptx", 0
-    )?;
+    let module = load_kernel_module_async("async_mlp", 0)?;
 ```
 
 `init_device_contexts(0, 1)` sets device 0 as the default and initializes

@@ -860,15 +860,39 @@ mod tests {
     #[test]
     fn test_float_math_placeholder_round_trip() {
         let cases: &[(&str, RustFloatMathIntrinsic)] = &[
-            (rust_intrinsics::CALLEE_SQRT_F32, RustFloatMathIntrinsic::SqrtF32),
-            (rust_intrinsics::CALLEE_SQRT_F64, RustFloatMathIntrinsic::SqrtF64),
-            (rust_intrinsics::CALLEE_POWI_F32, RustFloatMathIntrinsic::PowiF32),
-            (rust_intrinsics::CALLEE_POWI_F64, RustFloatMathIntrinsic::PowiF64),
-            (rust_intrinsics::CALLEE_FMA_F32, RustFloatMathIntrinsic::FmaF32),
-            (rust_intrinsics::CALLEE_FMULADD_F64, RustFloatMathIntrinsic::FmuladdF64),
+            (
+                rust_intrinsics::CALLEE_SQRT_F32,
+                RustFloatMathIntrinsic::SqrtF32,
+            ),
+            (
+                rust_intrinsics::CALLEE_SQRT_F64,
+                RustFloatMathIntrinsic::SqrtF64,
+            ),
+            (
+                rust_intrinsics::CALLEE_POWI_F32,
+                RustFloatMathIntrinsic::PowiF32,
+            ),
+            (
+                rust_intrinsics::CALLEE_POWI_F64,
+                RustFloatMathIntrinsic::PowiF64,
+            ),
+            (
+                rust_intrinsics::CALLEE_FMA_F32,
+                RustFloatMathIntrinsic::FmaF32,
+            ),
+            (
+                rust_intrinsics::CALLEE_FMULADD_F64,
+                RustFloatMathIntrinsic::FmuladdF64,
+            ),
             (rust_intrinsics::CALLEE_FABS, RustFloatMathIntrinsic::Fabs),
-            (rust_intrinsics::CALLEE_COPYSIGN_F32, RustFloatMathIntrinsic::CopysignF32),
-            (rust_intrinsics::CALLEE_LOG2_F64, RustFloatMathIntrinsic::Log2F64),
+            (
+                rust_intrinsics::CALLEE_COPYSIGN_F32,
+                RustFloatMathIntrinsic::CopysignF32,
+            ),
+            (
+                rust_intrinsics::CALLEE_LOG2_F64,
+                RustFloatMathIntrinsic::Log2F64,
+            ),
         ];
 
         for (name, expected) in cases {

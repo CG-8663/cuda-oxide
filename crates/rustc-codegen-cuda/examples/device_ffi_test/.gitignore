@@ -21,4 +21,3 @@ tools/launch_cubin
 
 # Cargo build artifacts
 target/
-Cargo.lock

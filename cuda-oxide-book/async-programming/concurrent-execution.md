@@ -59,14 +59,12 @@ sets up the scheduling policy (round-robin with four streams by default), and
 makes the thread-local state available for `.sync()` and `.await`:
 
 ```rust
-use cuda_async::device_context::init_device_contexts;
+use cuda_async::device_context::{init_device_contexts, load_kernel_module_async};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_device_contexts(0, 1)?;
-    let module = cuda_async::device_context::load_module_from_file(
-        "async_mlp.ptx", 0
-    )?;
+    let module = load_kernel_module_async("async_mlp", 0)?;
 ```
 
 The PTX module is loaded into the thread-local kernel cache. The `Arc<CudaModule>`

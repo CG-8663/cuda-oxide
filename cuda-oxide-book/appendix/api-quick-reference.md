@@ -67,15 +67,18 @@ let bid_x = thread::blockIdx_x();       // u32
 let bdim_x = thread::blockDim_x();      // u32
 ```
 
-| Function                          | Returns         | Description                             |
-|:----------------------------------|:----------------|:----------------------------------------|
-| `thread::index_1d()`              | `ThreadIndex`   | Unique linear index (1D grids)          |
-| `thread::index_2d(row_stride)`    | `Option<ThreadIndex>` | Unique linear index (2D grids); `None` when `col >= stride` |
-| `thread::index_2d_row()`          | `usize`         | 2D row index                            |
-| `thread::index_2d_col()`          | `usize`         | 2D column index                         |
-| `thread::threadIdx_{x,y}()`       | `u32`           | Thread index within block               |
-| `thread::blockIdx_{x,y}()`        | `u32`           | Block index within grid                 |
-| `thread::blockDim_{x,y}()`        | `u32`           | Block dimensions                        |
+| Function                       | Returns               | Description                    |
+|:-------------------------------|:----------------------|:-------------------------------|
+| `thread::index_1d()`           | `ThreadIndex`         | Unique linear index (1D grids) |
+| `thread::index_2d(row_stride)` | `Option<ThreadIndex>` | Unique linear index (2D grids) |
+| `thread::index_2d_row()`       | `usize`               | 2D row index                   |
+| `thread::index_2d_col()`       | `usize`               | 2D column index                |
+| `thread::threadIdx_{x,y}()`    | `u32`                 | Thread index within block      |
+| `thread::blockIdx_{x,y}()`     | `u32`                 | Block index within grid        |
+| `thread::blockDim_{x,y}()`     | `u32`                 | Block dimensions               |
+
+`thread::index_2d` returns `None` when the computed column exceeds
+`row_stride` — use it to skip the right-edge tail in non-aligned 2D kernels.
 
 ---
 
@@ -311,11 +314,11 @@ N_COLS must be a power of 2 in the range [32, 512].
 
 ```rust
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
-use cuda_host::cuda_launch;
+use cuda_host::{cuda_launch, load_kernel_module};
 
 let ctx = CudaContext::new(0).unwrap();
 let stream = ctx.default_stream();
-let module = ctx.load_module_from_file("vecadd.ptx").unwrap();
+let module = load_kernel_module(&ctx, "vecadd").unwrap();
 
 let input = DeviceBuffer::from_host(&stream, &host_data).unwrap();
 let mut output = DeviceBuffer::<f32>::zeroed(&stream, n).unwrap();

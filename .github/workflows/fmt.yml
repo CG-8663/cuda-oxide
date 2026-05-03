@@ -1,0 +1,46 @@
+---
+name: fmt
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins nightly-2026-04-03 but does not list
+      # rustfmt as a component. Add it explicitly so `cargo fmt` resolves
+      # against the same nightly the rest of CI uses.
+      - name: Install rustfmt for the pinned nightly
+        run: rustup component add rustfmt
+
+      - name: Check root workspace formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check rustc-codegen-cuda formatting
+        run: cargo fmt --all -- --check
+        working-directory: crates/rustc-codegen-cuda
+
+      - name: Check example crate formatting
+        run: |
+          set -euo pipefail
+          for manifest in crates/rustc-codegen-cuda/examples/*/Cargo.toml; do
+            example_dir="$(dirname "$manifest")"
+            echo "::group::cargo fmt --check ($example_dir)"
+            (cd "$example_dir" && cargo fmt --all -- --check)
+            echo "::endgroup::"
+          done

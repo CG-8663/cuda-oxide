@@ -34,7 +34,7 @@
 //!   cargo oxide run async_mlp
 
 use cuda_async::device_box::DeviceBox;
-use cuda_async::device_context::init_device_contexts;
+use cuda_async::device_context::{init_device_contexts, load_kernel_module_async};
 use cuda_async::device_operation::{self, DeviceOperation, Zippable, value};
 use cuda_async::launch::AsyncKernelLaunch;
 use cuda_async::zip;
@@ -180,7 +180,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. Initialize the async device context (round-robin pool of 4 streams).
     init_device_contexts(0, 1)?;
-    let module = cuda_async::device_context::load_module_from_file("async_mlp.ptx", 0)?;
+    let module = load_kernel_module_async("async_mlp", 0)?;
 
     // 2. Allocate model weights on device using zip! to compose independent ops.
     //    Both allocations are submitted together on the same stream.

@@ -46,7 +46,7 @@ host):
 ```rust
 use cuda_device::{kernel, thread, DisjointSlice};
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
-use cuda_host::cuda_launch;
+use cuda_host::{cuda_launch, load_kernel_module};
 
 #[kernel]
 pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
@@ -59,7 +59,7 @@ pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
 fn main() {
     let ctx = CudaContext::new(0).unwrap();
     let stream = ctx.default_stream();
-    let module = ctx.load_module_from_file("vecadd.ptx").unwrap();
+    let module = load_kernel_module(&ctx, "vecadd").unwrap();
 
     let a = DeviceBuffer::from_host(&stream, &[1.0f32; 1024]).unwrap();
     let b = DeviceBuffer::from_host(&stream, &[2.0f32; 1024]).unwrap();

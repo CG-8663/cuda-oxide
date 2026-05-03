@@ -177,14 +177,21 @@ cargo oxide doctor
 
 Doctor checks:
 
-| Check           | What it verifies                          |
-|:----------------|:------------------------------------------|
-| Rust toolchain  | Nightly compiler with required components |
-| CUDA toolkit    | `nvcc` found and version compatible       |
-| LLVM            | `llc` available for PTX generation        |
-| Codegen backend | `librustc_codegen_cuda.so` found          |
+| Check           | What it verifies                                                              |
+|:----------------|:------------------------------------------------------------------------------|
+| Rust toolchain  | Nightly compiler with required components                                     |
+| CUDA toolkit    | `nvcc` found and version compatible                                           |
+| libNVVM         | `libnvvm.so` (CUDA Toolkit) loadable -- needed for libdevice math kernels     |
+| nvJitLink       | `libnvJitLink.so` (CUDA Toolkit) loadable -- needed for libdevice math kernels|
+| libdevice       | `libdevice.10.bc` discoverable -- needed for libdevice math kernels           |
+| LLVM            | `llc` (21+) available for PTX generation                                      |
+| Codegen backend | `librustc_codegen_cuda.so` found (run `cargo oxide setup` to build it)        |
 
-If any check fails, doctor provides instructions for fixing the issue.
+The libNVVM / nvJitLink / libdevice checks fire only when a kernel calls
+CUDA libdevice math (`sin`, `cos`, `exp`, `pow`, `sqrt`, ...). If your
+kernel is pure arithmetic, those three failing is harmless. They all ship
+with the CUDA Toolkit -- no separate download. If any check fails, doctor
+prints the standard install location for that component.
 
 ## `cargo oxide pipeline` -- inspecting the compilation
 

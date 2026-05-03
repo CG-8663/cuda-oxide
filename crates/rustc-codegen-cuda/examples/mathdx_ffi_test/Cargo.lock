@@ -38,10 +38,30 @@ dependencies = [
 ]
 
 [[package]]
-name = "bitflags"
-version = "2.11.0"
+name = "bindgen"
+version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
+checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
+dependencies = [
+ "bitflags",
+ "cexpr",
+ "clang-sys",
+ "itertools",
+ "log",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash",
+ "shlex",
+ "syn",
+]
+
+[[package]]
+name = "bitflags"
+version = "2.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
 
 [[package]]
 name = "cexpr"
@@ -79,7 +99,7 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 name = "cuda-bindings"
 version = "0.1.0"
 dependencies = [
- "bindgen",
+ "bindgen 0.71.1",
 ]
 
 [[package]]
@@ -152,9 +172,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.184"
+version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48f5d2a454e16a5ea0f4ced81bd44e4cfc7bd3a507b61887c99fd3538b28e4af"
+checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libloading"
@@ -164,6 +184,13 @@ checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
 dependencies = [
  "cfg-if",
  "windows-link",
+]
+
+[[package]]
+name = "libmathdx-sys"
+version = "0.1.0"
+dependencies = [
+ "bindgen 0.72.1",
 ]
 
 [[package]]
@@ -179,6 +206,16 @@ name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
+
+[[package]]
+name = "mathdx_ffi_test"
+version = "0.1.0"
+dependencies = [
+ "cuda-core",
+ "cuda-device",
+ "cuda-host",
+ "libmathdx-sys",
+]
 
 [[package]]
 name = "memchr"
@@ -315,15 +352,6 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
-
-[[package]]
-name = "warp_reduce"
-version = "0.1.0"
-dependencies = [
- "cuda-core",
- "cuda-device",
- "cuda-host",
-]
 
 [[package]]
 name = "windows-link"

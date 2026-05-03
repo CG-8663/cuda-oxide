@@ -20,4 +20,3 @@ cuda-caller/test_runner
 
 # Cargo build artifacts
 target/
-Cargo.lock

@@ -23,7 +23,6 @@ extern-libs/*_text.ltoir
 
 # Cargo build artifacts
 target/
-Cargo.lock
 
 # Bug documentation (local debugging notes, not for version control)
 bugs/

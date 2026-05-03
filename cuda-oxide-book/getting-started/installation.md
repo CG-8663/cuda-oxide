@@ -124,7 +124,7 @@ Run the built-in diagnostics check:
 cargo oxide doctor
 ```
 
-`cargo oxide doctor` validates your Rust toolchain, CUDA toolkit, LLVM installation, and codegen backend in one shot.
+`cargo oxide doctor` validates your Rust toolchain, CUDA toolkit (including libNVVM / nvJitLink / libdevice for kernels that use math intrinsics), LLVM installation, and codegen backend in one shot.
 
 Then build and run an example end-to-end:
 

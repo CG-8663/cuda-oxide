@@ -1189,8 +1189,12 @@ mod tests {
         let i32_ty = IntegerType::get(&mut ctx, 32, Signedness::Signless);
         let callee_ty = LlvmFuncType::get(&mut ctx, i32_ty.into(), vec![], false);
         let callee_ident: pliron::identifier::Identifier = "__nv_sqrtf".try_into().unwrap();
-        let nv_call =
-            LlvmCallOp::new(&mut ctx, CallOpCallable::Direct(callee_ident), callee_ty, vec![]);
+        let nv_call = LlvmCallOp::new(
+            &mut ctx,
+            CallOpCallable::Direct(callee_ident),
+            callee_ty,
+            vec![],
+        );
         nv_call.get_operation().insert_at_back(module_block, &ctx);
 
         assert!(
