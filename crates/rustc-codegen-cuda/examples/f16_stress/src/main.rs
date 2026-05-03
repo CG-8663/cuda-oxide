@@ -16,6 +16,7 @@ use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
 use cuda_device::{DisjointSlice, kernel, thread};
 use cuda_host::cuda_launch;
 
+/// Stores one `f16` value so we cover constants and device memory traffic.
 #[kernel]
 pub fn test_f16_store(mut out: DisjointSlice<f16>) {
     if thread::index_1d().get() == 0 {
@@ -25,6 +26,7 @@ pub fn test_f16_store(mut out: DisjointSlice<f16>) {
     }
 }
 
+/// Exercises basic `f16` arithmetic, comparison, and casts through `f32`.
 #[kernel]
 pub fn test_f16_ops(mut out: DisjointSlice<u32>) {
     if thread::index_1d().get() == 0 {

@@ -74,6 +74,7 @@ const RUST_BIT_CALLEE_CTTZ_NONZERO: &str = "__cuda_oxide_rust_intrinsic_cttz_non
 const RUST_BIT_CALLEE_BSWAP: &str = "__cuda_oxide_rust_intrinsic_bswap";
 const RUST_BIT_CALLEE_BITREVERSE: &str = "__cuda_oxide_rust_intrinsic_bitreverse";
 
+/// Internal marker for rustc bit intrinsics that need LLVM intrinsic calls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RustBitIntrinsic {
     RotateLeft,
@@ -86,6 +87,7 @@ enum RustBitIntrinsic {
 }
 
 impl RustBitIntrinsic {
+    /// Convert an importer marker name back into the intrinsic it represents.
     fn from_marker_callee(callee: &str) -> Option<Self> {
         match callee {
             RUST_BIT_CALLEE_ROTATE_LEFT => Some(Self::RotateLeft),
@@ -305,6 +307,7 @@ fn convert_rust_bit_intrinsic(
     Ok(())
 }
 
+/// Read the width from an integer type, or report a useful lowering error.
 fn integer_bit_width(
     ctx: &Context,
     ty: Ptr<TypeObj>,
@@ -317,6 +320,7 @@ fn integer_bit_width(
     Ok(int_ty.width())
 }
 
+/// Insert the `i1` flag operand used by `llvm.ctlz` and `llvm.cttz`.
 fn create_i1_constant(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
@@ -331,6 +335,10 @@ fn create_i1_constant(
     const_op.get_operation().deref(ctx).get_result(0)
 }
 
+/// Cast an integer value to the target width when Rust and LLVM disagree.
+///
+/// This is needed for count/zero intrinsics: LLVM returns `iN`, while Rust's
+/// public methods return `u32`.
 fn cast_integer_value_to_type(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,

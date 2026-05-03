@@ -15,6 +15,7 @@ use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
 use cuda_device::{DisjointSlice, kernel, thread};
 use cuda_host::cuda_launch;
 
+/// Checks that `char` imports as a 32-bit scalar and casts cleanly to `u32`.
 #[kernel]
 pub fn test_char(mut out: DisjointSlice<u32>) {
     if thread::index_1d().get() == 0 {
@@ -30,6 +31,7 @@ pub fn test_char(mut out: DisjointSlice<u32>) {
     }
 }
 
+/// Checks wide integer constants, arithmetic, shifts, and argument passing.
 #[kernel]
 pub fn test_u128_i128(a: u128, b: u128, c: i128, mut out: DisjointSlice<u64>) {
     if thread::index_1d().get() == 0 {
@@ -51,6 +53,7 @@ pub fn test_u128_i128(a: u128, b: u128, c: i128, mut out: DisjointSlice<u64>) {
     }
 }
 
+/// Checks target pointer-sized integer import and arithmetic.
 #[kernel]
 pub fn test_pointer_sized(a: usize, b: isize, mut out: DisjointSlice<u64>) {
     if thread::index_1d().get() == 0 {
@@ -68,6 +71,7 @@ pub fn test_pointer_sized(a: usize, b: isize, mut out: DisjointSlice<u64>) {
     }
 }
 
+/// Checks primitive integer methods that call rustc bit intrinsics in libcore.
 #[kernel]
 pub fn test_bit_intrinsics(a: u128, b: u64, c: u32, mut out: DisjointSlice<u64>) {
     if thread::index_1d().get() == 0 {

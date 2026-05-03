@@ -220,6 +220,25 @@ def literal_for_type(ty: str, idx: int) -> str:
     return values[idx % len(values)]
 
 
+def supported_trace_type(ty: str) -> bool:
+    return ty in {
+        "bool",
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "i128",
+        "isize",
+        "u8",
+        "u16",
+        "u32",
+        "u64",
+        "u128",
+        "usize",
+        "char",
+    }
+
+
 def adapt_function(fn_src: str, fn_name: str) -> str:
     types = collect_types(fn_src)
     dump_pattern = re.compile(
@@ -227,8 +246,6 @@ def adapt_function(fn_src: str, fn_name: str) -> str:
         re.S,
     )
     dump_matches = list(dump_pattern.finditer(fn_src))
-    if not dump_matches:
-        raise SystemExit("expected one dump_var call terminator")
 
     dump_locals: list[tuple[str, list[str]]] = []
     dump_idx = 0
@@ -240,22 +257,7 @@ def adapt_function(fn_src: str, fn_name: str) -> str:
         kept_values = [value for value in values if types.get(value) != "()"]
         kept_types = [types[value] for value in kept_values]
         for ty in kept_types:
-            if ty not in {
-                "bool",
-                "i8",
-                "i16",
-                "i32",
-                "i64",
-                "i128",
-                "isize",
-                "u8",
-                "u16",
-                "u32",
-                "u64",
-                "u128",
-                "usize",
-                "char",
-            }:
+            if not supported_trace_type(ty):
                 raise SystemExit(f"unsupported dumped type for Stage 2 adapter: {ty}")
 
         if not kept_values:
@@ -306,6 +308,22 @@ def generated_module(fn_src: str, fn_name: str, seed: int) -> str:
     adapted = adapt_function(fn_src, fn_name)
     args = [literal_for_type(ty, idx) for idx, (_, ty) in enumerate(function_args(fn_src))]
     call_args = ", ".join(args)
+    ret_ty = return_type(fn_src)
+    has_dump_site = "dump_var(Move(__rl_dump" in adapted
+
+    if has_dump_site or ret_ty == "()":
+        trace_lines = [
+            f"    let _ = {fn_name}({call_args});",
+            "    trace_finish()",
+        ]
+    elif supported_trace_type(ret_ty):
+        trace_lines = [
+            f"    let result = {fn_name}({call_args});",
+            "    dump_var((result,));",
+            "    trace_finish()",
+        ]
+    else:
+        raise SystemExit(f"unsupported return type for return-value tracing: {ret_ty}")
 
     return "\n".join(
         [
@@ -328,8 +346,7 @@ def generated_module(fn_src: str, fn_name: str, seed: int) -> str:
             "#[inline(never)]",
             "pub fn compute_rustlantis_trace() -> u64 {",
             "    trace_reset();",
-            f"    let _ = {fn_name}({call_args});",
-            "    trace_finish()",
+            *trace_lines,
             "}",
         ]
     )

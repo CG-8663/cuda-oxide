@@ -19,28 +19,46 @@ use pliron::location::Location;
 use pliron::operation::Operation;
 use rustc_public::mir;
 
+/// Marker call used for `core::intrinsics::rotate_left`.
 pub const CALLEE_ROTATE_LEFT: &str = "__cuda_oxide_rust_intrinsic_rotate_left";
+/// Marker call used for `core::intrinsics::rotate_right`.
 pub const CALLEE_ROTATE_RIGHT: &str = "__cuda_oxide_rust_intrinsic_rotate_right";
+/// Marker call used for `core::intrinsics::ctpop`.
 pub const CALLEE_CTPOP: &str = "__cuda_oxide_rust_intrinsic_ctpop";
+/// Marker call used for `core::intrinsics::ctlz`.
 pub const CALLEE_CTLZ: &str = "__cuda_oxide_rust_intrinsic_ctlz";
+/// Marker call used for `core::intrinsics::ctlz_nonzero`.
 pub const CALLEE_CTLZ_NONZERO: &str = "__cuda_oxide_rust_intrinsic_ctlz_nonzero";
+/// Marker call used for `core::intrinsics::cttz`.
 pub const CALLEE_CTTZ: &str = "__cuda_oxide_rust_intrinsic_cttz";
+/// Marker call used for `core::intrinsics::cttz_nonzero`.
 pub const CALLEE_CTTZ_NONZERO: &str = "__cuda_oxide_rust_intrinsic_cttz_nonzero";
+/// Marker call used for `core::intrinsics::bswap`.
 pub const CALLEE_BSWAP: &str = "__cuda_oxide_rust_intrinsic_bswap";
+/// Marker call used for `core::intrinsics::bitreverse`.
 pub const CALLEE_BITREVERSE: &str = "__cuda_oxide_rust_intrinsic_bitreverse";
 
+/// Bit intrinsic calls from libcore that lower cleanly to LLVM integer intrinsics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RustBitIntrinsic {
+    /// `core::intrinsics::rotate_left`.
     RotateLeft,
+    /// `core::intrinsics::rotate_right`.
     RotateRight,
+    /// `core::intrinsics::ctpop`.
     Ctpop,
+    /// `core::intrinsics::ctlz`; `zero_undef` is true for `ctlz_nonzero`.
     Ctlz { zero_undef: bool },
+    /// `core::intrinsics::cttz`; `zero_undef` is true for `cttz_nonzero`.
     Cttz { zero_undef: bool },
+    /// `core::intrinsics::bswap`.
     Bswap,
+    /// `core::intrinsics::bitreverse`.
     Bitreverse,
 }
 
 impl RustBitIntrinsic {
+    /// Recognize the libcore intrinsic path that survived into MIR.
     pub fn from_core_path(name: &str) -> Option<Self> {
         match name {
             "core::intrinsics::rotate_left" | "std::intrinsics::rotate_left" => {
@@ -70,6 +88,7 @@ impl RustBitIntrinsic {
         }
     }
 
+    /// Return the internal marker name used until MIR-to-LLVM lowering.
     pub fn marker_callee(self) -> &'static str {
         match self {
             Self::RotateLeft => CALLEE_ROTATE_LEFT,
@@ -85,6 +104,10 @@ impl RustBitIntrinsic {
     }
 }
 
+/// Emit a marker `mir.call` for a rustc bitop intrinsic.
+///
+/// The real LLVM intrinsic is chosen later, after MIR type conversion knows the
+/// exact integer width to use for the overloaded `llvm.*.iN` name.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_rust_bit_intrinsic(
     ctx: &mut Context,

@@ -1790,6 +1790,9 @@ pub fn translate_operand(
             let is_struct = const_ty_ptr
                 .deref(ctx)
                 .is::<dialect_mir::types::MirStructType>();
+            let is_tuple = const_ty_ptr
+                .deref(ctx)
+                .is::<dialect_mir::types::MirTupleType>();
 
             // Check if this is a float type (f16, f32, or f64)
             let is_float_16 = const_ty_ptr.deref(ctx).is::<MirFP16Type>();
@@ -1832,6 +1835,16 @@ pub fn translate_operand(
             if is_struct {
                 // Non-ZST struct constant - extract field values and construct the struct
                 translate_struct_constant(
+                    ctx,
+                    constant,
+                    &rust_ty,
+                    const_ty_ptr,
+                    block_ptr,
+                    prev_op,
+                    loc,
+                )
+            } else if is_tuple {
+                translate_tuple_constant(
                     ctx,
                     constant,
                     &rust_ty,
@@ -4562,6 +4575,147 @@ fn translate_struct_constant(
 
     let val = Value::OpResult { op, res_idx: 0 };
     Ok((val, Some(op)))
+}
+
+/// Translate a non-empty tuple constant from its raw allocation bytes.
+fn translate_tuple_constant(
+    ctx: &mut Context,
+    constant: &mir::ConstOperand,
+    rust_ty: &rustc_public::ty::Ty,
+    const_ty_ptr: Ptr<TypeObj>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    loc: Location,
+) -> TranslationResult<(Value, Option<Ptr<Operation>>)> {
+    let field_types = {
+        let ty_ref = const_ty_ptr.deref(ctx);
+        ty_ref
+            .downcast_ref::<dialect_mir::types::MirTupleType>()
+            .ok_or_else(|| {
+                input_error_noloc!(TranslationErr::unsupported(
+                    "translate_tuple_constant called on non-tuple type"
+                ))
+            })?
+            .get_types()
+            .to_vec()
+    };
+
+    let rust_field_types = match rust_ty.kind() {
+        rustc_public::ty::TyKind::RigidTy(rustc_public::ty::RigidTy::Tuple(fields)) => {
+            fields.to_vec()
+        }
+        other => {
+            return input_err!(
+                loc,
+                TranslationErr::unsupported(format!(
+                    "Tuple constant expected Rust tuple type, got {:?}",
+                    other
+                ))
+            );
+        }
+    };
+
+    if field_types.len() != rust_field_types.len() {
+        return input_err!(
+            loc,
+            TranslationErr::unsupported(format!(
+                "Tuple constant type mismatch: MIR has {} fields, Rust type has {}",
+                field_types.len(),
+                rust_field_types.len()
+            ))
+        );
+    }
+
+    let bytes = constant_bytes(constant, "tuple", loc.clone())?;
+    let mut values = Vec::with_capacity(field_types.len());
+    let mut byte_offset = 0usize;
+    let mut current_prev_op = prev_op;
+
+    for (field_idx, (field_ty, rust_field_ty)) in field_types
+        .iter()
+        .copied()
+        .zip(rust_field_types.iter())
+        .enumerate()
+    {
+        let byte_size = constant_storage_size(ctx, field_ty).ok_or_else(|| {
+            input_error!(
+                loc.clone(),
+                TranslationErr::unsupported(format!(
+                    "Tuple constant field {} has unsupported type {:?}",
+                    field_idx,
+                    field_ty.deref(ctx)
+                ))
+            )
+        })?;
+
+        let field_bytes = if byte_size == 0 {
+            &[][..]
+        } else if byte_offset + byte_size <= bytes.len() {
+            &bytes[byte_offset..byte_offset + byte_size]
+        } else {
+            return input_err!(
+                loc,
+                TranslationErr::unsupported(format!(
+                    "Tuple constant has insufficient bytes for field {} (need {} bytes at offset {}, have {})",
+                    field_idx,
+                    byte_size,
+                    byte_offset,
+                    bytes.len()
+                ))
+            );
+        };
+
+        let (value, new_prev_op) = translate_constant_value_from_bytes(
+            ctx,
+            rust_field_ty,
+            field_ty,
+            field_bytes,
+            block_ptr,
+            current_prev_op,
+            loc.clone(),
+        )?;
+        values.push(value);
+        current_prev_op = new_prev_op;
+        byte_offset += byte_size;
+    }
+
+    use dialect_mir::ops::MirConstructTupleOp;
+    let op = Operation::new(
+        ctx,
+        MirConstructTupleOp::get_concrete_op_info(),
+        vec![const_ty_ptr],
+        values,
+        vec![],
+        0,
+    );
+    op.deref_mut(ctx).set_loc(loc);
+
+    if let Some(prev) = current_prev_op {
+        op.insert_after(ctx, prev);
+    } else {
+        op.insert_at_front(block_ptr, ctx);
+    }
+
+    Ok((Value::OpResult { op, res_idx: 0 }, Some(op)))
+}
+
+fn constant_storage_size(ctx: &Context, ty_ptr: Ptr<TypeObj>) -> Option<usize> {
+    let ty_ref = ty_ptr.deref(ctx);
+    if types::is_zst_type(ctx, ty_ptr) {
+        Some(0)
+    } else if let Some(int_ty) = ty_ref.downcast_ref::<IntegerType>() {
+        Some((int_ty.width() as usize).div_ceil(8))
+    } else if ty_ref.is::<MirFP16Type>() {
+        Some(2)
+    } else if ty_ref.is::<FP32Type>() {
+        Some(4)
+    } else if ty_ref.is::<FP64Type>() {
+        Some(8)
+    } else if ty_ref.is::<dialect_mir::types::MirPtrType>() {
+        Some(rustc_public::target::MachineInfo::target_pointer_width().bytes())
+    } else {
+        None
+    }
 }
 
 /// Translate an enum constant by reconstructing both its active variant and any

@@ -27,6 +27,12 @@ test:
 # Run all checks (fmt + clippy + test)
 check: fmt-check clippy test
 
+# Clean local Rust build outputs and generated example IR/PTX artifacts
+clean-artifacts:
+    cargo clean
+    (cd crates/rustc-codegen-cuda && cargo clean)
+    for manifest in crates/rustc-codegen-cuda/examples/*/Cargo.toml; do example_dir="$(dirname "$manifest")"; (cd "$example_dir" && cargo clean); rm -f "$example_dir"/*.ll "$example_dir"/*.ptx; done
+
 # Build an example (compile only)
 build example:
     cargo oxide build {{example}}

@@ -23,7 +23,7 @@ python3 crates/fuzzer/tools/run_seed.py --seed 192
 Run a range:
 
 ```bash
-python3 crates/fuzzer/tools/run_seed.py --start 0 --count 20 --keep-going
+python3 crates/fuzzer/tools/run_seed.py --start 0 --count 20 --keep-going --keep-logs
 ```
 
 The seed controls rustlantis' pseudo-random generator. Same seed plus same
@@ -111,9 +111,8 @@ The run summary is also written as:
 crates/fuzzer/artifacts/summary.jsonl
 ```
 
-By default, `summary.jsonl` is replaced at the start of each `run_seed.py`
-invocation, so it represents the latest run. Use `--append-summary` to append
-new records instead.
+`run_seed.py` clears `crates/fuzzer/artifacts/` at the start of every
+invocation, so the logs and `summary.jsonl` always describe only the latest run.
 
 The terminal also prints a full per-seed summary, for example:
 

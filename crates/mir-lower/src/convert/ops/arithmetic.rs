@@ -23,7 +23,7 @@
 //!
 //! - Integer operations use signless LLVM types
 //! - Float operations automatically use `fadd`, `fmul`, etc. with fastmath flags
-//! - Shift amounts are automatically cast to match the shifted value's type
+//! - Shift amounts are cast and masked to match Rust's unchecked shift semantics
 //! - Checked operations return `(result, overflow_flag)` tuples
 
 use crate::convert::types::convert_type;
@@ -339,14 +339,14 @@ where
 }
 
 // ============================================================================
-// Shift operations (with automatic type cast for shift amount)
+// Shift operations
 // ============================================================================
 
 /// Convert `mir.shr` to `llvm.ashr` (signed, arithmetic) or `llvm.lshr` (unsigned, logical).
 ///
 /// Signed types use arithmetic shift right (sign-extending), unsigned types
-/// use logical shift right (zero-filling). Automatically casts shift amount
-/// to match value type.
+/// use logical shift right (zero-filling). The shift count is cast and masked
+/// before lowering because LLVM shifts are poison when the count is too large.
 pub(crate) fn convert_shr(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
@@ -365,8 +365,8 @@ pub(crate) fn convert_shr(
 
 /// Convert `mir.shl` to `llvm.shl` (shift left).
 ///
-/// Includes default overflow flags. Automatically casts shift amount to
-/// match value type width.
+/// Includes default overflow flags. The shift count is cast and masked before
+/// lowering because LLVM shifts are poison when the count is too large.
 pub(crate) fn convert_shl(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
@@ -384,11 +384,13 @@ pub(crate) fn convert_shl(
     })
 }
 
-/// Common shift operation converter with automatic type casting.
+/// Common shift operation converter with Rust-compatible count handling.
 ///
 /// LLVM requires the shift amount to have the same type as the value being
 /// shifted. This function handles automatic widening (zext) or narrowing
-/// (trunc) of the shift amount to match.
+/// (trunc) of the shift amount to match, then masks it with `bit_width - 1`.
+/// That matches Rust's unchecked/release shift behavior and avoids LLVM poison
+/// for oversized counts.
 fn convert_shift<F>(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
@@ -402,16 +404,15 @@ where
 
     let lhs_ty = lhs.get_type(ctx);
     let rhs_ty = rhs.get_type(ctx);
+    let lhs_width = lhs_ty
+        .deref(ctx)
+        .downcast_ref::<IntegerType>()
+        .ok_or_else(|| {
+            pliron::input_error!(op.deref(ctx).loc(), "Shift value must be integer type")
+        })?
+        .width();
 
     let rhs_casted = if lhs_ty != rhs_ty {
-        let lhs_width = lhs_ty
-            .deref(ctx)
-            .downcast_ref::<IntegerType>()
-            .ok_or_else(|| {
-                pliron::input_error!(op.deref(ctx).loc(), "Shift value must be integer type")
-            })?
-            .width();
-
         let rhs_width = rhs_ty
             .deref(ctx)
             .downcast_ref::<IntegerType>()
@@ -437,10 +438,40 @@ where
         rhs
     };
 
-    let llvm_op = builder(ctx, lhs, rhs_casted);
+    let rhs_masked = mask_shift_amount(ctx, rewriter, rhs_casted, lhs_ty, lhs_width);
+    let llvm_op = builder(ctx, lhs, rhs_masked);
     rewriter.insert_operation(ctx, llvm_op);
     rewriter.replace_operation(ctx, op, llvm_op);
     Ok(())
+}
+
+fn mask_shift_amount(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    rhs: Value,
+    lhs_ty: Ptr<pliron::r#type::TypeObj>,
+    lhs_width: u32,
+) -> Value {
+    use pliron::utils::apint::APInt;
+    use std::num::NonZeroUsize;
+
+    let mask_ty = IntegerType::get(ctx, lhs_width, Signedness::Signless);
+    let mask_attr = pliron::builtin::attributes::IntegerAttr::new(
+        mask_ty,
+        APInt::from_u128(
+            u128::from(lhs_width - 1),
+            NonZeroUsize::new(lhs_width as usize).unwrap(),
+        ),
+    );
+    let mask_op = llvm::ConstantOp::new(ctx, mask_attr.into());
+    rewriter.insert_operation(ctx, mask_op.get_operation());
+    let mask_value = mask_op.get_operation().deref(ctx).get_result(0);
+
+    let and_op = llvm::AndOp::new(ctx, rhs, mask_value).get_operation();
+    rewriter.insert_operation(ctx, and_op);
+
+    debug_assert_eq!(and_op.deref(ctx).get_result(0).get_type(ctx), lhs_ty);
+    and_op.deref(ctx).get_result(0)
 }
 
 // ============================================================================

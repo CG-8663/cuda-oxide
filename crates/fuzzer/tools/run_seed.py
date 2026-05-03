@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import shlex
 import subprocess
 import sys
@@ -125,6 +126,13 @@ def make_record(
     }
 
 
+def clear_artifacts() -> None:
+    """Start every fuzzer run with a clean artifacts directory."""
+    if ARTIFACTS.exists():
+        shutil.rmtree(ARTIFACTS)
+    ARTIFACTS.mkdir(parents=True, exist_ok=True)
+
+
 def remove_stale_ptx() -> None:
     for name in ("rustlantis_smoke.ptx", "rustlantis_smoke.ll"):
         path = SMOKE_EXAMPLE / name
@@ -133,7 +141,9 @@ def remove_stale_ptx() -> None:
 
 
 def classify_run(returncode: int, output: str) -> tuple[str, str, str]:
-    if returncode == 0 and "\nMATCH\n" in output:
+    if returncode == 0 and (
+        "\nMATCH\n" in output or "PASS: CPU/GPU traces match" in output
+    ):
         return ("PASS", "run", "CPU/GPU traces matched")
     if "MISMATCH" in output:
         return ("MISMATCH", "run", "CPU/GPU traces differed")
@@ -257,19 +267,13 @@ def main() -> int:
         action="store_true",
         help="continue after the first non-PASS seed",
     )
-    parser.add_argument(
-        "--append-summary",
-        action="store_true",
-        help="append to artifacts/summary.jsonl instead of replacing it for this run",
-    )
     args = parser.parse_args()
 
     seeds = [args.seed] if args.seed is not None else range(args.start, args.start + args.count)
     statuses: dict[str, int] = {}
     records: list[dict[str, object]] = []
 
-    if not args.append_summary and SUMMARY.exists():
-        SUMMARY.unlink()
+    clear_artifacts()
 
     for idx, seed in enumerate(seeds):
         # Build the vendored rustlantis generator once, then reuse it.
