@@ -575,9 +575,10 @@ fn add_device_extern_declarations(
         let func_type = FuncType::get(ctx, return_type, param_types, false);
 
         // Use the original export name (NOT the prefixed name).
-        // The MIR sees calls to `cuda_oxide_device_extern_foo`, but the call lowering
-        // strips this prefix (see mir-lower/convert/ops/call.rs). So the LLVM IR will
-        // emit `call @foo(...)`. For this to resolve, we must declare `@foo` here.
+        // The MIR sees calls to `cuda_oxide_device_extern_<hash>_foo`, but
+        // mir-lower/convert/ops/call.rs strips the reserved prefix via
+        // `reserved_oxide_symbols::device_extern_base_name`, so the LLVM IR
+        // emits `call @foo(...)`. For that to resolve, we declare `@foo` here.
         let func_ident: Identifier = decl
             .export_name
             .clone()

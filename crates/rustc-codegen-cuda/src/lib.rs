@@ -38,8 +38,8 @@
 //! │   │                                                                       │     │
 //! │   │   ┌─────────────────────────────────────────────────────────────┐     │     │
 //! │   │   │  1. KERNEL DETECTION                                        │     │     │
-//! │   │   │     - Scan CGUs for functions with "cuda_oxide_kernel_"     │     │     │
-//! │   │   │       prefix (set by #[kernel] macro)                       │     │     │
+//! │   │   │     - Scan CGUs for functions in the reserved namespace    │     │     │
+//! │   │   │       `cuda_oxide_kernel_<hash>_*` (set by #[kernel] macro) │     │     │
 //! │   │   └─────────────────────────────────────────────────────────────┘     │     │
 //! │   │                          │                                            │     │
 //! │   │                          ▼                                            │     │
@@ -399,7 +399,7 @@ impl CodegenBackend for CudaCodegenBackend {
     ///       ├──▶ 1. Get monomorphized items from rustc
     ///       │       tcx.collect_and_partition_mono_items()
     ///       │
-    ///       ├──▶ 2. Count kernels (functions with "cuda_oxide_kernel_" prefix)
+    ///       ├──▶ 2. Count kernels (functions in the reserved cuda_oxide_kernel_ namespace)
     ///       │
     ///       ├──▶ 3. If kernels found:
     ///       │       │

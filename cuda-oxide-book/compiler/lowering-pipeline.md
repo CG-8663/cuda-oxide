@@ -302,11 +302,11 @@ naming everything upfront.
 Function names flow through several stages, each applying its own constraints:
 
 ```text
-rustc_public (FQDN)            helper_fn::cuda_oxide_device_vecadd
+rustc_public (FQDN)            helper_fn::cuda_oxide_device_<hash>_vecadd
   ↓ body.rs (:: → __)
-dialect-mir                    helper_fn__cuda_oxide_device_vecadd
+dialect-mir                    helper_fn__cuda_oxide_device_<hash>_vecadd
   ↓ call.rs (:: → __)
-dialect-llvm                   helper_fn__cuda_oxide_device_vecadd
+dialect-llvm                   helper_fn__cuda_oxide_device_<hash>_vecadd
   ↓ export.rs (strip prefix)
 Textual LLVM IR                @vecadd
   ↓ llc
@@ -320,15 +320,17 @@ Three conversions happen along this path:
    produce valid pliron/LLVM identifiers. Since both sides apply the same
    conversion, definitions and call sites match.
 
-2. **Device prefix stripping** -- `export.rs` strips the internal
-   `cuda_oxide_device_` prefix (and any preceding FQDN crate prefix) from
-   `#[device]` function names. This prefix exists for MIR-level detection but
-   should not appear in the final LLVM IR, PTX, or LTOIR output.
+2. **Device prefix stripping** -- `export.rs` strips the reserved
+   `cuda_oxide_device_<hash>_` prefix (and any preceding FQDN crate prefix)
+   from `#[device]` function names via
+   `reserved_oxide_symbols::device_base_name`. This prefix exists for MIR-level
+   detection but should not appear in the final LLVM IR, PTX, or LTOIR output.
 
 3. **Device extern prefix stripping** -- For `#[device] unsafe extern "C"`
-   functions, `call.rs` strips the `cuda_oxide_device_extern_` prefix so the
-   LLVM IR references the original symbol name exported by the external LTOIR
-   (e.g., CCCL libraries).
+   functions, `call.rs` strips the `cuda_oxide_device_extern_<hash>_` prefix
+   via `reserved_oxide_symbols::device_extern_base_name` so the LLVM IR
+   references the original symbol name exported by the external LTOIR (e.g.,
+   CCCL libraries).
 
 ```{note}
 This manual sanitization will be replaced by pliron's `Legaliser` when the

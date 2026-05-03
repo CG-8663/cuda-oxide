@@ -355,7 +355,7 @@ For GPU-specific operations, `dialect-nvvm` enters the picture:
 ```text
 Rust source:   let tid = thread::threadIdx_x();
 
-dialect-mir:   %tid = mir.call @cuda_oxide_device_thread_index_x()
+dialect-mir:   %tid = mir.call @cuda_oxide_device_<hash>_thread_index_x()
                 ↓  (DialectConversion, recognizes the intrinsic)
 dialect-nvvm:  %v2 = nvvm.read_ptx_sreg_tid_x : i32
                 ↓  (export.rs)

@@ -5,7 +5,7 @@ Host-side infrastructure for launching CUDA kernels compiled by cuda-oxide. Prov
 ```text
   #[kernel]
   pub fn vecadd(...)           cuda-macros generates:
-       │                        • cuda_oxide_kernel_vecadd (entry point)
+       │                        • cuda_oxide_kernel_<hash>_vecadd (entry point)
        │                        • __vecadd_CudaKernel (marker struct)
        ▼
   cuda_launch! {               cuda-host provides:

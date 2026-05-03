@@ -72,8 +72,10 @@ Stage by stage:
 
 1. **Rust Source.**
    You write a function, slap `#[kernel]` on it, and go about your day. The
-   proc macro renames it to `cuda_oxide_kernel_<name>` so the backend can
-   spot it later.
+   proc macro renames it into the reserved `cuda_oxide_kernel_<hash>_<name>`
+   namespace so the backend can spot it later. The exact prefix lives in the
+   workspace-internal `reserved-oxide-symbols` crate; the `<hash>` makes
+   accidental collisions impossible.
 
 2. **rustc Frontend.**
    rustc parses, type-checks, borrow-checks, monomorphizes generics, and
@@ -229,8 +231,9 @@ invokes the codegen backend.
 
 **3. The backend scans for kernel entry points.**
 
-It looks for monomorphized functions whose names start with
-`cuda_oxide_kernel_`. These are the functions that `#[kernel]` created.
+It looks for monomorphized functions whose names contain the reserved
+`cuda_oxide_kernel_<hash>_` prefix. These are the functions that `#[kernel]`
+created.
 
 **4. If kernels are found: build the device call graph and emit PTX.**
 

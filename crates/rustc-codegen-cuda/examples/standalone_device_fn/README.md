@@ -19,7 +19,7 @@ Rust device libraries that are consumed by CUDA C++ via LTOIR linking.
 | 5 | Multiple monomorphizations | Both `fma_f32` and `fma_i32` instantiations present                      |
 | 6 | Uninstantiated generic     | Generic `unused_generic<T>` is correctly **absent** (not monomorphized)  |
 | 7 | No `.entry` directives     | All functions are `.func`, not `.entry` (no kernels)                     |
-| 8 | Clean export names         | No `cuda_oxide_device_` prefix in PTX function names                     |
+| 8 | Clean export names         | No reserved `cuda_oxide_device_<hash>_` prefix in PTX function names     |
 
 ## How to Run
 
@@ -44,11 +44,12 @@ SUCCESS: 8/8 tests passed
 
 ## How It Works
 
-1. The `#[device]` macro renames functions with a `cuda_oxide_device_` prefix
+1. The `#[device]` macro renames functions with the reserved `cuda_oxide_device_<hash>_` prefix
+   (owned by `crates/reserved-oxide-symbols/`).
    and generates an `#[inline(always)]` wrapper with the original name
 2. The collector (`rustc-codegen-cuda/src/collector.rs`) detects standalone
    `#[device]` functions as compilation roots when no `#[kernel]` is present
-3. The LLVM export layer strips the `cuda_oxide_device_` prefix for clean
+3. The LLVM export layer strips the `cuda_oxide_device_<hash>_` prefix for clean
    names in the final output
 4. Generic `#[device]` functions are only compiled if monomorphized by a
    concrete call site (standard Rust monomorphization rules)

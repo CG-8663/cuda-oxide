@@ -49,6 +49,9 @@ pub fn gpu_printf(input: TokenStream) -> TokenStream {
 }
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
+use reserved_oxide_symbols::{
+    DEVICE_EXTERN_PREFIX, DEVICE_PREFIX, INSTANTIATE_PREFIX, KERNEL_PREFIX, RESERVED_ROOT,
+};
 use std::collections::HashSet;
 use syn::{
     FnArg, ForeignItem, GenericParam, Ident, ItemFn, ItemForeignMod, Pat, Token, Type, bracketed,
@@ -59,6 +62,36 @@ use syn::{
     spanned::Spanned,
     visit::Visit,
 };
+
+/// Reject function names that start with the reserved cuda-oxide prefix
+/// (`cuda_oxide_`).
+///
+/// User code must not define functions in the cuda-oxide internal naming
+/// namespace. Two failure modes this guards against:
+///
+/// 1. **Cosmetic.** `#[kernel] fn cuda_oxide_kernel_foo()` would expand to
+///    a doubly-nested name like
+///    `fn cuda_oxide_kernel_<hash>_cuda_oxide_kernel_foo()`, producing
+///    confusing symbol names in MIR dumps and stack traces.
+/// 2. **Forward-compatibility.** Future refactors may extend the namespace;
+///    rejecting it at the source level keeps the contract clean.
+///
+/// Returns `Some(compile_error)` to be returned from the macro entry point,
+/// or `None` if the name is safe.
+fn reject_reserved_name(name: &Ident) -> Option<TokenStream> {
+    let name_str = name.to_string();
+    if name_str.starts_with(RESERVED_ROOT) {
+        let msg = format!(
+            "function name `{name_str}` starts with the reserved cuda-oxide \
+             prefix `{RESERVED_ROOT}`; rename your function — this namespace \
+             is reserved for cuda-oxide internal symbol mangling \
+             (see crates/reserved-oxide-symbols)"
+        );
+        Some(syn::Error::new(name.span(), msg).to_compile_error().into())
+    } else {
+        None
+    }
+}
 
 /// Attribute arguments for #[kernel(...)]
 /// Supports: #[kernel] or #[kernel(Type1, Type2, Type3)]
@@ -115,6 +148,10 @@ impl Parse for KernelArgs {
 pub fn kernel(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as KernelArgs);
     let input = parse_macro_input!(item as ItemFn);
+
+    if let Some(err) = reject_reserved_name(&input.sig.ident) {
+        return err;
+    }
 
     // Check if function has type parameters
     let has_generics = input
@@ -233,12 +270,8 @@ fn generate_generic_kernel_no_instantiation(input: ItemFn) -> TokenStream {
     let output = &input.sig.output;
     let block = &input.block;
 
-    // Create the renamed version for rustc-codegen-cuda to find
-    let kernel_name_str = format!("cuda_oxide_kernel_{}", fn_name);
-    let kernel_name = syn::Ident::new(&kernel_name_str, fn_name.span());
-
-    // Create the instantiate helper name (matches cuda_oxide_instantiate_* pattern)
-    let instantiate_name = format_ident!("cuda_oxide_instantiate_{}", fn_name);
+    let kernel_name = format_ident!("{}{}", KERNEL_PREFIX, fn_name);
+    let instantiate_name = format_ident!("{}{}", INSTANTIATE_PREFIX, fn_name);
 
     // For the wrapper function, strip `mut` from parameters since it just forwards them
     let wrapper_inputs = strip_mut_from_inputs(inputs);
@@ -383,15 +416,14 @@ fn _generate_dummy_binding(name: &Ident, ty: &Type) -> TokenStream2 {
 /// Generate a simple non-generic kernel
 fn generate_simple_kernel(mut input: ItemFn) -> TokenStream {
     let fn_name = input.sig.ident.clone();
-    let mangled_name_str = format!("cuda_oxide_kernel_{}", fn_name);
-    let new_name = syn::Ident::new(&mangled_name_str, fn_name.span());
+    let new_name = format_ident!("{}{}", KERNEL_PREFIX, fn_name);
 
     // Clone the original function for the CudaKernel impl
     let original_fn = input.clone();
     input.sig.ident = new_name;
 
-    // The PTX entry name is the ORIGINAL function name (e.g., "vecadd")
-    // The collector strips the "cuda_oxide_kernel_" prefix when generating PTX
+    // PTX entry name is the unprefixed user name; the collector strips
+    // KERNEL_PREFIX when generating PTX.
     let ptx_entry_name = fn_name.to_string();
 
     // Generate the CudaKernel trait implementation (host-side only)
@@ -557,8 +589,7 @@ fn generate_generic_kernel(input: ItemFn, instantiate_types: Vec<Type>) -> Token
         .map(|inst_type| {
             // Get a clean name for the type (for the kernel name suffix)
             let type_name = get_type_name(inst_type);
-            let wrapper_name_str = format!("cuda_oxide_kernel_{}_{}", fn_name, type_name);
-            let wrapper_name = syn::Ident::new(&wrapper_name_str, fn_name.span());
+            let wrapper_name = format_ident!("{}{}_{}", KERNEL_PREFIX, fn_name, type_name);
 
             // Export name (what appears in PTX)
             let export_name_str = format!("{}_{}", fn_name, type_name);
@@ -857,7 +888,9 @@ impl Parse for ClusterArgs {
 ///
 /// This attribute:
 /// 1. Adds `#[no_mangle]` to preserve the function name in the binary
-/// 2. Renames the function with a `cuda_oxide_device_` prefix for detection
+/// 2. Renames the function into the reserved `cuda_oxide_device_<hash>_` namespace
+///    for detection by the codegen backend (the prefix lives in
+///    `crates/reserved-oxide-symbols/`)
 /// 3. Marks the function for extraction by the `rustc-codegen-cuda` backend
 ///
 /// Device functions can:
@@ -924,9 +957,9 @@ pub fn device(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Generate a device function definition.
 ///
-/// Renames the function with `cuda_oxide_device_` prefix for collector detection,
-/// and generates a thin wrapper with the original name so user code can call
-/// `my_func()` instead of `cuda_oxide_device_my_func()`.
+/// Renames the function into the reserved `cuda_oxide_device_<hash>_` namespace
+/// for collector detection, and generates a thin wrapper with the original name
+/// so user code can call `my_func()` rather than the mangled internal symbol.
 ///
 /// Handles both non-generic and generic device functions:
 /// - **Non-generic**: `#[no_mangle]` on the prefixed function, `#[inline(always)]` wrapper.
@@ -937,10 +970,13 @@ pub fn device(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// This mirrors the pattern used by `#[kernel]` for generic kernels
 /// (see `generate_generic_kernel_no_instantiation`).
 fn generate_device_function(mut input: ItemFn) -> TokenStream {
+    if let Some(err) = reject_reserved_name(&input.sig.ident) {
+        return err;
+    }
+
     let fn_name = input.sig.ident.clone();
     let vis = input.vis.clone();
-    let new_name_str = format!("cuda_oxide_device_{}", fn_name);
-    let new_name = syn::Ident::new(&new_name_str, fn_name.span());
+    let new_name = format_ident!("{}{}", DEVICE_PREFIX, fn_name);
 
     // Check if the function has type parameters
     let has_generics = input
@@ -983,15 +1019,15 @@ fn generate_device_function(mut input: ItemFn) -> TokenStream {
         // Generic device function: mirrors the generic kernel pattern.
         //
         // - No #[no_mangle] — generic functions use mangled symbol names per
-        //   monomorphization (e.g., `cuda_oxide_device_add::<f32>` gets a unique
-        //   mangled name). #[no_mangle] requires a single concrete symbol.
+        //   monomorphization (e.g., `cuda_oxide_device_<hash>_add::<f32>` gets a
+        //   unique mangled name). #[no_mangle] requires a single concrete symbol.
         //
         // - #[inline(never)] on the prefixed function — ensures each monomorphization
         //   appears as a distinct CGU item so the collector can find it. If it were
         //   inlined, the function would disappear from the CGU.
         //
         // - The wrapper forwards type parameters via turbofish:
-        //   `cuda_oxide_device_add::<T>(a, b)`.
+        //   `cuda_oxide_device_<hash>_add::<T>(a, b)`.
 
         // Extract type parameter names for turbofish forwarding (T, U, etc.)
         let type_param_names: Vec<&syn::Ident> = generics
@@ -1035,27 +1071,32 @@ fn generate_device_function(mut input: ItemFn) -> TokenStream {
     }
 }
 
-/// Generate device extern block declarations (for FFI with external LTOIR)
+/// Generate device extern block declarations (for FFI with external LTOIR).
 ///
 /// For each function in the extern block:
-/// 1. Rename it with `cuda_oxide_device_extern_` prefix (for collector detection)
+/// 1. Rename it into the reserved `cuda_oxide_device_extern_<hash>_` namespace
+///    (for collector detection)
 /// 2. Generate a wrapper function with the original name (for user code)
 ///
-/// This allows user code to call `foo()` while the collector sees `cuda_oxide_device_extern_foo`.
+/// User code calls `foo()` while the collector sees the hash-suffixed reserved
+/// form. The `#[link_name]` attribute restores the original name in the binary
+/// so external LTOIR resolves correctly.
 fn generate_device_extern_block(mut input: ItemForeignMod) -> TokenStream {
     let mut wrappers = Vec::new();
 
     // Process each item in the extern block
     for item in &mut input.items {
         if let ForeignItem::Fn(foreign_fn) = item {
+            if let Some(err) = reject_reserved_name(&foreign_fn.sig.ident) {
+                return err;
+            }
+
             // Save original info for wrapper generation
             let original_name = foreign_fn.sig.ident.clone();
             let original_attrs = foreign_fn.attrs.clone();
             let original_sig = foreign_fn.sig.clone();
 
-            // Rename with cuda_oxide_device_extern_ prefix
-            let new_name_str = format!("cuda_oxide_device_extern_{}", original_name);
-            let new_name = syn::Ident::new(&new_name_str, original_name.span());
+            let new_name = format_ident!("{}{}", DEVICE_EXTERN_PREFIX, original_name);
             foreign_fn.sig.ident = new_name.clone();
 
             // Store original name as link_name for the linker
@@ -1067,8 +1108,9 @@ fn generate_device_extern_block(mut input: ItemForeignMod) -> TokenStream {
                 #[link_name = #original_name_str]
             });
 
-            // Generate wrapper function with original name
-            // This allows user code to call foo() instead of cuda_oxide_device_extern_foo()
+            // Generate wrapper function with the original name. User code
+            // calls `foo()`; the wrapper forwards to the reserved internal
+            // symbol the macro just produced.
             let params: Vec<_> = original_sig
                 .inputs
                 .iter()
@@ -1575,8 +1617,7 @@ pub fn cuda_launch(input: TokenStream) -> TokenStream {
     // Get base kernel name and generic arguments
     let (kernel_base, generics) = input.kernel_parts();
 
-    // Build the kernel entry point name (cuda_oxide_kernel_<name>)
-    let kernel_entry = format_ident!("cuda_oxide_kernel_{}", kernel_base);
+    let kernel_entry = format_ident!("{}{}", KERNEL_PREFIX, kernel_base);
 
     // Build the marker type name for CudaKernel lookup
     let marker_name = format_ident!("__{}_CudaKernel", kernel_base);
@@ -1683,7 +1724,7 @@ pub fn cuda_launch(input: TokenStream) -> TokenStream {
         .collect();
 
     // Build the instantiate helper name (for closures)
-    let instantiate_name = format_ident!("cuda_oxide_instantiate_{}", kernel_base);
+    let instantiate_name = format_ident!("{}{}", INSTANTIATE_PREFIX, kernel_base);
 
     // Generate the launch call — either regular or cluster.
     //
@@ -1995,7 +2036,7 @@ pub fn cuda_launch_async(input: TokenStream) -> TokenStream {
         .collect();
 
     let expanded = if input.is_generic() {
-        let kernel_entry = format_ident!("cuda_oxide_kernel_{}", kernel_base);
+        let kernel_entry = format_ident!("{}{}", KERNEL_PREFIX, kernel_base);
         quote! {
             {
                 let __kernel_ptr = #kernel_entry #generics as *const ();

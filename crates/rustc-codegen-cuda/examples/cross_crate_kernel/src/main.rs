@@ -37,7 +37,9 @@ use cuda_host::cuda_launch;
 // Import everything from the kernel library!
 // This includes the #[kernel] functions and their generated helpers:
 // - scale, add, scale_with_helper (original functions)
-// - cuda_oxide_kernel_* (renamed entry points)
+// - cuda_oxide_kernel_<hash>_* (renamed entry points; the prefix is owned
+//   by `crates/reserved-oxide-symbols/` so this crate isn't a load-bearing
+//   string-literal site)
 // - __*_CudaKernel (marker types for CudaKernel trait)
 use kernel_lib::*;
 

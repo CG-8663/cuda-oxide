@@ -79,12 +79,16 @@ think of it as a bucket of functions that will become one object file.
 The backend iterates over every function in every CGU and checks for the magic
 name prefixes:
 
-- `cuda_oxide_kernel_` -- set by `#[kernel]`
-- `cuda_oxide_device_` -- set by `#[device]`
+- `cuda_oxide_kernel_<hash>_` -- set by `#[kernel]`
+- `cuda_oxide_device_<hash>_` -- set by `#[device]`
 
 These prefixes are how the proc macros communicate with the backend. There is
 no special attribute metadata, no side channel -- just a name that stands out
-in a crowd.
+in a crowd. The exact prefix strings (and the helpers that match and strip
+them) live in the workspace-internal `reserved-oxide-symbols` crate; both the
+macro side and the collector side import from there so the contract stays in
+one place. The 8-hex-char `<hash>` makes accidental collisions effectively
+impossible: nobody writes `cuda_oxide_kernel_246e25db_foo` by accident.
 
 ### Step 3: If Device Code Found, Build and Compile
 
@@ -189,7 +193,7 @@ The output is a `Vec<CollectedFunction>`, where each entry carries:
 
 The collector must produce export names that match what the MIR translator
 generates for call targets. Both sides use **fully qualified domain names
-(FQDNs)** -- for example, `helper_fn::cuda_oxide_device_vecadd_device` rather
+(FQDNs)** -- for example, `helper_fn::cuda_oxide_device_<hash>_vecadd_device` rather
 than bare `vecadd_device`.
 
 The `rustc_public` API's `CrateDef::name()` returns FQDNs including the crate

@@ -93,7 +93,7 @@ futures.
 
 These three functions are compiled to PTX by `rustc-codegen-cuda`. They never
 execute on the host — the `#[kernel]` attribute renames each one to
-`cuda_oxide_kernel_<name>` so the codegen backend can identify and extract
+`cuda_oxide_kernel_<hash>_<name>` so the codegen backend can identify and extract
 them.
 
 ### sgemm_naive — matrix multiply

@@ -28,6 +28,8 @@ jobs:
           - dialect-nvvm
           - mir-importer
           - mir-lower
+          - reserved-oxide-symbols
+          - cuda-macros
 
     steps:
       - name: Clone repository

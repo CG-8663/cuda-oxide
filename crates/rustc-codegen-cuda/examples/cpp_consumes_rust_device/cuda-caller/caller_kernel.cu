@@ -15,7 +15,7 @@
 // Declarations of Rust device functions
 //
 // These symbols come from cuda-oxide compiled LTOIR. The clean export names
-// (no cuda_oxide_device_ prefix) match what cuda-oxide produces.
+// (no reserved cuda_oxide_device_<hash>_ prefix) match what cuda-oxide produces.
 // ---------------------------------------------------------------------------
 
 extern "C" __device__ float fast_sqrt(float x);

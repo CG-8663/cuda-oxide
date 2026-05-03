@@ -104,7 +104,7 @@ fn main() {
         let content = std::fs::read_to_string(ll_path).unwrap();
         println!("NVVM IR generated: {} ({} bytes)", ll_path, content.len());
 
-        // Verify clean export names (no cuda_oxide_device_ prefix)
+        // Verify clean export names (no reserved cuda_oxide_device_<hash>_ prefix)
         let expected = ["fast_sqrt", "clamp_f32", "safe_sqrt", "fma_f32", "fma_i32"];
         let mut all_found = true;
         for name in &expected {

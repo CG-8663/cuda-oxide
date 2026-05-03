@@ -88,7 +88,7 @@ Output vector (first 5 elements):
 
 1. **rustc** parses the file, generates MIR for everything
 2. **rustc-codegen-cuda** intercepts codegen:
-   - Finds `cuda_oxide_kernel_vecadd` (from `#[kernel]`)
+   - Finds `cuda_oxide_kernel_<hash>_vecadd` (from `#[kernel]`)
    - Routes it to mir-importer → PTX generation
    - Routes `main` and other host code to standard LLVM
 3. Final binary contains both native host code AND loads external PTX

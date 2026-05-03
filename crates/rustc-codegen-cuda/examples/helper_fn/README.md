@@ -35,7 +35,7 @@ pub fn vecadd_with_helper(a: &[f32], b: &[f32], c: DisjointSlice<f32>) {
 }
 ```
 
-Note: `#[device]` generates a `cuda_oxide_device_` prefixed internal symbol, but callers use the original name. The LLVM export layer strips the prefix in the final PTX.
+Note: `#[device]` generates a `cuda_oxide_device_<hash>_` prefixed internal symbol (the prefix is owned by `crates/reserved-oxide-symbols/`), but callers use the original name. The LLVM export layer strips the prefix in the final PTX.
 
 ### Function Inlining
 
@@ -91,7 +91,10 @@ fn clamp(x: f32, lo: f32, hi: f32) -> f32 {
 pub fn apply_clamp(input: &[f32], mut out: DisjointSlice<f32>) {
     let idx = thread::index_1d();
     if let Some(out_elem) = out.get_mut(idx) {
-        *out_elem = cuda_oxide_device_clamp(input[idx.get()], 0.0, 1.0);
+        // Call the device function by its original name. The macro
+        // expands this to the reserved internal symbol behind the
+        // scenes; users never type the mangled name themselves.
+        *out_elem = clamp(input[idx.get()], 0.0, 1.0);
     }
 }
 ```
@@ -107,9 +110,9 @@ fn combine_partials(a: f32, b: f32) -> f32 { (a + b).sqrt() }
 
 #[kernel]
 pub fn complex_kernel(/* ... */) {
-    let p1 = cuda_oxide_device_compute_partial(x1, y1);
-    let p2 = cuda_oxide_device_compute_partial(x2, y2);
-    let result = cuda_oxide_device_combine_partials(p1, p2);
+    let p1 = compute_partial(x1, y1);
+    let p2 = compute_partial(x2, y2);
+    let result = combine_partials(p1, p2);
 }
 ```
 

@@ -61,9 +61,12 @@ use std::num::NonZeroUsize;
 /// Generic address space (can alias any memory).
 const ADDRSPACE_GENERIC: u32 = 0;
 
-/// Prefix added by `#[device] extern "C"` proc-macro for internal detection.
-/// Stripped during lowering so LLVM IR uses the original symbol name.
-const DEVICE_EXTERN_PREFIX: &str = "cuda_oxide_device_extern_";
+// The `#[device] extern "C"` macro renames a foreign function `foo` to
+// `cuda_oxide_device_extern_<hash>_foo` so the collector can find it. During
+// MIR lowering we strip that prefix back off so the LLVM IR / LTOIR refers to
+// the original symbol the user wrote. The prefix string itself, plus the
+// `device_extern_base_name` extractor, lives in `reserved-oxide-symbols`.
+use reserved_oxide_symbols::device_extern_base_name;
 
 /// Internal placeholder for rustc bit intrinsics that need LLVM intrinsic calls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -805,25 +808,23 @@ fn cast_pointer_to_generic_if_needed(
     Ok((arg, arg_ty))
 }
 
-/// Resolve device extern symbol name by stripping internal prefix.
+/// Resolve a device-extern symbol name by stripping the internal prefix.
 ///
-/// When calling `#[device] extern "C"` functions, the Rust code (after macro expansion)
-/// calls symbols like `cuda_oxide_device_extern_foo`. We strip this prefix to emit
-/// calls to the original symbol `foo` that external LTOIR provides.
+/// When calling `#[device] extern "C"` functions, the macro-expanded Rust code
+/// calls symbols like `cuda_oxide_device_extern_<hash>_foo`. We strip the
+/// reserved prefix here so the emitted LLVM IR refers to the original symbol
+/// `foo` that the linked LTOIR provides.
 ///
 /// # Limitations
 ///
 /// This approach derives the original name by stripping the prefix, which means:
-/// - Custom `#[link_name = "..."]` attributes are NOT honored (edge case)
-/// - If the original function is `bar` but user specifies `#[link_name = "custom"]`,
-///   we'd emit `bar` not `custom`. This is acceptable for most use cases.
+/// - Custom `#[link_name = "..."]` attributes are NOT honored (edge case).
+/// - If the original function is `bar` but the user wrote `#[link_name = "custom"]`,
+///   we'd emit `bar`, not `custom`. Acceptable for current call sites.
 fn resolve_device_extern_symbol(callee_name: &str) -> String {
-    if let Some(pos) = callee_name.find(DEVICE_EXTERN_PREFIX) {
-        let after_prefix = &callee_name[pos + DEVICE_EXTERN_PREFIX.len()..];
-        return after_prefix.to_string();
-    }
-
-    callee_name.to_string()
+    device_extern_base_name(callee_name)
+        .map(str::to_string)
+        .unwrap_or_else(|| callee_name.to_string())
 }
 
 #[cfg(test)]
@@ -832,25 +833,32 @@ mod tests {
 
     #[test]
     fn test_resolve_device_extern_symbol() {
+        use reserved_oxide_symbols::{device_extern_symbol, kernel_symbol};
+
+        // Plain form: the hash-suffixed prefix is stripped to leave the
+        // user-facing base name.
         assert_eq!(
-            resolve_device_extern_symbol("cuda_oxide_device_extern_dot_product"),
+            resolve_device_extern_symbol(&device_extern_symbol("dot_product")),
             "dot_product"
         );
 
-        assert_eq!(
-            resolve_device_extern_symbol("device_ffi_test::cuda_oxide_device_extern_foo"),
-            "foo"
-        );
+        // FQDN form (cross-crate): the extractor skips the crate qualifier
+        // and the hash-suffixed prefix.
+        let fqdn = format!("device_ffi_test::{}", device_extern_symbol("foo"));
+        assert_eq!(resolve_device_extern_symbol(&fqdn), "foo");
 
+        // Non-extern symbols pass through unchanged — this is what lets
+        // ordinary device-function calls reach the LLVM backend without
+        // the device-extern detour.
         assert_eq!(
             resolve_device_extern_symbol("my_module::regular_function"),
             "my_module::regular_function"
         );
 
-        assert_eq!(
-            resolve_device_extern_symbol("cuda_oxide_kernel_my_kernel"),
-            "cuda_oxide_kernel_my_kernel"
-        );
+        // A kernel symbol must NOT be confused for a device-extern symbol
+        // (mutual-exclusion guarantee from reserved-oxide-symbols).
+        let kernel_name = kernel_symbol("my_kernel");
+        assert_eq!(resolve_device_extern_symbol(&kernel_name), kernel_name);
     }
 
     /// Sample of the Rust float-math placeholder → libdevice symbol mapping.

@@ -13,7 +13,7 @@
 //! What happens:
 //! 1. rustc parses this file, generates MIR for everything
 //! 2. rustc-codegen-cuda intercepts codegen:
-//!    - Finds `cuda_oxide_kernel_vecadd` (from #[kernel])
+//!    - Finds `cuda_oxide_kernel_<hash>_vecadd` (from #[kernel])
 //!    - Routes it to mir-importer → PTX
 //!    - Routes `main` and other host code to standard LLVM
 //! 3. Final binary has both host code AND embedded PTX (eventually)

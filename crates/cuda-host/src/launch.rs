@@ -39,8 +39,10 @@
 /// }
 /// ```
 ///
-/// Note: The function is renamed internally to `cuda_oxide_kernel_vecadd` for detection
-/// by the compiler backend, but the PTX entry point uses the original name.
+/// Note: the function is renamed internally to `cuda_oxide_kernel_<hash>_vecadd`
+/// for detection by the compiler backend (the prefix is owned by the
+/// workspace-internal `reserved-oxide-symbols` crate), but the PTX entry point
+/// uses the original name.
 pub trait CudaKernel {
     /// The PTX entry point name (e.g., "vecadd" - the original function name)
     const PTX_NAME: &'static str;

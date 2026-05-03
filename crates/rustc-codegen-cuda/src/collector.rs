@@ -22,14 +22,15 @@
 //! │   ┌─────────────────────────────────────────────────────────────────────────┐   │
 //! │   │  STEP 1: Find Kernel Entry Points                                       │   │
 //! │   │                                                                         │   │
-//! │   │  Scan all CGUs for functions with "cuda_oxide_kernel_" prefix           │   │
-//! │   │  (The #[kernel] macro renames `fn foo` to `fn cuda_oxide_kernel_foo`)   │   │
+//! │   │  Scan all CGUs for functions whose names contain the reserved          │   │
+//! │   │  KERNEL_PREFIX from `reserved-oxide-symbols` (the #[kernel] macro       │   │
+//! │   │  renames `fn foo` into the hash-suffixed `cuda_oxide_*` namespace).    │   │
 //! │   │                                                                         │   │
 //! │   │  Example:                                                               │   │
 //! │   │    #[kernel]                                                            │   │
 //! │   │    fn add_one(data: *mut i32, len: usize) { ... }                       │   │
 //! │   │                                                                         │   │
-//! │   │    Becomes: cuda_oxide_kernel_add_one in MIR                            │   │
+//! │   │    Becomes: cuda_oxide_kernel_<hash>_add_one in MIR                     │   │
 //! │   └─────────────────────────────────────────────────────────────────────────┘   │
 //! │                              │                                                  │
 //! │                              ▼                                                  │
@@ -76,7 +77,7 @@
 //! | Crate                    | What's Collected                               | What's Filtered                          |
 //! |--------------------------|------------------------------------------------|------------------------------------------|
 //! | Local crate              | Everything reachable from kernels              | —                                        |
-//! | External crates          | Kernels (`cuda_oxide_kernel_*`)                | —                                        |
+//! | External crates          | Kernels (`cuda_oxide_kernel_<hash>_*`)         | —                                        |
 //! | `cuda_device`              | Non-intrinsic functions                        | Intrinsic stubs (just `unreachable!()`)  |
 //! | `core`                   | Iterators, Option, etc.                        | `fmt::*`, `panicking::*`                 |
 //! | `alloc`                  | Vec, Box, String (if GPU allocator configured) | —                                        |
@@ -146,30 +147,21 @@ enum CollectDecision {
     Forbidden { crate_name: String, fn_path: String },
 }
 
-/// Prefix used by the `#[kernel]` macro to mark kernel functions.
-///
-/// The macro renames `fn foo()` to `fn cuda_oxide_kernel_foo()`.
-/// This naming convention allows us to identify kernels at the MIR level
-/// without needing access to attributes (which are erased by this point).
-const KERNEL_PREFIX: &str = "cuda_oxide_kernel_";
-
-/// Prefix used by the `#[device]` macro on function definitions to mark device functions.
-///
-/// The macro renames `fn foo()` to `fn cuda_oxide_device_foo()`.
-/// This allows us to identify device function definitions that should be compiled
-/// to PTX/LTOIR. When used as standalone roots (no kernel), they produce linkable
-/// device code callable from CUDA C++.
-const DEVICE_PREFIX: &str = "cuda_oxide_device_";
-
-/// Prefix used by the `#[device]` macro on extern blocks to mark device FFI declarations.
-///
-/// The macro renames `fn foo()` to `fn cuda_oxide_device_extern_foo()`.
-/// This allows us to identify external device function declarations that should
-/// be emitted as LLVM `declare` statements for linking with external LTOIR.
-///
-/// Note: This prefix starts with `DEVICE_PREFIX`, so checks must test for
-/// `DEVICE_EXTERN_PREFIX` first to avoid false matches.
-const DEVICE_EXTERN_PREFIX: &str = "cuda_oxide_device_extern_";
+// The prefix constants and substring/extractor helpers used below
+// (`KERNEL_PREFIX`, `is_kernel_symbol`, `kernel_base_name`, etc.) live in
+// the workspace-internal `reserved-oxide-symbols` crate. That crate is the
+// single source of truth for the cuda_oxide_* naming contract; see its
+// crate-level docs for the layered API and the hash-suffix rationale.
+//
+// Each prefix ends with the magic suffix `246e25db_`, which makes a
+// substring like "cuda_oxide_kernel_" — without the hash — never falsely
+// match. The mutual-exclusion guarantee between `DEVICE_PREFIX` and
+// `DEVICE_EXTERN_PREFIX` means we no longer need the historical
+// "test extern first" ordering dance that lived here previously.
+use reserved_oxide_symbols::{
+    device_extern_base_name, is_device_extern_symbol, is_device_symbol, is_kernel_symbol,
+    kernel_base_name,
+};
 
 /// Sanitize a symbol name for use as a PTX identifier.
 ///
@@ -382,37 +374,29 @@ pub fn count_device_fns_in_cgus<'tcx>(tcx: TyCtxt<'tcx>, cgus: &[CodegenUnit<'tc
 
 /// Checks if a function is a kernel entry point.
 ///
-/// Detection is based on the `cuda_oxide_kernel_` prefix which is added by
-/// the `#[kernel]` macro during expansion:
+/// Detection is based on the `KERNEL_PREFIX` substring (currently
+/// `cuda_oxide_kernel_246e25db_`) which the `#[kernel]` macro adds to
+/// renamed functions:
 ///
 /// ```text
-/// User writes:           Macro expands to:
-/// ┌─────────────────┐    ┌──────────────────────────────────────┐
-/// │ #[kernel]       │    │ #[no_mangle]                         │
-/// │ fn add_one(...) │ => │ pub fn cuda_oxide_kernel_add_one(...) │
-/// └─────────────────┘    └──────────────────────────────────────┘
+/// User writes:        Macro expands to:
+/// ┌─────────────────┐  ┌────────────────────────────────────────────────┐
+/// │ #[kernel]       │  │ #[no_mangle]                                   │
+/// │ fn add_one(...) │ ⇒│ pub fn cuda_oxide_kernel_246e25db_add_one(...) │
+/// └─────────────────┘  └────────────────────────────────────────────────┘
 /// ```
 pub fn is_kernel_function(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
-    let name = tcx.def_path_str(def_id);
-    name.contains(KERNEL_PREFIX)
+    is_kernel_symbol(&tcx.def_path_str(def_id))
 }
 
 /// Checks if a function is a standalone device function definition.
 ///
-/// Detection is based on the `cuda_oxide_device_` prefix which is added by
-/// the `#[device]` macro during expansion. We must exclude `cuda_oxide_device_extern_`
-/// functions (those are FFI declarations, not definitions).
-///
-/// ```text
-/// User writes:             Macro expands to:
-/// ┌──────────────────┐     ┌───────────────────────────────────────┐
-/// │ #[device]        │     │ #[no_mangle]                          │
-/// │ fn fast_sqrt(..) │ =>  │ fn cuda_oxide_device_fast_sqrt(..)    │
-/// └──────────────────┘     └───────────────────────────────────────┘
-/// ```
+/// Detection is based on the `DEVICE_PREFIX` substring added by the
+/// `#[device]` macro on `fn` items. The mutual-exclusion property
+/// documented in `reserved-oxide-symbols` means we don't need an explicit
+/// exclusion of device-extern symbols here — `is_device_symbol` handles it.
 pub fn is_device_function(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
-    let name = tcx.def_path_str(def_id);
-    name.contains(DEVICE_PREFIX) && !name.contains(DEVICE_EXTERN_PREFIX)
+    is_device_symbol(&tcx.def_path_str(def_id))
 }
 
 fn is_shared_array_ty(tcx: TyCtxt<'_>, ty: Ty<'_>) -> bool {
@@ -492,8 +476,8 @@ pub fn collect_device_functions<'tcx>(
             if let MonoItem::Fn(instance) = item {
                 if is_kernel_function(tcx, instance.def_id()) {
                     // Skip closures inside kernels - they are device functions, not kernels.
-                    // Closures have names like "cuda_oxide_kernel_foo::{closure#0}" but
-                    // only "cuda_oxide_kernel_foo" is the actual kernel entry point.
+                    // Closures have names like "cuda_oxide_kernel_<hash>_foo::{closure#0}" but
+                    // only "cuda_oxide_kernel_<hash>_foo" is the actual kernel entry point.
                     let name = tcx.def_path_str(instance.def_id());
                     if name.contains("{closure") || name.contains("::closure") {
                         if verbose {
@@ -521,15 +505,13 @@ pub fn collect_device_functions<'tcx>(
                     }
 
                     let name = tcx.def_path_str(instance.def_id());
-                    // Extract the kernel base name by stripping the cuda_oxide_kernel_ prefix.
-                    // For cross-crate kernels, the name is like "kernel_lib::cuda_oxide_kernel_scale"
-                    // We need to strip everything up to and including "cuda_oxide_kernel_"
-                    let base_name = if let Some(pos) = name.find("cuda_oxide_kernel_") {
-                        name[pos + "cuda_oxide_kernel_".len()..].to_string()
-                    } else {
-                        // Fallback: use the last component of the path
-                        name.rsplit("::").next().unwrap_or(&name).to_string()
-                    };
+                    // Extract the kernel base name by stripping the reserved
+                    // `cuda_oxide_kernel_<hash>_` prefix. Cross-crate kernels look
+                    // like `kernel_lib::cuda_oxide_kernel_<hash>_scale`; the
+                    // helper handles both bare and FQDN forms uniformly.
+                    let base_name = kernel_base_name(&name)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| name.rsplit("::").next().unwrap_or(&name).to_string());
 
                     // Compute a unique export name for this kernel monomorphization.
                     // For closures: uses source location (line/col)
@@ -632,7 +614,8 @@ impl<'tcx> DeviceCollector<'tcx> {
     /// Returns the fully qualified domain name (FQDN) for a DefId.
     ///
     /// `def_path_str()` omits the crate name for local items (e.g. returns
-    /// `cuda_oxide_device_vecadd` instead of `helper_fn::cuda_oxide_device_vecadd`).
+    /// `cuda_oxide_device_<hash>_vecadd` instead of
+    /// `helper_fn::cuda_oxide_device_<hash>_vecadd`).
     /// This method prepends the local crate name so the result matches what
     /// `CrateDef::name()` returns on the `rustc_public` side, ensuring that
     /// call sites and definitions use identical strings before lowering
@@ -710,17 +693,12 @@ impl<'tcx> DeviceCollector<'tcx> {
         }
 
         // Extract the original function name (strip the prefix)
-        // The #[link_name] attribute on the extern fn has the original name
-        let export_name = if let Some(stripped) = full_name
-            .rsplit("::")
-            .next()
-            .and_then(|s| s.strip_prefix("cuda_oxide_device_extern_"))
-        {
-            stripped.to_string()
-        } else {
-            // Fallback: use the full name
-            full_name.to_string()
-        };
+        // The #[link_name] attribute on the extern fn has the original name.
+        // `device_extern_base_name` returns the part after DEVICE_EXTERN_PREFIX
+        // and works for both bare and FQDN forms.
+        let export_name = device_extern_base_name(&full_name)
+            .map(str::to_string)
+            .unwrap_or_else(|| full_name.to_string());
 
         // Extract NVVM attributes from the function's attributes
         let attrs = self.extract_device_extern_attrs(def_id);
@@ -865,12 +843,13 @@ impl<'tcx> DeviceCollector<'tcx> {
 
         // CRITICAL: Substitute the caller's args into the callee's args.
         //
-        // When walking the MIR of a generic function like `cuda_oxide_kernel_scale<T>`,
-        // calls to other functions may have generic args like `[T]`. We need to substitute
-        // the caller's concrete args (e.g., `[f32]`) to get the actual monomorphized callee.
+        // When walking the MIR of a generic function like
+        // `cuda_oxide_kernel_<hash>_scale<T>`, calls to other functions may have
+        // generic args like `[T]`. We substitute the caller's concrete args
+        // (e.g., `[f32]`) to get the actual monomorphized callee.
         //
         // Example:
-        //   Caller: cuda_oxide_kernel_scale::<f32> (args = [f32])
+        //   Caller: cuda_oxide_kernel_<hash>_scale::<f32> (args = [f32])
         //   Call in MIR: scale<T>(...)  (args = [T])
         //   After substitution: scale::<f32> (args = [f32])
         let args = self.tcx.instantiate_and_normalize_erasing_regions(
@@ -1031,7 +1010,7 @@ impl<'tcx> DeviceCollector<'tcx> {
         // Check if this is a device extern declaration (FFI with external LTOIR).
         // These have no MIR body but should be emitted as LLVM `declare` statements.
         let raw_name = self.tcx.def_path_str(resolved.def_id());
-        if raw_name.contains(DEVICE_EXTERN_PREFIX) {
+        if is_device_extern_symbol(&raw_name) {
             self.add_device_extern(resolved.def_id(), &raw_name);
             return;
         }
@@ -1086,9 +1065,9 @@ impl<'tcx> DeviceCollector<'tcx> {
     ///
     /// ## Kernel Entry Points (Cross-Crate Support)
     ///
-    /// Kernels (functions with `cuda_oxide_kernel_` prefix) are allowed from ANY crate.
-    /// This enables library crates to export generic kernels that get monomorphized
-    /// when used in an application.
+    /// Kernels (detected via `is_kernel_symbol` from `reserved-oxide-symbols`)
+    /// are allowed from ANY crate. This enables library crates to export
+    /// generic kernels that get monomorphized when used in an application.
     ///
     /// ## Allowed Crates (for non-kernel callees)
     ///
@@ -1115,11 +1094,11 @@ impl<'tcx> DeviceCollector<'tcx> {
         let crate_name = self.tcx.crate_name(def_id.krate);
         let name_str = crate_name.as_str();
 
-        // Check if this is a kernel entry point (cuda_oxide_kernel_*)
-        // Kernels can come from ANY crate - this enables library crates to export
-        // generic kernels that get monomorphized when used in an application.
+        // Check if this is a kernel entry point. Kernels can come from ANY
+        // crate — this enables library crates to export generic kernels that
+        // get monomorphized when used in an application.
         let fn_name = self.tcx.item_name(def_id);
-        if fn_name.as_str().starts_with(KERNEL_PREFIX) {
+        if is_kernel_symbol(fn_name.as_str()) {
             return CollectDecision::Collect;
         }
 

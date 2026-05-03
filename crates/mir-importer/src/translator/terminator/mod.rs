@@ -36,7 +36,7 @@
 //! # Function Name Resolution
 //!
 //! [`extract_func_info`] uses `CrateDef::name()` which returns fully qualified
-//! names (FQDNs, e.g. `helper_fn::cuda_oxide_device_vecadd`). This FQDN is
+//! names (FQDNs, e.g. `helper_fn::cuda_oxide_device_<hash>_vecadd`). This FQDN is
 //! used as both `pattern_name` (for intrinsic matching against paths like
 //! `cuda_device::thread::threadIdx_x`) and `call_name` (for non-generic calls).
 //! The collector produces matching FQDNs, and the lowering layer converts
@@ -1405,7 +1405,7 @@ fn extract_closure_body_name(closure_arg: &mir::Operand, body: &mir::Body) -> Op
 /// # Naming strategy
 ///
 /// `CrateDef::name()` returns the fully qualified name (FQDN) in the `rustc_public`
-/// API (e.g. `helper_fn::cuda_oxide_device_vecadd_device`). We use this directly as
+/// API (e.g. `helper_fn::cuda_oxide_device_<hash>_vecadd_device`). We use this directly as
 /// both `pattern_name` and `call_name` (for non-generic calls). The collector
 /// produces matching FQDNs, and the lowering layer (`mir-lower`) converts `::` to
 /// `__` on both sides to produce valid LLVM/PTX identifiers.

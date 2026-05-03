@@ -88,7 +88,8 @@ fn main() {
 
 The codegen backend:
 
-1. Finds `cuda_oxide_kernel_scale` marked with `#[kernel]` attribute
+1. Finds `cuda_oxide_kernel_<hash>_scale` marked with `#[kernel]` attribute (the
+   `<hash>` is the fixed `246e25db_` suffix owned by `crates/reserved-oxide-symbols/`)
 2. Discovers all monomorphizations: `scale::<f32>`, `scale::<i32>`, etc.
 3. Generates unique PTX entry points: `scale__f32`, `scale__i32`
 4. Collects device helper functions transitively
@@ -106,7 +107,8 @@ Each monomorphization gets a unique PTX name:
 | `add::<f32>`   | `add__f32`      |
 
 The naming scheme:
-- Base name extracted from `cuda_oxide_kernel_<name>`
+- Base name extracted from `cuda_oxide_kernel_<hash>_<name>` via
+  `reserved_oxide_symbols::kernel_base_name`
 - Type suffix appended: `__<type_name>`
 
 ### Cross-Crate Intrinsic Handling

@@ -17,6 +17,7 @@ bitflags = { workspace = true }
 combine = { workspace = true }
 log = { workspace = true }
 dyn-clone = { workspace = true }
+reserved-oxide-symbols = { workspace = true }
 
 [dev-dependencies]
 expect-test = "1.4"

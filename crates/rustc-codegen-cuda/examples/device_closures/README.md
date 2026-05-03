@@ -155,10 +155,14 @@ _5 = <{closure@src/main.rs:157:22} as FnMut<(u32,)>>::call_mut(...)
 #### Step 4: The Closure Body Has a Mangled Name
 
 ```text
-fn _RNCNvCskdg9vxy9oFe_23device_closures37cuda_oxide_kernel_test_closure_fnonce0B3_
-   ^^^                                                                                   ^
-   Rust symbol                                                                     closure index
+fn _RNCNvCskdg9vxy9oFe_23device_closures46cuda_oxide_kernel_246e25db_test_closure_fnonce0B3_
+   ^^^                                                                                            ^
+   Rust symbol                                                                              closure index
 ```
+
+The host-side identifier `cuda_oxide_kernel_246e25db_test_closure_fnonce` is the
+hash-suffixed reserved form the `#[kernel]` macro emits; the byte count after
+`device_closures` (`46`) is the length of that segment in the demangled symbol.
 
 Encodes: `_R` (Rust) + `NC` (Nested Closure) + parent path + `0` (first closure) + crate hash.
 
@@ -189,7 +193,7 @@ function call with no indirection.
 
 ### Fix 1: Collector - Discover Closure Bodies
 
-Closures inside kernels have names like `cuda_oxide_kernel_foo::{closure#0}`. We skip them
+Closures inside kernels have names like `cuda_oxide_kernel_<hash>_foo::{closure#0}`. We skip them
 as kernel entry points, but we still need to collect them for compilation.
 
 When the collector sees `FnOnce::call_once` / `FnMut::call_mut` / `Fn::call` with a closure

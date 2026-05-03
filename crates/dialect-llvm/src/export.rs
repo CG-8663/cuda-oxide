@@ -796,43 +796,35 @@ struct KernelInfo {
     name: String,
 }
 
-/// Prefix used by the `#[device]` macro for device function definitions.
-const DEVICE_PREFIX: &str = "cuda_oxide_device_";
-/// Prefix used by the `#[device]` macro for extern device function declarations.
-const DEVICE_EXTERN_PREFIX: &str = "cuda_oxide_device_extern_";
-/// FQDN separator: `::` is converted to `__` by body.rs during MIR import.
-const FQDN_DEVICE_PREFIX: &str = "__cuda_oxide_device_";
+// Device-symbol detection and base-name extraction route through
+// `reserved-oxide-symbols`, the workspace-internal source of truth for the
+// `cuda_oxide_*` namespace.
+//
+// Note on FQDN forms: MIR import converts `::` to `__`, so a fully-qualified
+// device symbol can appear as `mycrate__cuda_oxide_device_<hash>_foo`. Because
+// the helpers in `reserved-oxide-symbols` use substring matching (not
+// `starts_with`), they handle both bare and FQDN forms uniformly — no separate
+// `FQDN_DEVICE_PREFIX` constant is needed.
+use reserved_oxide_symbols::{device_base_name, is_device_extern_symbol, is_device_symbol};
 
-/// Returns true if `name` is a device function (has `cuda_oxide_device_` prefix,
-/// either at the start or after a FQDN crate-name separator `__`).
+/// Returns true if `name` is a device function (definition, not extern).
 fn has_device_prefix(name: &str) -> bool {
-    (name.starts_with(DEVICE_PREFIX) || name.contains(FQDN_DEVICE_PREFIX))
-        && !has_device_extern_prefix(name)
+    is_device_symbol(name)
 }
 
-/// Returns true if `name` is a device extern declaration.
-fn has_device_extern_prefix(name: &str) -> bool {
-    name.starts_with(DEVICE_EXTERN_PREFIX) || name.contains("__cuda_oxide_device_extern_")
-}
-
-/// Strip the `cuda_oxide_device_` prefix from a function name if it is a device
-/// function definition (not an extern declaration, not a mangled generic).
+/// Strip the device-function prefix from `name` if present.
 ///
-/// Handles both plain names (`cuda_oxide_device_fast_sqrt` -> `fast_sqrt`) and
-/// FQDN-prefixed names (`mycrate__cuda_oxide_device_fast_sqrt` -> `fast_sqrt`).
-/// The prefix is needed internally for MIR-level detection but should not leak
-/// into the final LLVM IR / PTX / LTOIR output.
+/// The reserved prefix is needed internally for MIR-level detection but
+/// should not leak into the final LLVM IR / PTX / LTOIR output. Returns
+/// `name` unchanged for non-device symbols and for device-extern declarations
+/// (those keep their original-name `link_name` attribute).
 fn strip_device_prefix(name: &str) -> String {
-    if has_device_extern_prefix(name) {
+    if is_device_extern_symbol(name) {
         return name.to_string();
     }
-    if let Some(pos) = name.find(FQDN_DEVICE_PREFIX) {
-        return name[pos + FQDN_DEVICE_PREFIX.len()..].to_string();
-    }
-    if let Some(stripped) = name.strip_prefix(DEVICE_PREFIX) {
-        return stripped.to_string();
-    }
-    name.to_string()
+    device_base_name(name)
+        .map(str::to_string)
+        .unwrap_or_else(|| name.to_string())
 }
 
 struct ModuleExportState<'a> {

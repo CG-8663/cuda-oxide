@@ -7,8 +7,14 @@ Procedural macros for writing CUDA kernels in Rust. Provides `#[kernel]`, `#[dev
 ### `#[kernel]` -- GPU Kernel Entry Point
 
 Marks a function as a CUDA kernel. Generates:
-1. A `cuda_oxide_kernel_<name>` entry point (with `#[no_mangle]`) for the codegen backend to collect
-2. A `__<name>_CudaKernel` marker struct implementing `CudaKernel` (or `GenericCudaKernel` for generics)
+1. An entry point renamed into the reserved `cuda_oxide_kernel_<hash>_<name>` namespace
+   (with `#[no_mangle]`) so the codegen backend can find it. The hash makes the prefix
+   unguessable for user code; see `crates/reserved-oxide-symbols/` for the contract.
+2. A `__<name>_CudaKernel` marker struct implementing `CudaKernel` (or `GenericCudaKernel` for generics).
+
+> **Reserved names.** The macros refuse to compile any function whose name starts with
+> `cuda_oxide_` -- that namespace is reserved for cuda-oxide-internal mangling. The check
+> is enforced at expansion time so the error points at the offending source line.
 
 ```rust
 use cuda_device::{kernel, thread, DisjointSlice};

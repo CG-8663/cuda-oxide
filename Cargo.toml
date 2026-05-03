@@ -17,6 +17,8 @@ members = [
     "crates/cuda-async",
     "crates/libnvvm-sys",
     "crates/nvjitlink-sys",
+    # Internal naming contract (workspace-private; publish = false)
+    "crates/reserved-oxide-symbols",
     # Differential codegen fuzzer support
     "crates/fuzzer",
 ]
@@ -51,6 +53,7 @@ cuda-core = { path = "crates/cuda-core" }
 cuda-async = { path = "crates/cuda-async" }
 libnvvm-sys = { path = "crates/libnvvm-sys" }
 nvjitlink-sys = { path = "crates/nvjitlink-sys" }
+reserved-oxide-symbols = { path = "crates/reserved-oxide-symbols" }
 fuzzer = { path = "crates/fuzzer" }
 
 # Common dependencies

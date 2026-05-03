@@ -56,7 +56,7 @@ pub fn add<T: Copy + Add<Output = T>>(a: &[T], b: &[T], mut c: DisjointSlice<T>)
 // =============================================================================
 //
 // Using cuda_launch! with type parameters to trigger monomorphization.
-// The macro expansion references cuda_oxide_kernel_scale::<f32>, which forces
+// The macro expansion references cuda_oxide_kernel_<hash>_scale::<f32>, which forces
 // rustc to generate the monomorphized version.
 
 use cuda_host::cuda_launch;
@@ -92,7 +92,7 @@ fn main() {
     //     args: [factor, slice(input_dev), slice_mut(output_dev)]
     // }
     //
-    // This expands to code that references cuda_oxide_kernel_scale::<f32>,
+    // This expands to code that references cuda_oxide_kernel_<hash>_scale::<f32>,
     // which forces rustc to monomorphize it, which makes it visible to the
     // backend's collector.
 
