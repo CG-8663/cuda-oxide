@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 cuda-core = { path = "../cuda-core" }
 cuda-bindings = { path = "../cuda-bindings" }
+cuda-host = { workspace = true }
 futures = "0.3"
 thiserror = { workspace = true }
 anyhow = { workspace = true }

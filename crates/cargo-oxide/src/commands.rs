@@ -982,7 +982,7 @@ cuda-core = {{ git = "{GIT_REPO}" }}
         format!(
             r#"use cuda_device::{{kernel, thread, DisjointSlice}};
 use cuda_host::cuda_launch_async;
-use cuda_async::device_context::init_device_contexts;
+use cuda_async::device_context::{{init_device_contexts, load_kernel_module_async}};
 use cuda_async::device_operation::DeviceOperation;
 use cuda_core::LaunchConfig;
 
@@ -1001,7 +1001,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {{
     use std::mem;
 
     init_device_contexts(0, 1)?;
-    let module = cuda_async::device_context::load_module_from_file("{name}.ptx", 0)?;
+    // Loads `{name}.ptx` directly when cuda-oxide produced PTX, or builds a
+    // cubin from `{name}.ll` when cuda-oxide auto-detected libdevice math
+    // (`sin`, `pow`, `exp`, ...). Requires CUDA Toolkit on the host.
+    let module = load_kernel_module_async("{name}", 0)?;
 
     const N: usize = 1024;
     let a_host: Vec<f32> = (0..N).map(|i| i as f32).collect();
@@ -1067,7 +1070,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {{
         format!(
             r#"use cuda_device::{{kernel, thread, DisjointSlice}};
 use cuda_core::{{CudaContext, DeviceBuffer, LaunchConfig}};
-use cuda_host::{{cuda_launch, ltoir}};
+use cuda_host::{{cuda_launch, load_kernel_module}};
 
 #[kernel]
 pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {{
@@ -1092,7 +1095,7 @@ fn main() {{
     // Loads `{name}.ptx` directly when cuda-oxide produced PTX, or builds a
     // cubin from `{name}.ll` when cuda-oxide auto-detected libdevice math
     // (`sin`, `pow`, `exp`, ...). Requires CUDA Toolkit on the host.
-    let module = ltoir::load_kernel_module(&ctx, "{name}")
+    let module = load_kernel_module(&ctx, "{name}")
         .expect("Failed to load kernel module");
 
     cuda_launch! {{

@@ -56,6 +56,14 @@ pub mod tiling;
 
 pub use launch::{CudaKernel, GenericCudaKernel, HasLength, ReadOnly, Scalar, WriteOnly};
 
+/// Loads a compiled kernel module by name. Tries `<name>.cubin`, then
+/// `<name>.ptx`, and finally falls through to the LTOIR build path
+/// (`<name>.ll` plus libdevice → cubin) when cuda-oxide auto-detected
+/// CUDA libdevice math intrinsics during the build. Most beginner code
+/// never sees the LTOIR path because `vecadd`-style kernels emit `.ptx`
+/// directly. See [`ltoir`] for the underlying pipeline and discovery rules.
+pub use ltoir::{LtoirError, load_kernel_module};
+
 // Re-export launch macros from cuda-macros for convenience.
 pub use cuda_macros::cuda_launch;
 

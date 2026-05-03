@@ -94,6 +94,7 @@ dependencies = [
  "anyhow",
  "cuda-bindings",
  "cuda-core",
+ "cuda-host",
  "futures",
  "thiserror",
 ]
@@ -127,6 +128,9 @@ dependencies = [
  "cuda-core",
  "cuda-macros",
  "half",
+ "libnvvm-sys",
+ "nvjitlink-sys",
+ "thiserror",
 ]
 
 [[package]]
@@ -275,6 +279,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "libnvvm-sys"
+version = "0.1.0"
+dependencies = [
+ "libloading",
+ "thiserror",
+]
+
+[[package]]
 name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -300,6 +312,14 @@ checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
 dependencies = [
  "memchr",
  "minimal-lexical",
+]
+
+[[package]]
+name = "nvjitlink-sys"
+version = "0.1.0"
+dependencies = [
+ "libloading",
+ "thiserror",
 ]
 
 [[package]]

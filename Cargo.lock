@@ -300,6 +300,7 @@ dependencies = [
  "anyhow",
  "cuda-bindings",
  "cuda-core",
+ "cuda-host",
  "futures",
  "thiserror",
 ]
