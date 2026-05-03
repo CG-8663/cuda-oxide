@@ -9,4 +9,4 @@ repository.workspace = true
 publish = false
 
 [lints.rust]
-missing_docs = "deny"
+missing_docs = { level = "deny" }
