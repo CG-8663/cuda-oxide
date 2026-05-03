@@ -43,5 +43,6 @@ functions whose name starts with it. The `#[kernel]` and `#[device]`
 proc macros enforce this at the source-code level via a compile-error
 guard, and the hash suffix defends against the macro-bypass case (a
 plain function literally named `cuda_oxide_kernel_foo`, no macro). Both
-defenses are needed — see `docs/attributes/naming_collision.md` for the
-full rationale.
+defenses are needed: the macro guard catches honest mistakes early at
+the source-code level; the hash suffix makes the actually-mangled name
+collision-resistant against any code path that bypasses the macro.

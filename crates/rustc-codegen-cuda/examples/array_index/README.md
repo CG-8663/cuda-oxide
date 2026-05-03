@@ -85,5 +85,3 @@ All mutable arrays are **eagerly promoted to memory** at their definition point.
 1. **Correctness in loops**: No PHI re-initialization issues
 2. **Consistent access**: Both reads and writes use memory (GEP + load/store)
 3. **Alloca domination**: Allocas placed in entry block, visible from all uses
-
-See [Array Index Assignment Implementation](../../../../docs/memory/array_index_assignment.md) for full details.

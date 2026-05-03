@@ -239,4 +239,3 @@ mir.struct <Extreme,[a, b],[ui8, si128],[1, 0],[16, 0],32>
 ## See Also
 
 - [rustc-codegen-cuda README](../../README.md) - Unified compilation overview
-- [docs/by-value-vs-by-pointer.md](../../../../docs/by-value-vs-by-pointer.md) - Layout compatibility details

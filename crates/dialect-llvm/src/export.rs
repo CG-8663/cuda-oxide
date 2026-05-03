@@ -5,8 +5,10 @@
 
 //! Export LLVM dialect to textual LLVM IR.
 //!
-//! For a detailed explanation of the export process, including the block argument
-//! to PHI node translation and the pre-pass naming strategy, see `docs/LLVM_EXPORT.md`.
+//! Two pieces worth knowing about live in this module: the pre-pass that
+//! assigns deterministic anonymous-value names so the textual IR is stable
+//! across runs, and the block-argument → PHI-node translation that bridges
+//! pliron's basic-block argument convention to LLVM's PHI-node convention.
 //!
 //! # Backend Configuration
 //!
@@ -172,7 +174,7 @@ impl ExportBackendConfig for PtxExportConfig {
 /// - `!nvvmir.version` metadata
 ///
 /// This produces IR suitable for consumption by libNVVM (e.g., `nvvmCompileProgram -gen-lto`)
-/// or other NVVM-compatible tools. See `docs/nvvmir/NVVM_IR.md` for details.
+/// or other NVVM-compatible tools.
 ///
 /// Currently supports NVVM 20 dialect (Blackwell+, opaque pointers).
 /// NVVM 7 dialect (pre-Blackwell, typed pointers) is not yet supported.

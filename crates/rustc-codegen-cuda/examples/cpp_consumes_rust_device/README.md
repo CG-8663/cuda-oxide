@@ -131,5 +131,3 @@ extern "C" __global__ void my_kernel(float* out, int n) {
 
 - `standalone_device_fn/` — Foundation: verifies standalone `#[device]` fn compilation
 - `device_ffi_test/` — Phase 3: the reverse direction (Rust calling C++ device fns)
-- `docs/attributes/device_function_design.md` — Full design document
-- `docs/attributes/monomorphization.md` — How generics work with device functions

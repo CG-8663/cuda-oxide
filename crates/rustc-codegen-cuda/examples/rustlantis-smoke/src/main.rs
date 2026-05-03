@@ -16,8 +16,8 @@
 //! The reusable trace machinery (`trace_reset`, `trace_finish`, `dump_var`, the
 //! `TraceValue`/`TraceDump` traits, and the `RL_TRACE` global) lives in
 //! `crates/fuzzer`. This example only contains the two MIR bodies, the host
-//! oracle, and the kernel wiring. See `crates/fuzzer` and
-//! `docs/rustlantis/rustlantis.md` for the full plan.
+//! oracle, and the kernel wiring. See `crates/fuzzer` for the
+//! differential-testing infrastructure that drives this smoke example.
 //!
 //! Build and run with:
 //!   cargo oxide run rustlantis-smoke

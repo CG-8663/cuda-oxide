@@ -27,8 +27,7 @@
 //! store of such a concrete-addrspace pointer to go through a
 //! `mir.cast <PtrToPtr>` → LLVM `addrspacecast` → PTX `cvta.shared.u64`,
 //! and subsequent loads of that pointer to hit the generic (runtime-
-//! dispatched) store path instead of native `st.shared.*`. See
-//! `docs/upgrades/slot-addrspace-inference.md` for the full story.
+//! dispatched) store path instead of native `st.shared.*`.
 //!
 //! [`SlotAddrSpaceMap`] is a pre-scan over the MIR body that, per local,
 //! infers the pointee address space from the *writes* into that local. The
@@ -302,7 +301,7 @@ enum WriteClass {
     /// was already `Known(n)` from a prior classified write, it stays
     /// `Known(n)`. Demoting would be catastrophic for locals whose declared
     /// type is a non-generic addrspace (e.g. `&mut SharedArray<_>` reborrows
-    /// in `tiled_gemm` — see `docs/upgrades/slot-addrspace-inference.md`).
+    /// in `tiled_gemm`).
     Unclassified,
     /// The write is `_y = _x`-style propagation from a local whose state is
     /// still [`SlotAddrSpace::Uninit`]. That's a timing artefact of the

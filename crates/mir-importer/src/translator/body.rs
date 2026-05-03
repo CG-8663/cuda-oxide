@@ -243,8 +243,7 @@ fn emit_entry_allocas(
     // Pre-scan the body once: for each local whose translated slot type is a
     // pointer, infer the address space from the *writes* into it rather than
     // trusting Rust's declared type (which loses addrspace info for
-    // references / raw pointers). See
-    // `docs/upgrades/slot-addrspace-inference.md`.
+    // references / raw pointers).
     let slot_addr_spaces = SlotAddrSpaceMap::analyze(body);
 
     for local_idx in 0..body.locals().len() {

@@ -9,8 +9,7 @@
 //! compiler ever sees the (potentially-confusing) renamed form.
 //!
 //! See `crates/reserved-oxide-symbols/` for the source of truth on the
-//! reserved namespace, and `docs/attributes/naming_collision.md` for the
-//! design rationale.
+//! reserved namespace.
 
 #[test]
 fn reserved_name_macro_guard() {

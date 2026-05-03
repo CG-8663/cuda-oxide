@@ -1155,8 +1155,8 @@ impl<'tcx> DeviceCollector<'tcx> {
         }
 
         // NOTE: We no longer skip arithmetic trait methods (Mul::mul, Add::add, etc.)
-        // These become device functions with call overhead (see docs/FUTURE_INLINING.md)
-        // but that's a separate optimization issue.
+        // These become device functions with call overhead, but that's a separate
+        // optimization issue (forced-inline on monomorphic small bodies).
         //
         // Legacy mangled names (from prebuilt sysroot) contain $ characters which are
         // invalid PTX identifiers. We sanitize these in compute_export_name().

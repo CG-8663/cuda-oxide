@@ -162,7 +162,6 @@ pub struct PipelineConfig {
     /// - Outputs `.ll` file in NVVM IR format
     ///
     /// The output can be compiled to LTOIR using `nvvmCompileProgram -gen-lto`.
-    /// See `docs/nvvmir/NVVM_IR.md` for details on NVVM IR format.
     ///
     /// Currently supports NVVM 20 dialect (Blackwell+). Architecture is
     /// controlled by `--arch` flag.

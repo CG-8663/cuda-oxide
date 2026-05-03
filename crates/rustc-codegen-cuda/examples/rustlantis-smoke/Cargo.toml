@@ -11,8 +11,8 @@ license = "Apache-2.0"
 # Build and run with:
 #   cargo oxide run rustlantis-smoke
 #
-# This is Stage 1/2 of the rustlantis differential codegen testing plan.
-# See docs/rustlantis/rustlantis.md.
+# This is Stage 1/2 of the rustlantis differential codegen testing plan;
+# the full plan and trace infrastructure live in `crates/fuzzer/`.
 
 [dependencies]
 cuda-device = { path = "../../../cuda-device" }

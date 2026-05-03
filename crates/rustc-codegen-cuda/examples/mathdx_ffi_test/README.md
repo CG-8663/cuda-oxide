@@ -342,4 +342,3 @@ typically needs ~8-16KB of shared memory.
 - [MathDx Documentation](https://docs.nvidia.com/cuda/mathdx/)
 - [cuBLASDx Examples](https://docs.nvidia.com/cuda/cublasdx/)
 - [cuFFTDx Examples](https://docs.nvidia.com/cuda/cufftdx/)
-- [cuda-oxide LTOIR Linking](../../docs/nvvmir/)

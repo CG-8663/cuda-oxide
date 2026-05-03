@@ -1743,7 +1743,6 @@ pub fn translate_operand(
             // Check if this is a ZST (Zero-Sized Type) like PhantomData<T>
             // ZSTs have no runtime representation, so we create a value of the appropriate type.
             // This is critical for iterator support (Iter contains PhantomData).
-            // See docs/ZST_HANDLING.md for detailed documentation.
             if types::is_zst_type(ctx, const_ty_ptr) {
                 // Determine if this is a struct ZST (like PhantomData) or tuple ZST
                 let is_struct_zst = const_ty_ptr

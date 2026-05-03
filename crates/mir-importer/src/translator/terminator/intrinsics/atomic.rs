@@ -743,11 +743,12 @@ fn type_info_from_mir_ty(ty: &rustc_public::ty::Ty) -> Option<AtomicTypeInfo> {
                 UintTy::U16 => 16,
                 UintTy::U32 => 32,
                 UintTy::U64 => 64,
-                // 128-bit: PTX .b128 requires sm_90+ (Hopper). See docs/atomics/atomic-width-support.md.
+                // 128-bit: PTX .b128 requires sm_90+ (Hopper); accepted here and
+                // gated downstream by the architecture check.
                 UintTy::U128 => 128,
                 // usize is target-dependent (32-bit on nvptx, 64-bit on nvptx64).
-                // We only target nvptx64 today; see docs/memory/target-pointer-width-atomics.md
-                // for making this configurable via PipelineConfig::target_pointer_width.
+                // We only target nvptx64 today; making this configurable via
+                // `PipelineConfig::target_pointer_width` is a future change.
                 UintTy::Usize => 64,
             };
             (width, false, false)
@@ -759,11 +760,12 @@ fn type_info_from_mir_ty(ty: &rustc_public::ty::Ty) -> Option<AtomicTypeInfo> {
                 IntTy::I16 => 16,
                 IntTy::I32 => 32,
                 IntTy::I64 => 64,
-                // 128-bit: PTX .b128 requires sm_90+ (Hopper). See docs/atomics/atomic-width-support.md.
+                // 128-bit: PTX .b128 requires sm_90+ (Hopper); accepted here and
+                // gated downstream by the architecture check.
                 IntTy::I128 => 128,
                 // isize is target-dependent (32-bit on nvptx, 64-bit on nvptx64).
-                // We only target nvptx64 today; see docs/memory/target-pointer-width-atomics.md
-                // for making this configurable via PipelineConfig::target_pointer_width.
+                // We only target nvptx64 today; making this configurable via
+                // `PipelineConfig::target_pointer_width` is a future change.
                 IntTy::Isize => 64,
             };
             (width, false, true)
@@ -958,13 +960,11 @@ fn extract_core_intrinsic_generics(
     {
         if let Some(type_info) = extract_type_info_from_generics(&substs) {
             // PTX has no 8-bit atomics; 16-bit is partial (sm_70+). Reject both for now.
-            // See docs/atomics/atomic-width-support.md.
             if type_info.bit_width == 8 {
                 return input_err!(
                     loc.clone(),
                     TranslationErr::unsupported(
-                        "8-bit atomics are not supported by PTX; use 32-bit or 64-bit. \
-                             See docs/atomics/atomic-width-support.md"
+                        "8-bit atomics are not supported by PTX; use 32-bit or 64-bit"
                     )
                 );
             }
@@ -972,8 +972,7 @@ fn extract_core_intrinsic_generics(
                 return input_err!(
                     loc.clone(),
                     TranslationErr::unsupported(
-                        "16-bit atomics are not yet supported; use 32-bit or 64-bit. \
-                             See docs/atomics/atomic-width-support.md"
+                        "16-bit atomics are not yet supported; use 32-bit or 64-bit"
                     )
                 );
             }

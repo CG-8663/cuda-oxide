@@ -271,18 +271,6 @@ llc-22                                            ← PTX:
                                                      fence.acq_rel.gpu
 ```
 
-## Documentation
-
-| Document                  | Location                                         |
-|---------------------------|--------------------------------------------------|
-| Atomics design            | `docs/atomics/design.md`                         |
-| LLVM backend test results | `docs/atomics/llvm-backend-test-results.md`      |
-| Implementation bugs       | `docs/atomics/implementation-bugs.md`            |
-| PTX address spaces        | `docs/atomics/ptx-address-spaces-and-atomics.md` |
-| Status summary            | `docs/atomics/atomics-status-summary.md`         |
-| Signless integers         | `docs/primitives/signless-integers.md`           |
-| Intrinsic pipeline        | `docs/intrinsics/intrinsic-pipeline.md`          |
-
 ## Potential Errors
 
 | Error                                    | Cause                 | Solution                                           |

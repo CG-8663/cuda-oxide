@@ -57,5 +57,3 @@ SUCCESS: 8/8 tests passed
 ## Related
 
 - `cpp_consumes_rust_device/` — Takes this further: compiles to LTOIR and links with C++
-- `docs/attributes/device_function_design.md` — Full design document
-- `docs/attributes/monomorphization.md` — How generics work with device functions

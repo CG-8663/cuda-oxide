@@ -148,8 +148,7 @@ GPU Compute Capability: sm_120
 instead of `{64, 0}` for tile (1,0) causes `CUDA_EXCEPTION_27: Warp Illegal
 Instruction Parameter` — the hardware requires coordinates aligned to the tile
 (box) dimensions. This is easy to miss because `{0, 0}` is trivially aligned
-and always works. See `docs/gemm/tma-multicast-impl.md` for the full debugging
-story.
+and always works.
 
 **`cluster_sync()` before the multicast is mandatory.** The multicast TMA
 writes to every CTA's shared memory and signals every CTA's mbarrier. If any

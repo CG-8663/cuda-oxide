@@ -10,7 +10,7 @@ target/
 .vscode/
 .claude/
 
-# Internal documentation (lives in docs/, not tracked -- see cuda-oxide-book/ for the book)
+# Internal design notes are maintained out-of-band (see cuda-oxide-book/ for the published book).
 /docs/
 DESIGN.md
 test.mlir

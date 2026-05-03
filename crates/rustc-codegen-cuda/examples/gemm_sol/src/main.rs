@@ -112,7 +112,7 @@ fn build_smem_descriptor(
 ///   └──────────────────────────────────────────────────────┘
 /// ```
 ///
-/// SMEM layout constraint (see docs/gemm/smem-core-matrix-layout.md):
+/// SMEM layout constraint:
 /// The tcgen05 MMA reads 8×8 "core matrices" from SMEM with a hardcoded
 /// 16-byte row stride — there is no descriptor field to override this.
 /// A plain row-major TMA copy (128×64) produces 128-byte row strides,
@@ -417,7 +417,6 @@ pub unsafe fn gemm_sol_tiled(
 /// even though SMEM physically has 128-byte rows.
 ///
 /// Bank conflict elimination is a secondary benefit of the swizzle pattern.
-/// See docs/gemm/smem-core-matrix-layout.md for the full derivation.
 ///
 /// Changes from Phase 1:
 ///   - TMA: 1 copy of 128×64 per matrix (was 8 copies of 128×8)
@@ -3066,7 +3065,7 @@ pub unsafe fn gemm_sol_clc_multicast_4_stage_pipeline(
         const CTA_MASK_PAIR: u16 = 0b11;
         // Clears bit 24 (CTA rank within pair) + alignment bits 2:0 of a shared
         // memory barrier address, redirecting TMA completions to the leader CTA's
-        // barrier. See docs/gemm/phase4d-implementation-log.md for details.
+        // barrier.
         const PEER_BIT_MASK: u32 = 0xFEFFFFF8;
 
         let n = n as u32;

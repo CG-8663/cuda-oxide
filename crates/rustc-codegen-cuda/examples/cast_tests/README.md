@@ -56,13 +56,6 @@ go through `emit_pointer_cast`, which handles struct↔ptr conversions generical
 | ptr → ptr (diff AS)    | `addrspacecast`        | generic → shared memory        |
 | otherwise              | `bitcast`              | `*mut T` → `*const T`          |
 
-## Related Documentation
-
-- [Cast Lowering](../../../../docs/casts/cast-lowering.md) — Full dispatch table and design
-- [Cast Bugs (Resolved)](../../../../docs/casts/cast-bugs.md) — Bug history and resolutions
-- [Pliron Derive Attributes](../../../../docs/pliron/derive-attributes.md) — The `MirCastKindAttr` pattern
-- [Array Indexing](../../../../docs/arrays/array-indexing.md) — ConstantIndex/Index projection handling
-
 ## Expected Output
 
 ```text

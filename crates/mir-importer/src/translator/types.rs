@@ -85,8 +85,6 @@ pub fn get_f32_type(
 /// - Lifetime/variance tracking (`PhantomData<&'a T>`)
 /// - Typestate patterns (`struct Allocated;`, `struct Deallocated;`)
 /// - Type-level markers for layout/configuration
-///
-/// See `docs/ZST_HANDLING.md` for detailed documentation.
 pub fn is_zst_type(ctx: &pliron::context::Context, ty: Ptr<TypeObj>) -> bool {
     let ty_ref = ty.deref(ctx);
 

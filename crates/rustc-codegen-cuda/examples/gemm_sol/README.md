@@ -54,8 +54,6 @@ Changes from Phase 2:
 - **Last-iteration commit**: MMA warp commits to COMPUTE_BAR on the final iteration; epilogue warps wait on it
 - **GMEM copy**: All 192 threads with stride 192
 
-See `docs/gemm/warp-specialization.md` for the full architecture diagram and barrier protocol trace.
-
 ### Phase 4A: `gemm_sol_persistent` (Persistent + TMEM Accumulator Pipeline)
 
 Persistent kernel with 2-stage TMEM accumulator ping-pong. `block_dim=192` (6 warps), `cluster_dim=(4,1,1)`.
@@ -65,8 +63,6 @@ Changes from Phase 3:
 - **TMEM accumulator pipeline**: 2-stage TMEM — MMA fills stage N while epilogue drains stage N-1, hiding epilogue latency behind tensor core work
 - **Barriers**: Adds `ACCUM_FULL0/1` (MMA→Epilogue) and `ACCUM_EMPTY0/1` (Epilogue→MMA) for TMEM pipeline, plus `TILE_READY` (TMA→MMA+Epilogue) for tile coordination
 
-See `docs/gemm/phase4a-persistent.md` for the full walkthrough and bug log.
-
 ### Phase 4B: `gemm_sol_clc` (CLC Tile Scheduling, No Multicast)
 
 CLC hardware work-stealing replaces the global atomic counter. Per-CTA unicast TMA for both A and B. `block_dim=192`, `cluster_dim=(4,1,1)`.
@@ -75,8 +71,6 @@ Changes from Phase 4A:
 - **CLC replaces atomic counter**: Full grid launch (1 CTA per tile), running CTAs steal pending work via `clc_try_cancel` instead of `atomicAdd` on a global counter
 - **Column-major rasterization**: Linear ctaid maps to `(row, col)` for cluster-aware tile locality
 - **No `tile_counter` parameter**: CLC eliminates the need for a global atomic counter
-
-See `docs/gemm/phase4b-clc.md` for CLC protocol details.
 
 ### Phase 4C: `gemm_sol_clc_multicast` (CLC + TMA Multicast for B)
 
@@ -88,8 +82,6 @@ Changes from Phase 4B:
 - **`arrive_expect_tx` before TMA loads**: Critical fix — arm barrier before any bytes can arrive from multicast
 - **`~{memory}` clobbers**: All barrier/cluster intrinsics emit memory clobbers to prevent LLVM reordering
 - **CLC multicast cancel**: `clc_try_cancel_multicast` (rank 0 steals for entire cluster)
-
-See `docs/gemm/phase4c-multicast.md` for the multicast protocol, fixes, and performance analysis.
 
 ### Phase 4D: `gemm_sol_clc_multicast_4_stage_pipeline` (cta_group::2 + 4-Stage Pipeline)
 
@@ -104,8 +96,6 @@ Changes from Phase 4C:
 - **No MCAST_BAR**: Barrier aliasing eliminates the per-K cluster sync overhead that caused Phase 4C's regression
 - **Cross-CTA epilogue**: Follower signals leader's ACCUM_EMPTY via `mbarrier_arrive_cluster`
 - **cluster_sync() at exit**: Prevents "Cluster target block not present" when fast CTA exits before partner
-
-See `docs/gemm/phase4d-implementation-log.md` for the full architecture, barrier aliasing protocol, and bug chronicle.
 
 ## Results (B200)
 
@@ -138,7 +128,9 @@ See `bench/cublaslt_bench.c` and `bench/README.md` for details.
 | 8192×8192×8192    | 276    | 19.7%              |
 | 16384×16384×16384 | 280    | 18.3%              |
 
-No speedup — pipelining alone does not help without warp specialization (see `docs/gemm/software-pipelining.md`).
+No speedup — pipelining alone does not help without warp specialization. The
+data structures (double-buffered SMEM, per-stage barriers) are correct
+infrastructure but the single-thread MMA/TMA dispatch serializes issue.
 
 ### Phase 3 (`gemm_sol_warp_spec`)
 
@@ -158,7 +150,7 @@ No speedup — pipelining alone does not help without warp specialization (see `
 | 8192×8192×8192    | 476    | 34.0%              |
 | 16384×16384×16384 | 424    | 27.8%              |
 
-Persistent kernel with 2-stage TMEM accumulator pipeline. Gains at 4K (+13% vs Phase 3) but regresses at larger sizes due to atomic counter contention and per-tile overhead. See `docs/gemm/phase4a-persistent.md` for analysis.
+Persistent kernel with 2-stage TMEM accumulator pipeline. Gains at 4K (+13% vs Phase 3) but regresses at larger sizes due to atomic counter contention and per-tile overhead.
 
 ### Phase 4B (`gemm_sol_clc`)
 
@@ -168,7 +160,7 @@ Persistent kernel with 2-stage TMEM accumulator pipeline. Gains at 4K (+13% vs P
 | 8192×8192×8192    | 479    | 34.17%             |
 | 16384×16384×16384 | 477    | 31.26%             |
 
-CLC tile scheduling replaces the atomic counter. Eliminates the large-size regression from Phase 4A — consistent ~475 TFLOPS across all sizes. See `docs/gemm/phase4b-clc.md`.
+CLC tile scheduling replaces the atomic counter. Eliminates the large-size regression from Phase 4A — consistent ~475 TFLOPS across all sizes.
 
 ### Phase 4C (`gemm_sol_clc_multicast`)
 
@@ -178,7 +170,7 @@ CLC tile scheduling replaces the atomic counter. Eliminates the large-size regre
 | 8192×8192×8192    | 278    | 19.8%              |
 | 16384×16384×16384 | 271    | 17.8%              |
 
-CLC + TMA multicast for B tiles. Passes correctness. Performance regression from MCAST_BAR per-K-iteration cluster synchronization overhead with only 2 pipeline stages. Root causes of initial deadlock: missing `~{memory}` clobbers and `arrive_expect_tx` ordering. See `docs/gemm/phase4c-multicast.md`.
+CLC + TMA multicast for B tiles. Passes correctness. Performance regression from MCAST_BAR per-K-iteration cluster synchronization overhead with only 2 pipeline stages. Root causes of initial deadlock: missing `~{memory}` clobbers and `arrive_expect_tx` ordering.
 
 ### Phase 4D (`gemm_sol_clc_multicast_4_stage_pipeline`)
 
@@ -188,7 +180,7 @@ CLC + TMA multicast for B tiles. Passes correctness. Performance regression from
 | 8192×8192×8192    | 737    | 52.5%              |
 | 16384×16384×16384 | 534    | 35.0%              |
 
-CLC + cta_group::2 pair-UMMA + 4-stage SMEM pipeline. Cluster size 2 (CTA pairs). TMA barrier aliasing via bit-24 mask (`0xFEFFFFF8`) converges both CTAs' completions on leader. 2-3x improvement over Phase 4C. See `docs/gemm/phase4d-implementation-log.md`.
+CLC + cta_group::2 pair-UMMA + 4-stage SMEM pipeline. Cluster size 2 (CTA pairs). TMA barrier aliasing via bit-24 mask (`0xFEFFFFF8`) converges both CTAs' completions on leader. 2-3x improvement over Phase 4C.
 
 ## Build and run
 
@@ -206,7 +198,6 @@ Per-size baselines on B200: 4K=1502, 8K=1402, 16K=1526 TFLOPS.
 
 ## Roadmap
 
-See `docs/gemm/sol-roadmap.md` for the full phased plan:
 - **Phase 1** (`gemm_sol_tiled`): K-loop + grid tiling, tiled TMA → ~190 TFLOPS ✅
 - **Phase 1.5** (`gemm_sol_swizzled`): SWIZZLE_128B, single TMA copy → ~280 TFLOPS ✅
 - **Phase 2** (`gemm_sol_pipelined`): Double-buffered SMEM (no speedup without warp spec) ✅
