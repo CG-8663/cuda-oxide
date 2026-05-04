@@ -22,9 +22,9 @@
 //! │   ┌─────────────────────────────────────────────────────────────────────────┐   │
 //! │   │  STEP 1: Find Kernel Entry Points                                       │   │
 //! │   │                                                                         │   │
-//! │   │  Scan all CGUs for functions whose names contain the reserved          │   │
+//! │   │  Scan all CGUs for functions whose names contain the reserved           │   │
 //! │   │  KERNEL_PREFIX from `reserved-oxide-symbols` (the #[kernel] macro       │   │
-//! │   │  renames `fn foo` into the hash-suffixed `cuda_oxide_*` namespace).    │   │
+//! │   │  renames `fn foo` into the hash-suffixed `cuda_oxide_*` namespace).     │   │
 //! │   │                                                                         │   │
 //! │   │  Example:                                                               │   │
 //! │   │    #[kernel]                                                            │   │
@@ -78,7 +78,7 @@
 //! |--------------------------|------------------------------------------------|------------------------------------------|
 //! | Local crate              | Everything reachable from kernels              | —                                        |
 //! | External crates          | Kernels (`cuda_oxide_kernel_<hash>_*`)         | —                                        |
-//! | `cuda_device`              | Non-intrinsic functions                        | Intrinsic stubs (just `unreachable!()`)  |
+//! | `cuda_device`            | Non-intrinsic functions                        | Intrinsic stubs (just `unreachable!()`)  |
 //! | `core`                   | Iterators, Option, etc.                        | `fmt::*`, `panicking::*`                 |
 //! | `alloc`                  | Vec, Box, String (if GPU allocator configured) | —                                        |
 //! | Other `no_std` crates    | All reachable functions                        | —                                        |
