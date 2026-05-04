@@ -38,7 +38,7 @@
 //! │   │                                                                       │     │
 //! │   │   ┌─────────────────────────────────────────────────────────────┐     │     │
 //! │   │   │  1. KERNEL DETECTION                                        │     │     │
-//! │   │   │     - Scan CGUs for functions in the reserved namespace    │     │     │
+//! │   │   │     - Scan CGUs for functions in the reserved namespace     │     │     │
 //! │   │   │       `cuda_oxide_kernel_<hash>_*` (set by #[kernel] macro) │     │     │
 //! │   │   └─────────────────────────────────────────────────────────────┘     │     │
 //! │   │                          │                                            │     │
@@ -167,29 +167,66 @@
 //!
 //! ## `no_std` Requirement
 //!
-//! Kernel crates MUST use `#![no_std]`. This is enforced through:
+//! Kernel crates MUST use `#![no_std]`. The collector enforces this with a
+//! single hard rule: **the `std` crate itself is forbidden, every other
+//! crate is allowed** (provided it's reachable from a kernel and itself
+//! avoids `std`). The check is on the *originating crate*
+//! (`tcx.crate_name(def_id.krate)`), not on display paths -- which matters,
+//! because rustc's MIR pretty-printer routinely emits `std::*` for items
+//! that are merely re-exported from `core`.
 //!
-//! 1. **Crate filtering in collector**: Only functions from local crate, `cuda_device`,
-//!    and `core` are collected for device compilation
-//! 2. **PTX link errors**: Calls to `std` functions will fail at PTX generation
-//!    because those functions aren't collected
+//! See [`collector::should_collect_from_crate`] for the exact policy.
+//!
+//! ### Why `std::*` shows up in MIR dumps (and isn't a problem)
+//!
+//! Run `cargo oxide pipeline vecadd` (or `atomics`, or most other examples)
+//! and the rustc MIR section will be peppered with paths like:
+//!
+//! ```text
+//! _4 = std::option::Option::<&mut f32>::Some(copy _21)
+//! _4 = const std::option::Option::<&mut f32>::None
+//! _3 = copy _14 as *const std::sync::atomic::Atomic<u32> (PtrToPtr)
+//! _4 = std::intrinsics::atomic_xadd::<u32, u32, ...>(move _15, ...) -> ...
+//! ```
+//!
+//! These are **`core` items shown under their `std::` re-export path**.
+//! `def_path_str` chooses the most user-visible path, which is usually the
+//! `std::*` form. The actual `DefId` lives in `core` (or `core::sync::atomic`,
+//! `core::intrinsics`, ...), so the collector's
+//! `crate_name(def_id.krate) == "std"` check is `false` and they're collected
+//! normally. Treat `std::*` in MIR output as cosmetic; only a hard collector
+//! error means actual `std` was reached.
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────────────────────────┐
 //! │                        CRATE FILTERING FOR DEVICE CODE                          │
 //! │                                                                                 │
-//! │   Allowed crates:                     Blocked crates:                           │
-//! │   ┌──────────────────────────────┐      ┌────────────────────────────┐          │
-//! │   │ local (user's kernel code)   │      │ std (OS, I/O, threads)     │          │
-//! │   │ cuda_device (GPU intrinsics) │      │ Everything else            │          │
-//! │   │ alloc (if allocator set)     │      │                            │          │
-//! │   │ core (iter, Option, etc.)    │      │                            │          │
-//! │   └──────────────────────────────┘      └────────────────────────────┘          │
+//! │   Allowed (originating crate, i.e. DefId.krate):                                │
+//! │   ┌──────────────────────────────────────────────────────────────────────┐      │
+//! │   │ local crate (your kernel code)                                       │      │
+//! │   │ cuda_device  (GPU intrinsics)                                        │      │
+//! │   │ core         (Option, Result, UnsafeCell, sync::atomic, intrinsics)  │      │
+//! │   │ alloc        (Vec / Box, only if you wired up a GPU allocator)       │      │
+//! │   │ any other no_std crate, if transitively reachable from a kernel      │      │
+//! │   │   (libm, num-traits, your own helper crates, ...)                    │      │
+//! │   └──────────────────────────────────────────────────────────────────────┘      │
 //! │                                                                                 │
-//! │   If kernel calls std function:                                                 │
-//! │     1. Collector doesn't follow the call (std not in allowed list)              │
-//! │     2. MIR still contains the call                                              │
-//! │     3. PTX generation fails: "undefined symbol"                                 │
+//! │   Forbidden (hard error at collection time):                                    │
+//! │   ┌──────────────────────────────────────────────────────────────────────┐      │
+//! │   │ std -- only when the *originating* crate is std (not just a display  │      │
+//! │   │        re-export). Example: an actual call into std::thread,         │      │
+//! │   │        std::fs, std::io, std::sync::Mutex, etc.                      │      │
+//! │   └──────────────────────────────────────────────────────────────────────┘      │
+//! │                                                                                 │
+//! │   When that genuine std call is reached, the collector emits a                  │
+//! │   CollectDecision::Forbidden, and process_call_operand aborts compilation       │
+//! │   with a formatted error box naming the function -- no silent skip, no          │
+//! │   cryptic PTX "undefined symbol" later in the pipeline.                         │
+//! │                                                                                 │
+//! │   Intentionally skipped (no error, just dropped): `core::fmt::*`,               │
+//! │   `core::panicking::*`, and `*::precondition_check`. These are reached          │
+//! │   by panic/UB-check paths that can't actually fire at runtime under             │
+//! │   panic=abort + `-C debug-assertions=off`.                                      │
 //! │                                                                                 │
 //! └─────────────────────────────────────────────────────────────────────────────────┘
 //! ```
@@ -335,13 +372,13 @@ pub struct CudaCodegenConfig {
 impl CudaCodegenConfig {
     /// Load configuration from environment variables.
     ///
-    /// | Variable | Config Field |
-    /// |----------|--------------|
-    /// | `CUDA_OXIDE_VERBOSE` | `verbose` |
-    /// | `CUDA_OXIDE_SHOW_RUSTC_MIR` | `dump_rustc_mir` |
-    /// | `CUDA_OXIDE_DUMP_MIR` | `dump_mir_dialect` |
-    /// | `CUDA_OXIDE_DUMP_LLVM` | `dump_llvm_dialect` |
-    /// | `CUDA_OXIDE_PTX_DIR` | `ptx_output_dir` |
+    /// | Variable                    | Config Field        |
+    /// |-----------------------------|---------------------|
+    /// | `CUDA_OXIDE_VERBOSE`        | `verbose`           |
+    /// | `CUDA_OXIDE_SHOW_RUSTC_MIR` | `dump_rustc_mir`    |
+    /// | `CUDA_OXIDE_DUMP_MIR`       | `dump_mir_dialect`  |
+    /// | `CUDA_OXIDE_DUMP_LLVM`      | `dump_llvm_dialect` |
+    /// | `CUDA_OXIDE_PTX_DIR`        | `ptx_output_dir`    |
     pub fn from_env() -> Self {
         Self {
             verbose: std::env::var("CUDA_OXIDE_VERBOSE").is_ok(),
