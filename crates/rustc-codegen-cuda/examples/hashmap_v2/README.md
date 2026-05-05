@@ -16,13 +16,27 @@ hashbrown's SwissTable to the v1 baseline:
 Plus the operation v1 didn't have:
 
 4. **Tombstone delete.** A successful delete CAS-flips the slot's tag
-   from `FULL(h2)` to `DELETED`. Find skips past tombstones; insert in
-   v2 cut 1 does **not** reclaim them.
+   from `FULL(h2)` to `DELETED`. Find skips past tombstones; insert
+   does **not** reclaim them (left for v3, which adds rehash).
 
-v2 cut 1 is single-thread-per-key — same kernel shape as v1, just over
-the new storage. The warp-cooperative probe (the actual SwissTable
-lookup with `ballot` as the GPU analog of SSE2 `_mm_movemask_epi8`)
-lands in cut 2.
+v2 ships **two find kernels and two insert protocols** side by side so
+you can mix and match for your workload:
+
+- **Single-thread find** — one CUDA thread per query key. Cheapest at
+  moderate load, where probes terminate fast.
+- **Warp-cooperative find** — one warp (32 lanes) per query key,
+  inspecting 32 tag bytes per probe step in parallel via `warp::ballot`
+  (the GPU analog of hashbrown's SSE2 `_mm_movemask_epi8` ctrl scan).
+  Worth it under long probe chains — high load and miss-heavy workloads.
+- **Protocol B insert** — slot-CAS-first, one atomic on the payload
+  followed by one publish-write to the ctrl byte. The default.
+- **Protocol A insert** — ctrl-byte-CAS-first with a `RESERVED ->
+  FULL` handshake. No slot CAS; concurrent finders see "in flight"
+  via the `RESERVED` tag.
+
+The bench binary in this crate measures all four GPU configurations
+against single-threaded `hashbrown::HashMap` insert and rayon-parallel
+`hashbrown` find at three load factors.
 
 ## Build and Run
 
@@ -104,9 +118,9 @@ or `DELETED (0x80)`.
 
 ## Insert Protocols — B (Payload-First) and A (Ctrl-First Handshake)
 
-Two insert protocols ship side by side so the bench harness in cut 2.3
-can measure them head-to-head. Same probe shape, same `PROBE_TILE`,
-same find/delete kernels — they differ only in *how* a thread takes
+Two insert protocols ship side by side so the bench harness can
+measure them head-to-head. Same probe shape, same `PROBE_TILE`, same
+find/delete kernels — they differ only in *how* a thread takes
 ownership of an empty slot.
 
 ### Protocol B — payload-first
@@ -238,10 +252,10 @@ the byte's current value to `DELETED`. The `(key, value)` payload is
 left as-is — readers only ever load slots whose tag is `FULL(h2)`, so a
 stale slot with a `DELETED` tag is unreachable.
 
-v2 cut 1 deliberately does **not** reclaim deleted slots on insert. A
+v2 deliberately does **not** reclaim deleted slots on insert. A
 delete-then-reinsert sequence still works (the new entry lands at a
 fresh slot, find walks past the tombstone), at the cost of effective
-capacity erosion under churn. Reclaim arrives with the rehash path.
+capacity erosion under churn. Reclaim arrives with v3's rehash path.
 
 ## Probe-Step Width
 
@@ -277,7 +291,7 @@ owns one tag byte at `(probe_base + lane)`. Per probe step:
 
 The single-thread `find_kernel` stays in the binary as the comparison
 baseline. Both produce identical results on every input (verified by
-Test 8); the bench harness in cut 2 measures the throughput crossover.
+Test 8); the bench binary measures the throughput crossover.
 
 ## Correctness Tests (twelve)
 
@@ -356,11 +370,28 @@ If you're comparing to a *concurrent* CPU hashmap (`DashMap`,
 the shape of the table — GPU inserts are 1–2 orders of magnitude
 faster, find ratios are tighter on misses than hits — stays the same.
 
-## Next Steps
+## Version Progression
 
-| Cut | What lands                                                                                   |
-|:----|:---------------------------------------------------------------------------------------------|
-| 2.1 | done — single-thread + warp-coop find on a unified `PROBE_TILE` triangular probe             |
-| 2.2 | done — Protocol A insert + try_insert (RESERVED-tag handshake), Tests 10–12                  |
-| 2.3 | done — bench binary: insert (B vs A) × find (single vs warp) × 50 / 75 / 90 % load           |
-| 3   | Cooperative-groups in cuda-oxide; then 16-lane subwarp find, rehash, DELETED reclaim, resize |
+| Version | Headline                                            |
+|:--------|:----------------------------------------------------|
+| v1      | Open-addressed `(key, value)` array, linear probe   |
+| **v2**  | SwissTable port (this crate)                        |
+| v3      | Cooperative-groups, rehash, resize *(planned)*      |
+
+**v2 ships** all of the following in one crate:
+
+- Split `ctrl` / `slots` arrays with hashbrown's h1/h2 hash split.
+- Triangular probing on `PROBE_TILE = 32` tag bytes per step.
+- Tombstone delete (`FULL(h2) -> DELETED` via 32-bit ctrl-word CAS).
+- Two insert protocols — Protocol B (slot-CAS-first) and Protocol A
+  (ctrl-byte `RESERVED -> FULL` handshake).
+- Two find kernels — single-thread per key and warp-cooperative
+  (32 lanes per key, `ballot` + `shuffle`).
+- A perf bench binary measuring all four GPU configurations against
+  CPU `hashbrown::HashMap`.
+
+**v3 will add** (blocked on cooperative-groups primitives in cuda-oxide):
+
+- 16-lane sub-warp find tiles via `ballot_sync` / `shuffle_sync`.
+- Rehash and DELETED-slot reclaim on insert.
+- Dynamic resize.

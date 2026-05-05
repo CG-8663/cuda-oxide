@@ -18,8 +18,8 @@
 //!   - Warp-cooperative find (`find_kernel_warp`) — one warp per key,
 //!     32 tag bytes inspected in parallel via `warp::ballot`.
 //!
-//! Two insert protocols ship side by side so the bench harness in
-//! cut 2.3 can measure them head-to-head:
+//! Two insert protocols ship side by side so the bench binary can
+//! measure them head-to-head:
 //!
 //!   - **Protocol B (payload-first)** — one `DeviceAtomicU64::
 //!     compare_exchange` on the slot followed by one
@@ -96,7 +96,7 @@ pub const PROBE_TILE: usize = 32;
 pub const EMPTY_TAG: u8 = 0xFF;
 
 /// Tag byte = "this slot was once occupied; do not stop probing here, but
-/// also do not treat it as live". Insert in v2 cut 1 does **not** reclaim
+/// also do not treat it as live". Insert in v2 does **not** reclaim
 /// these (no `DELETED -> FULL` CAS path); they linger until v3's rehash.
 pub const DELETED_TAG: u8 = 0x80;
 

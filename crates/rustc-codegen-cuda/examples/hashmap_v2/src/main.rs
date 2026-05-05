@@ -227,7 +227,7 @@ fn main() {
 
     // -------------------------------------------------------------------------
     // Test 7: delete-then-reinsert — re-inserted key sees new value.
-    //         (v2 cut 1 does not reclaim DELETED slots, so the new entry
+    //         (v2 does not reclaim DELETED slots, so the new entry
     //          lands at a fresh slot; find still returns the new value
     //          because it walks past the tombstone.)
     // -------------------------------------------------------------------------
@@ -376,7 +376,9 @@ fn main() {
                 absent.push(k);
             }
         }
-        let abs_found = map.find_bulk(&absent, &module, &stream).expect("find absent");
+        let abs_found = map
+            .find_bulk(&absent, &module, &stream)
+            .expect("find absent");
         let bad_abs: usize = abs_found.iter().filter(|&&v| v != MISS).count();
 
         if bad == 0 && bad_abs == 0 {
@@ -441,9 +443,7 @@ fn main() {
                 100.0 * m_dense as f64 / map_a.capacity() as f64
             );
         } else {
-            println!(
-                "  FAIL: bad_b={bad_b} bad_a_single={bad_a_single} bad_a_warp={bad_a_warp}"
-            );
+            println!("  FAIL: bad_b={bad_b} bad_a_single={bad_a_single} bad_a_warp={bad_a_warp}");
             std::process::exit(1);
         }
     }

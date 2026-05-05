@@ -260,7 +260,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("GPU Hashmap v2 — Performance vs CPU hashbrown");
     println!("============================================================");
     println!("Bench config:");
-    println!("  capacity:    {CAPACITY} slots (= 1 << {})", CAPACITY.trailing_zeros());
+    println!(
+        "  capacity:    {CAPACITY} slots (= 1 << {})",
+        CAPACITY.trailing_zeros()
+    );
     println!("  warmup:      {WARMUP} iterations");
     println!("  measured:    {ITERS} iterations");
     println!("  GPU timing:  CUDA events, kernel-only (no H2D/D2H)");
@@ -310,13 +313,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // ---- GPU INSERT — Protocol B -----------------------------------
         let map = GpuSwissMap::new(CAPACITY, &stream)?;
         let cfg = LaunchConfig::for_num_elems(n_keys as u32);
-        row_b_insert[col_idx] = bench_gpu_insert(
-            &map,
-            &keys_dev,
-            &values_dev,
-            n_keys,
-            &stream,
-            |m, k, v| {
+        row_b_insert[col_idx] =
+            bench_gpu_insert(&map, &keys_dev, &values_dev, n_keys, &stream, |m, k, v| {
                 cuda_launch! {
                     kernel: insert_kernel,
                     stream: stream,
@@ -325,17 +323,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     args: [slice(m.ctrl), slice(m.slots), slice(*k), slice(*v)]
                 }?;
                 Ok(())
-            },
-        )?;
+            })?;
 
         // ---- GPU INSERT — Protocol A -----------------------------------
-        row_a_insert[col_idx] = bench_gpu_insert(
-            &map,
-            &keys_dev,
-            &values_dev,
-            n_keys,
-            &stream,
-            |m, k, v| {
+        row_a_insert[col_idx] =
+            bench_gpu_insert(&map, &keys_dev, &values_dev, n_keys, &stream, |m, k, v| {
                 cuda_launch! {
                     kernel: insert_kernel_proto_a,
                     stream: stream,
@@ -344,8 +336,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     args: [slice(m.ctrl), slice(m.slots), slice(*k), slice(*v)]
                 }?;
                 Ok(())
-            },
-        )?;
+            })?;
 
         // ---- Build a final B-protocol map for the find benches ----------
         unsafe { reset_table_async(&map, &stream)? };
@@ -361,13 +352,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let cfg_warp = LaunchConfig::for_num_elems((n_keys * PROBE_TILE) as u32);
 
         // ---- GPU LOOKUP (hits) — single-thread --------------------------
-        row_single_lookup[col_idx] = bench_gpu_find(
-            &map,
-            &keys_dev,
-            &mut out_dev,
-            n_keys,
-            &stream,
-            |m, k, o| {
+        row_single_lookup[col_idx] =
+            bench_gpu_find(&map, &keys_dev, &mut out_dev, n_keys, &stream, |m, k, o| {
                 cuda_launch! {
                     kernel: find_kernel,
                     stream: stream,
@@ -376,17 +362,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     args: [slice(m.ctrl), slice(m.slots), slice(*k), slice_mut(*o)]
                 }?;
                 Ok(())
-            },
-        )?;
+            })?;
 
         // ---- GPU LOOKUP (hits) — warp-cooperative -----------------------
-        row_warp_lookup[col_idx] = bench_gpu_find(
-            &map,
-            &keys_dev,
-            &mut out_dev,
-            n_keys,
-            &stream,
-            |m, k, o| {
+        row_warp_lookup[col_idx] =
+            bench_gpu_find(&map, &keys_dev, &mut out_dev, n_keys, &stream, |m, k, o| {
                 cuda_launch! {
                     kernel: find_kernel_warp,
                     stream: stream,
@@ -395,8 +375,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     args: [slice(m.ctrl), slice(m.slots), slice(*k), slice_mut(*o)]
                 }?;
                 Ok(())
-            },
-        )?;
+            })?;
 
         // ---- GPU LOOKUP_FAIL (misses) — single-thread -------------------
         row_single_lookup_fail[col_idx] = bench_gpu_find(
@@ -465,8 +444,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     print_row("GPU single-thread        ", &row_single_lookup);
     print_row("GPU warp-cooperative     ", &row_warp_lookup);
     print_row("CPU hashbrown (rayon)    ", &row_cpu_lookup);
-    print_ratios("GPU-single / CPU         ", &row_single_lookup, &row_cpu_lookup);
-    print_ratios("GPU-warp   / CPU         ", &row_warp_lookup, &row_cpu_lookup);
+    print_ratios(
+        "GPU-single / CPU         ",
+        &row_single_lookup,
+        &row_cpu_lookup,
+    );
+    print_ratios(
+        "GPU-warp   / CPU         ",
+        &row_warp_lookup,
+        &row_cpu_lookup,
+    );
 
     print_section_header("Find — lookup_fail (every query misses)");
     print_row("GPU single-thread        ", &row_single_lookup_fail);
@@ -496,10 +483,7 @@ fn print_section_header(title: &str) {
 }
 
 fn print_row(label: &str, row: &[f64; 3]) {
-    println!(
-        "{label}{:>9.1} {:>9.1} {:>9.1}",
-        row[0], row[1], row[2]
-    );
+    println!("{label}{:>9.1} {:>9.1} {:>9.1}", row[0], row[1], row[2]);
 }
 
 fn print_ratios(label: &str, gpu: &[f64; 3], cpu: &[f64; 3]) {
