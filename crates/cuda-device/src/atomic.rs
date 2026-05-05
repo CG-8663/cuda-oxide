@@ -125,6 +125,7 @@ pub enum AtomicOrdering {
 ///
 /// Generated methods:
 /// - `new(val)` — constructor
+/// - `from_ptr(ptr)` — non-owning view over existing `*mut T` memory
 /// - `load`, `store` — atomic load/store
 /// - `fetch_add`, `fetch_sub` — arithmetic RMW
 /// - `fetch_and`, `fetch_or`, `fetch_xor` — bitwise RMW
@@ -155,6 +156,35 @@ macro_rules! define_integer_atomic {
             /// Create a new atomic with the given initial value.
             pub const fn new(val: $ty) -> Self {
                 $Name { inner: UnsafeCell::new(val) }
+            }
+
+            /// Reinterpret a raw pointer as a reference to this atomic.
+            ///
+            /// This is the non-owning view pattern: hand it a pointer to an
+            /// existing plain `T` and use atomic semantics over that location.
+            /// Mirrors `core::sync::atomic::AtomicU32::from_ptr` in shape and
+            /// is the closest cuda-oxide equivalent of C++'s
+            /// `cuda::atomic_ref<T, Scope>` constructor.
+            ///
+            /// # Safety
+            ///
+            /// * `ptr` must be aligned to `align_of::<Self>()` (which equals
+            ///   `align_of::<T>()` for this `#[repr(transparent)]` type).
+            /// * The memory at `ptr` must be valid for reads and writes for
+            ///   the entire lifetime `'a`.
+            /// * No non-atomic accesses to `*ptr` may occur during `'a`.
+            ///   All accesses through the returned reference are atomic; mixing
+            ///   atomic and non-atomic access to the same location is UB.
+            /// * For block-scoped types, only threads in the same thread block
+            ///   may access this memory.
+            /// * For system-scoped types, the memory must be reachable by both
+            ///   the GPU and the CPU (unified memory).
+            #[inline(always)]
+            pub const unsafe fn from_ptr<'a>(ptr: *mut $ty) -> &'a Self {
+                // SAFETY: `Self` is `#[repr(transparent)]` over `UnsafeCell<$ty>`,
+                // which is layout-compatible with `$ty`. The caller upholds all
+                // alignment, validity, and aliasing invariants.
+                unsafe { &*(ptr as *const Self) }
             }
 
             // ── Load / Store ───────────────────────────────────────────
@@ -292,6 +322,7 @@ macro_rules! define_integer_atomic {
 ///
 /// Generated methods:
 /// - `new(val)` — constructor
+/// - `from_ptr(ptr)` — non-owning view over existing `*mut T` memory
 /// - `load`, `store` — atomic load/store
 /// - `fetch_add` — atomic add (hardware `atom.add.f32/f64`, LLVM `atomicrmw fadd`)
 /// - `swap` — atomic exchange (`atomicrmw xchg`)
@@ -319,6 +350,27 @@ macro_rules! define_float_atomic {
             /// Create a new atomic with the given initial value.
             pub const fn new(val: $ty) -> Self {
                 $Name { inner: UnsafeCell::new(val) }
+            }
+
+            /// Reinterpret a raw pointer as a reference to this atomic.
+            ///
+            /// See the matching method on the integer atomic types for the
+            /// full safety contract; the rules are identical for floats.
+            ///
+            /// # Safety
+            ///
+            /// * `ptr` must be aligned to `align_of::<Self>()`.
+            /// * The memory at `ptr` must be valid for reads and writes for
+            ///   the entire lifetime `'a`.
+            /// * No non-atomic accesses to `*ptr` may occur during `'a`.
+            /// * Block-scoped: only same-block threads may access.
+            ///   System-scoped: memory must be reachable by GPU and CPU.
+            #[inline(always)]
+            pub const unsafe fn from_ptr<'a>(ptr: *mut $ty) -> &'a Self {
+                // SAFETY: `Self` is `#[repr(transparent)]` over `UnsafeCell<$ty>`,
+                // which is layout-compatible with `$ty`. The caller upholds all
+                // alignment, validity, and aliasing invariants.
+                unsafe { &*(ptr as *const Self) }
             }
 
             // ── Load / Store ───────────────────────────────────────────
