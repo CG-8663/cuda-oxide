@@ -274,6 +274,10 @@ cargo oxide run gemm_sol
 
 To build and serve the book locally, see [cuda-oxide-book/README.md](./cuda-oxide-book/README.md).
 
+## Ecosystem
+
+cuda-oxide is one of several Rust + GPU efforts under active development. Projects in this space address different parts of the problem — Vulkan/SPIR-V for graphics, implicit offload via LLVM, third-party CUDA backends, safe driver bindings — and we've been working with maintainers across the broader Rust GPU community on how to move GPU computing in Rust forward together. For where cuda-oxide fits relative to other projects, see the [Ecosystem appendix](https://nvlabs.github.io/cuda-oxide/appendix/ecosystem.html) of the book.
+
 ## License
 
 The `cuda-bindings` crate is licensed under the NVIDIA Software License: [LICENSE-NVIDIA](LICENSE-NVIDIA). All other crates are licensed under the Apache License, Version 2.0: [LICENSE-APACHE](LICENSE-APACHE).

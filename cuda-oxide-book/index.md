@@ -171,5 +171,6 @@ appendix/building-from-source
 appendix/api-quick-reference
 appendix/supported-features
 appendix/cuda-cpp-comparison
+appendix/ecosystem
 appendix/glossary
 ```
