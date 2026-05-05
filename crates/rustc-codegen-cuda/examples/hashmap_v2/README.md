@@ -86,11 +86,16 @@ of the low-bit position used for probing — same split hashbrown uses.
 The 7-bit format guarantees `h2` can never collide with `EMPTY (0xFF)`
 or `DELETED (0x80)`.
 
-## Insert Protocol — Protocol B (Payload-First)
+## Insert Protocols — B (Payload-First) and A (Ctrl-First Handshake)
 
-v2 cut 1 ships exactly one of the two protocols described in the design
-docs: **Protocol B**, the cuCollections-style payload-first insert. Two
-atomics per insert, no RESERVED state, no reader spin.
+Two insert protocols ship side by side so the bench harness in cut 2.3
+can measure them head-to-head. Same probe shape, same `PROBE_TILE`,
+same find/delete kernels — they differ only in *how* a thread takes
+ownership of an empty slot.
+
+### Protocol B — payload-first
+
+cuCollections-style. Two atomics per insert, no RESERVED state.
 
 ```text
 1. group_idx = (h1 / GROUP) & ((N / GROUP) - 1)
@@ -128,6 +133,66 @@ may concurrently mutate **other** bytes in the same ctrl word for their
 own inserts. Byte `i` itself can never change under us — no other
 thread can claim a slot we already own — so the loop terminates as soon
 as we observe a stable view of the other three bytes.
+
+### Protocol A — ctrl-first (RESERVED handshake)
+
+A new tag value `RESERVED (0xFE)` advertises "this slot's ctrl byte is
+claimed but the payload isn't published yet". The handshake is one
+ctrl-byte CAS to claim, one plain release store of the slot, one
+ctrl-byte CAS to publish — no CAS on the slot itself.
+
+```text
+1. Phase 1 -- already-present check (same as Protocol B).
+
+2. Phase 2 -- handshake claim:
+   for each EMPTY byte i in the tile (per-word retry loop on collision):
+     match ctrl_word.cas(byte i: EMPTY -> RESERVED):
+       Ok      => slots[base + i] = pack(k, v)            // plain release store
+                  ctrl_word.cas(byte i: RESERVED -> FULL(h2))   // publish
+                  return
+       Err(_)  => re-read this word, re-scan; continue
+
+3. No match, no claimable EMPTY: triangular advance, loop.
+```
+
+Tag-value space:
+
+```text
+   0xFF  EMPTY
+   0xFE  RESERVED      (Protocol A only; top bit set, never == h2)
+   0x80  DELETED
+0x00..0x7F  FULL(h2)
+```
+
+`RESERVED` is wedged between `EMPTY` and `DELETED` in numeric value but
+it is functionally distinct: existing find / delete kernels treat it as
+"neither h2 nor EMPTY" and advance, which is exactly the right behavior
+— don't peek the slot (the payload isn't published), don't terminate
+the probe (the byte isn't truly empty).
+
+#### Why no slot CAS
+
+Phase 2's ctrl-byte CAS is the serialization point. Once a thread wins
+`EMPTY -> RESERVED` at byte `i`, no other inserter can reach that slot
+(every other inserter sees `RESERVED` and treats it as "not for me").
+The slot write is therefore exclusive — a plain release store suffices.
+
+#### Cost — the same-launch duplicate caveat
+
+In a single kernel launch, two threads inserting the same key may each
+win the handshake at *different* bytes (T1 reads word, sees EMPTY at
+j1, CAS-claims j1; T2 reads the same word concurrently, sees EMPTY at
+j2, CAS-claims j2; both succeed). Both publish slots holding K. Find
+returns whichever of the two slots it encounters first in the probe
+order — internally consistent, but K appears twice in the table.
+
+Across kernel launches the stream-sync release-acquire boundary
+publishes the first launch's `FULL(h2)` before the second launch's
+Phase 1 reads, so cross-launch dedup is correct (Test 12 verifies
+this for `try_insert`).
+
+If strict single-launch dedup is required, use Protocol B — the slot
+CAS arbitrates same-key races deterministically.
 
 ## Find
 
@@ -198,27 +263,27 @@ The single-thread `find_kernel` stays in the binary as the comparison
 baseline. Both produce identical results on every input (verified by
 Test 8); the bench harness in cut 2 measures the throughput crossover.
 
-## Correctness Tests (nine)
+## Correctness Tests (twelve)
 
-| # | Name                           | What it verifies                                                  |
-|:--|:-------------------------------|:------------------------------------------------------------------|
-| 1 | `insert_bulk` roundtrip        | every inserted key is findable with the inserted value            |
-| 2 | miss on absent keys            | disjoint key set must miss                                        |
-| 3 | last-writer-wins on re-insert  | second `insert_bulk` overwrites every value                       |
-| 4 | `try_insert_bulk` first-writer | pass 2 reports all-present, table preserves pass-1 values         |
-| 5 | load-factor stress (~75%)      | 12288 keys at 75% load all round-trip                             |
-| 6 | delete-then-find               | survivors hit with original values, deleted keys all return MISS  |
-| 7 | delete-then-reinsert           | re-inserted keys observable with new values, even past tombstones |
-| 8 | warp-coop find parity          | warp-coop and single-thread find agree on 16384 mixed queries     |
-| 9 | warp-coop find at ~75% load    | 12288 keys round-trip via the warp-coop kernel under load         |
+| #  | Name                                 | What it verifies                                                  |
+|:---|:-------------------------------------|:------------------------------------------------------------------|
+|  1 | `insert_bulk` roundtrip              | every inserted key is findable with the inserted value            |
+|  2 | miss on absent keys                  | disjoint key set must miss                                        |
+|  3 | last-writer-wins on re-insert        | second `insert_bulk` overwrites every value                       |
+|  4 | `try_insert_bulk` first-writer       | pass 2 reports all-present, table preserves pass-1 values         |
+|  5 | load-factor stress (~75%)            | 12288 keys at 75% load all round-trip                             |
+|  6 | delete-then-find                     | survivors hit with original values, deleted keys all return MISS  |
+|  7 | delete-then-reinsert                 | re-inserted keys observable with new values, even past tombstones |
+|  8 | warp-coop find parity                | warp-coop and single-thread find agree on 16384 mixed queries     |
+|  9 | warp-coop find at ~75% load          | 12288 keys round-trip via the warp-coop kernel under load         |
+| 10 | Protocol A insert round-trip         | A inserts round-trip and disjoint queries miss                    |
+| 11 | Protocol A vs B parity at 75%        | both protocols round-trip at 75% load via single + warp find      |
+| 12 | Protocol A try_insert (cross-launch) | pass 2 reports all-present, table preserves pass-1 values         |
 
 Default capacity is `1 << 14` slots.
 
 ## Intentionally Out of Scope (still)
 
-- **Protocol A (RESERVED-tag handshake)** — the hashbrown-faithful
-  three-CAS protocol lands alongside the bench harness so we can
-  measure both protocols head-to-head.
 - **16-lane sub-warp tiles** — would need `ballot_sync` /
   `shuffle_sync` with sub-warp masks, which arrives with the
   cooperative-groups design pass.
@@ -229,12 +294,14 @@ Default capacity is `1 << 14` slots.
   (grid-wide barrier).
 - **Generic `<K, V>`** — deferred for API design reasons.
 - **Float keys** — PTX has no `compare_exchange` for floats.
+- **Single-launch dedup under Protocol A** — best-effort by design;
+  use Protocol B if strict single-launch single-occurrence is required.
 
 ## Next Steps
 
-| Cut   | What lands                                                                                   |
-|:------|:---------------------------------------------------------------------------------------------|
-|   2.1 | done — single-thread + warp-coop find on a unified `PROBE_TILE` triangular probe             |
-|   2.2 | Protocol A insert (RESERVED-tag handshake) as a parallel kernel; correctness tests           |
-|   2.3 | `--bench` harness: insert (B vs A) × find (single vs warp) at 50 / 75 / 90% load             |
-|   3   | Cooperative-groups in cuda-oxide; then 16-lane subwarp find, rehash, DELETED reclaim, resize |
+| Cut | What lands                                                                                   |
+|:----|:---------------------------------------------------------------------------------------------|
+| 2.1 | done — single-thread + warp-coop find on a unified `PROBE_TILE` triangular probe             |
+| 2.2 | done — Protocol A insert + try_insert (RESERVED-tag handshake), Tests 10–12                  |
+| 2.3 | `--bench` harness: insert (B vs A) × find (single vs warp) at 50 / 75 / 90% load             |
+| 3   | Cooperative-groups in cuda-oxide; then 16-lane subwarp find, rehash, DELETED reclaim, resize |

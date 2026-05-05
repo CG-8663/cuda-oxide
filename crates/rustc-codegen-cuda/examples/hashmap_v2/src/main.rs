@@ -18,13 +18,34 @@
 //!   - Warp-cooperative find (`find_kernel_warp`) — one warp per key,
 //!     32 tag bytes inspected in parallel via `warp::ballot`.
 //!
-//! Insert protocol shipped: **Protocol B (payload-first)** — one
-//! `DeviceAtomicU64::compare_exchange` on the slot followed by one
-//! `DeviceAtomicU32::compare_exchange` on the ctrl word. The slot CAS
-//! itself acts as the serialization point: concurrent inserts of the
-//! same key always see each other via `Err(actual)` and degenerate into
-//! the duplicate-handling path. Protocol A (RESERVED-tag handshake)
-//! lands in cut 2 alongside the bench harness.
+//! Two insert protocols ship side by side so the bench harness in
+//! cut 2.3 can measure them head-to-head:
+//!
+//!   - **Protocol B (payload-first)** — one `DeviceAtomicU64::
+//!     compare_exchange` on the slot followed by one
+//!     `DeviceAtomicU32::compare_exchange` on the ctrl word. The slot
+//!     CAS is the serialization point. Concurrent inserts of the same
+//!     key in the same launch always see each other via `Err(actual)`
+//!     and degenerate into the duplicate-handling path.
+//!   - **Protocol A (ctrl-first, RESERVED handshake)** — one ctrl-byte
+//!     CAS `EMPTY -> RESERVED` claims the slot exclusively, a plain
+//!     release store writes the slot payload, then a second ctrl-byte
+//!     CAS `RESERVED -> FULL(h2)` publishes the entry. No CAS on the
+//!     slot itself. Across kernel launches (stream sync between insert
+//!     and any further insert/find), Protocol A is observably
+//!     equivalent to Protocol B; within a single launch, two threads
+//!     racing to insert the same key may each claim a different
+//!     RESERVED byte and end up publishing two slots for that key.
+//!     Subsequent finds remain internally consistent (same probe
+//!     order, same hit). The duplicate is the documented cost of
+//!     skipping the slot CAS.
+//!
+//! Find observers (single-thread and warp-cooperative) treat the four
+//! tag values as: `FULL(h2)` -> peek the slot, `EMPTY` -> terminate
+//! probe with MISS, `DELETED` and `RESERVED` -> advance within tile.
+//! `RESERVED` does NOT terminate (the slot may be in flight) and does
+//! NOT match h2 (its top bit is 1, h2's is 0), so the existing find
+//! kernels handle it correctly without special-casing.
 //!
 //! Build and run with:
 //!   cargo oxide run hashmap_v2
@@ -70,6 +91,17 @@ const EMPTY_TAG: u8 = 0xFF;
 /// also do not treat it as live". Insert in v2 cut 1 does **not** reclaim
 /// these (no `DELETED -> FULL` CAS path); they linger until v3's rehash.
 const DELETED_TAG: u8 = 0x80;
+
+/// Tag byte = "an insert has claimed this slot's ctrl byte but has not
+/// yet published a key-value payload". Used only by Protocol A's
+/// `EMPTY -> RESERVED -> FULL(h2)` handshake.
+///
+/// Top bit is set (0xFE > 0x7F) so it can never collide with a `FULL(h2)`
+/// fingerprint. It is also distinct from `EMPTY_TAG (0xFF)` and
+/// `DELETED_TAG (0x80)`, so existing find/delete logic (look for h2 to
+/// peek, look for EMPTY to terminate) skips RESERVED automatically as
+/// "neither — advance".
+const RESERVED_TAG: u8 = 0xFE;
 
 /// Tag byte for an occupied slot is `FULL(h2)` — the top bit is clear and
 /// the low seven bits are `h2`, the high-byte fingerprint of the key's
@@ -388,6 +420,249 @@ pub fn try_insert_kernel(
     }
 }
 
+/// `insert_kernel_proto_a` — last-writer-wins, Protocol A
+/// (ctrl-first / RESERVED handshake), one thread per input key.
+///
+/// Probe shape is identical to Protocol B (`PROBE_TILE = 32`,
+/// triangular advance). The protocol differs only in how a slot is
+/// claimed:
+///   1. **Phase 1** — walk the tile looking for `FULL(h2)` whose slot
+///      already holds our key; on match, take the same overwrite path
+///      as Protocol B (`insert_overwrite`).
+///   2. **Phase 2 — handshake claim**. For each `EMPTY_TAG` byte in
+///      the tile, attempt a ctrl-word CAS `EMPTY_TAG -> RESERVED_TAG`
+///      at byte `j`. On success: the slot is exclusively ours.
+///   3. **Plain release store** of `pack(k, v)` into the slot — no
+///      slot CAS needed; observers can't peek a RESERVED slot, and no
+///      other insert can claim this byte.
+///   4. **Publish** with a ctrl-word CAS retry loop
+///      `RESERVED_TAG -> FULL(h2)` at byte `j`. Same `publish_full_tag`
+///      helper as Protocol B; byte `j` is owned by us so it cannot
+///      change under the loop.
+///
+/// On a CAS collision in step 2 (someone mutated a different byte of
+/// the same word), re-read the word and re-scan it before moving on.
+///
+/// Duplicate-key races within a single launch: two threads inserting
+/// the same key in the same launch may each win the handshake at
+/// different bytes and publish two slots holding that key. The
+/// resulting state is internally consistent (every find walks the
+/// probe in the same order and returns the first published slot it
+/// hits), but it is NOT single-occurrence. Across kernel launches
+/// the stream-sync release-acquire boundary publishes earlier inserts
+/// before Phase 1 of a later launch reads, so cross-launch dedup is
+/// correct.
+#[kernel]
+pub fn insert_kernel_proto_a(ctrl: &[u32], slots: &[u64], keys: &[u32], values: &[u32]) {
+    let tid = thread::index_1d().get();
+    if tid >= keys.len() {
+        return;
+    }
+
+    let key = keys[tid];
+    let value = values[tid];
+    let hash = hash_u32(key);
+    let h2 = h2_from_hash(hash);
+    let mask = slots.len() - 1;
+    let mut probe_base = (hash as usize) & mask & !(PROBE_TILE - 1);
+    let mut stride = 0usize;
+
+    loop {
+        // Phase 1: scan the tile for an already-published FULL(h2)
+        // entry whose slot key matches ours. If found, take the
+        // overwrite path. RESERVED bytes naturally fall through here
+        // (top bit set, won't equal h2).
+        let mut g = 0usize;
+        while g < PROBE_TILE {
+            let ctrl_word_idx = (probe_base + g) / GROUP;
+            let ctrl_atomic =
+                unsafe { DeviceAtomicU32::from_ptr(ctrl.as_ptr().add(ctrl_word_idx).cast_mut()) };
+            let word = ctrl_atomic.load(AtomicOrdering::Acquire);
+            let mut j = 0;
+            while j < GROUP {
+                if get_tag(word, j) == h2 {
+                    let slot_idx = probe_base + g + j;
+                    let slot_atomic = unsafe {
+                        DeviceAtomicU64::from_ptr(slots.as_ptr().add(slot_idx).cast_mut())
+                    };
+                    let observed = slot_atomic.load(AtomicOrdering::Acquire);
+                    if unpack_key(observed) == key {
+                        insert_overwrite(slot_atomic, observed, key, value);
+                        return;
+                    }
+                }
+                j += 1;
+            }
+            g += GROUP;
+        }
+
+        // Phase 2: walk the tile word by word; for each word, try to
+        // claim the first EMPTY byte via EMPTY_TAG -> RESERVED_TAG CAS.
+        // CAS collisions on a different byte of the same word force a
+        // re-read of that word.
+        let mut g = 0usize;
+        while g < PROBE_TILE {
+            let ctrl_word_idx = (probe_base + g) / GROUP;
+            let ctrl_atomic =
+                unsafe { DeviceAtomicU32::from_ptr(ctrl.as_ptr().add(ctrl_word_idx).cast_mut()) };
+            'word: loop {
+                let word = ctrl_atomic.load(AtomicOrdering::Acquire);
+                let mut j = 0;
+                while j < GROUP {
+                    if get_tag(word, j) == EMPTY_TAG {
+                        let claimed = set_tag(word, j, RESERVED_TAG);
+                        match ctrl_atomic.compare_exchange(
+                            word,
+                            claimed,
+                            AtomicOrdering::AcqRel,
+                            AtomicOrdering::Relaxed,
+                        ) {
+                            Ok(_) => {
+                                // We exclusively own slot (probe_base + g + j).
+                                // Plain release store: no observer can load
+                                // the slot until we publish FULL(h2), and no
+                                // concurrent inserter can race the byte.
+                                let slot_idx = probe_base + g + j;
+                                let slot_atomic = unsafe {
+                                    DeviceAtomicU64::from_ptr(
+                                        slots.as_ptr().add(slot_idx).cast_mut(),
+                                    )
+                                };
+                                slot_atomic
+                                    .store(pack(key, value), AtomicOrdering::Release);
+                                publish_full_tag(ctrl_atomic, claimed, j, h2);
+                                return;
+                            }
+                            Err(_) => {
+                                continue 'word;
+                            }
+                        }
+                    }
+                    j += 1;
+                }
+                // Word fully scanned, no EMPTY remains. Move on.
+                break 'word;
+            }
+            g += GROUP;
+        }
+
+        stride += 1;
+        probe_base = (probe_base + stride * PROBE_TILE) & mask;
+    }
+}
+
+/// `try_insert_kernel_proto_a` — first-writer-wins, Protocol A.
+///
+/// Same probe / claim shape as `insert_kernel_proto_a`. Differences:
+///   - On Phase 1 hit (key already published), writes
+///     `FLAG_PRESENT (1)` and returns without touching the slot.
+///   - On successful handshake claim and publish, writes
+///     `FLAG_FRESH_OR_OK (0)`.
+///
+/// Same single-launch duplicate-key caveat as `insert_kernel_proto_a`:
+/// two threads racing on the same key in the same launch may each
+/// publish a slot. The first slot encountered in probe order then
+/// shadows the second; both threads will report `FRESH` (each thinks
+/// it claimed first). Use `insert_kernel` (Protocol B) when strict
+/// single-launch first-writer dedup is required.
+#[kernel]
+pub fn try_insert_kernel_proto_a(
+    ctrl: &[u32],
+    slots: &[u64],
+    keys: &[u32],
+    values: &[u32],
+    mut out: DisjointSlice<u32>,
+) {
+    let tid = thread::index_1d();
+    let i_thread = tid.get();
+    if i_thread >= keys.len() {
+        return;
+    }
+
+    let key = keys[i_thread];
+    let value = values[i_thread];
+    let hash = hash_u32(key);
+    let h2 = h2_from_hash(hash);
+    let mask = slots.len() - 1;
+    let mut probe_base = (hash as usize) & mask & !(PROBE_TILE - 1);
+    let mut stride = 0usize;
+
+    loop {
+        // Phase 1: published-FULL duplicate detection across the tile.
+        let mut g = 0usize;
+        while g < PROBE_TILE {
+            let ctrl_word_idx = (probe_base + g) / GROUP;
+            let ctrl_atomic =
+                unsafe { DeviceAtomicU32::from_ptr(ctrl.as_ptr().add(ctrl_word_idx).cast_mut()) };
+            let word = ctrl_atomic.load(AtomicOrdering::Acquire);
+            let mut j = 0;
+            while j < GROUP {
+                if get_tag(word, j) == h2 {
+                    let slot_idx = probe_base + g + j;
+                    let slot_atomic = unsafe {
+                        DeviceAtomicU64::from_ptr(slots.as_ptr().add(slot_idx).cast_mut())
+                    };
+                    let observed = slot_atomic.load(AtomicOrdering::Acquire);
+                    if unpack_key(observed) == key {
+                        if let Some(o) = out.get_mut(tid) {
+                            *o = FLAG_PRESENT;
+                        }
+                        return;
+                    }
+                }
+                j += 1;
+            }
+            g += GROUP;
+        }
+
+        // Phase 2: handshake claim with per-word retry.
+        let mut g = 0usize;
+        while g < PROBE_TILE {
+            let ctrl_word_idx = (probe_base + g) / GROUP;
+            let ctrl_atomic =
+                unsafe { DeviceAtomicU32::from_ptr(ctrl.as_ptr().add(ctrl_word_idx).cast_mut()) };
+            'word: loop {
+                let word = ctrl_atomic.load(AtomicOrdering::Acquire);
+                let mut j = 0;
+                while j < GROUP {
+                    if get_tag(word, j) == EMPTY_TAG {
+                        let claimed = set_tag(word, j, RESERVED_TAG);
+                        match ctrl_atomic.compare_exchange(
+                            word,
+                            claimed,
+                            AtomicOrdering::AcqRel,
+                            AtomicOrdering::Relaxed,
+                        ) {
+                            Ok(_) => {
+                                let slot_idx = probe_base + g + j;
+                                let slot_atomic = unsafe {
+                                    DeviceAtomicU64::from_ptr(
+                                        slots.as_ptr().add(slot_idx).cast_mut(),
+                                    )
+                                };
+                                slot_atomic
+                                    .store(pack(key, value), AtomicOrdering::Release);
+                                publish_full_tag(ctrl_atomic, claimed, j, h2);
+                                if let Some(o) = out.get_mut(tid) {
+                                    *o = FLAG_FRESH_OR_OK;
+                                }
+                                return;
+                            }
+                            Err(_) => continue 'word,
+                        }
+                    }
+                    j += 1;
+                }
+                break 'word;
+            }
+            g += GROUP;
+        }
+
+        stride += 1;
+        probe_base = (probe_base + stride * PROBE_TILE) & mask;
+    }
+}
+
 /// `find_kernel` — single-thread find, one thread per key.
 ///
 /// Walks the same triangular probe sequence as the insert kernels (same
@@ -690,11 +965,14 @@ fn insert_overwrite(slot_atomic: &DeviceAtomicU64, mut expected: u64, key: u32, 
     }
 }
 
-/// Publish a tag byte from `EMPTY_TAG` to `FULL(h2)` via a ctrl-word CAS
-/// retry loop. The slot at byte `i` is already ours (we won its slot CAS),
-/// so byte `i` can't change under us — the only reason this CAS fails is
-/// concurrent mutation of a different byte in the same word, in which case
-/// we re-read and rebuild the new word.
+/// Publish a tag byte to `FULL(h2)` via a ctrl-word CAS retry loop. The
+/// slot at byte `i` is already exclusively ours — either via a winning
+/// slot CAS (Protocol B, byte transitions `EMPTY -> FULL`) or via a
+/// winning ctrl-byte CAS to RESERVED (Protocol A, byte transitions
+/// `RESERVED -> FULL`). In both cases byte `i` cannot change under us,
+/// so the only reason this CAS fails is concurrent mutation of a
+/// *different* byte in the same word, in which case we re-read and
+/// rebuild the new word.
 #[inline(always)]
 fn publish_full_tag(ctrl_atomic: &DeviceAtomicU32, mut current_word: u32, i: usize, h2: u8) {
     loop {
@@ -842,6 +1120,78 @@ impl GpuSwissMap {
         let cfg = LaunchConfig::for_num_elems(keys.len() as u32);
         cuda_launch! {
             kernel: try_insert_kernel,
+            stream: stream,
+            module: module,
+            config: cfg,
+            args: [slice(self.ctrl), slice(self.slots), slice(keys_dev), slice(values_dev), slice_mut(out_dev)]
+        }?;
+
+        let raw = out_dev.to_host_vec(stream)?;
+        Ok(raw.into_iter().map(|x| x == FLAG_FRESH_OR_OK).collect())
+    }
+
+    /// Last-writer-wins bulk insert using **Protocol A** (ctrl-first
+    /// RESERVED handshake). Same return contract as `insert_bulk`.
+    /// See `insert_kernel_proto_a` for the duplicate-key caveat
+    /// (cross-launch dedup is correct; same-launch same-key races may
+    /// publish multiple slots).
+    fn insert_bulk_proto_a(
+        &self,
+        keys: &[u32],
+        values: &[u32],
+        module: &Arc<CudaModule>,
+        stream: &Arc<CudaStream>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(keys.len(), values.len());
+        if keys.is_empty() {
+            return Ok(());
+        }
+        debug_assert!(
+            keys.iter().all(|&k| k != FORBIDDEN_KEY),
+            "u32::MAX is reserved and may not be used as a key"
+        );
+
+        let keys_dev = DeviceBuffer::from_host(stream, keys)?;
+        let values_dev = DeviceBuffer::from_host(stream, values)?;
+
+        let cfg = LaunchConfig::for_num_elems(keys.len() as u32);
+        cuda_launch! {
+            kernel: insert_kernel_proto_a,
+            stream: stream,
+            module: module,
+            config: cfg,
+            args: [slice(self.ctrl), slice(self.slots), slice(keys_dev), slice(values_dev)]
+        }?;
+
+        Ok(())
+    }
+
+    /// First-writer-wins bulk insert using **Protocol A**. Same return
+    /// contract as `try_insert_bulk`. Same caveat as
+    /// `insert_bulk_proto_a` for same-launch same-key races.
+    fn try_insert_bulk_proto_a(
+        &self,
+        keys: &[u32],
+        values: &[u32],
+        module: &Arc<CudaModule>,
+        stream: &Arc<CudaStream>,
+    ) -> Result<Vec<bool>, Box<dyn std::error::Error>> {
+        assert_eq!(keys.len(), values.len());
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        debug_assert!(
+            keys.iter().all(|&k| k != FORBIDDEN_KEY),
+            "u32::MAX is reserved and may not be used as a key"
+        );
+
+        let keys_dev = DeviceBuffer::from_host(stream, keys)?;
+        let values_dev = DeviceBuffer::from_host(stream, values)?;
+        let mut out_dev = DeviceBuffer::<u32>::zeroed(stream, keys.len())?;
+
+        let cfg = LaunchConfig::for_num_elems(keys.len() as u32);
+        cuda_launch! {
+            kernel: try_insert_kernel_proto_a,
             stream: stream,
             module: module,
             config: cfg,
@@ -1305,5 +1655,146 @@ fn main() {
         }
     }
 
-    println!("\n=== SUCCESS: All 9 hashmap v2 tests passed! ===");
+    // -------------------------------------------------------------------------
+    // Test 10: Protocol A insert round-trip + miss on absent keys.
+    //
+    // Mirrors Tests 1+2 but uses `insert_bulk_proto_a`. Distinct keys
+    // only, so there's no same-launch duplicate race; correctness is
+    // identical to Protocol B.
+    // -------------------------------------------------------------------------
+    println!("\n--- Test 10: Protocol A insert round-trip ---");
+    {
+        let map = GpuSwissMap::new(CAPACITY, &stream).expect("alloc");
+        map.insert_bulk_proto_a(&keys_v0, &values_v0, &module, &stream)
+            .expect("proto-a insert");
+
+        let found = map.find_bulk(&keys_v0, &module, &stream).expect("find");
+        let mut bad = 0usize;
+        for i in 0..M {
+            if found[i] != values_v0[i] {
+                bad += 1;
+            }
+        }
+
+        let inserted: std::collections::HashSet<u32> = keys_v0.iter().copied().collect();
+        let mut absent = Vec::with_capacity(M);
+        let mut state: u32 = 0xCAFE_BABEu32;
+        while absent.len() < M {
+            let k = xorshift32(&mut state);
+            if k != FORBIDDEN_KEY && !inserted.contains(&k) {
+                absent.push(k);
+            }
+        }
+        let abs_found = map.find_bulk(&absent, &module, &stream).expect("find absent");
+        let bad_abs: usize = abs_found.iter().filter(|&&v| v != MISS).count();
+
+        if bad == 0 && bad_abs == 0 {
+            println!("  {M} / {M} keys round-tripped (Protocol A); {M} absent all miss");
+        } else {
+            println!("  FAIL: bad_hits={bad} bad_absent={bad_abs}");
+            std::process::exit(1);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 11: Protocol A vs Protocol B parity at ~75% load — same
+    //          insert inputs into two fresh maps using different
+    //          protocols, both must yield identical find results
+    //          (single-thread and warp-coop) on the inserted keys.
+    // -------------------------------------------------------------------------
+    println!("\n--- Test 11: Protocol A vs Protocol B parity at ~75% load ---");
+    {
+        let m_dense = (CAPACITY * 3) / 4;
+        let dense_keys = distinct_keys(m_dense, 0xBEEF_CAFE);
+        let dense_values: Vec<u32> = (0..m_dense as u32).collect();
+
+        let map_b = GpuSwissMap::new(CAPACITY, &stream).expect("alloc B");
+        map_b
+            .insert_bulk(&dense_keys, &dense_values, &module, &stream)
+            .expect("B insert");
+
+        let map_a = GpuSwissMap::new(CAPACITY, &stream).expect("alloc A");
+        map_a
+            .insert_bulk_proto_a(&dense_keys, &dense_values, &module, &stream)
+            .expect("A insert");
+
+        let b_single = map_b
+            .find_bulk(&dense_keys, &module, &stream)
+            .expect("B find single");
+        let a_single = map_a
+            .find_bulk(&dense_keys, &module, &stream)
+            .expect("A find single");
+        let a_warp = map_a
+            .find_bulk_warp(&dense_keys, &module, &stream)
+            .expect("A find warp");
+
+        let bad_b: usize = b_single
+            .iter()
+            .zip(&dense_values)
+            .filter(|(f, v)| *f != *v)
+            .count();
+        let bad_a_single: usize = a_single
+            .iter()
+            .zip(&dense_values)
+            .filter(|(f, v)| *f != *v)
+            .count();
+        let bad_a_warp: usize = a_warp
+            .iter()
+            .zip(&dense_values)
+            .filter(|(f, v)| *f != *v)
+            .count();
+
+        if bad_b == 0 && bad_a_single == 0 && bad_a_warp == 0 {
+            println!(
+                "  {m_dense} keys round-trip via B and A at load factor {:.1}% (single + warp)",
+                100.0 * m_dense as f64 / map_a.capacity() as f64
+            );
+        } else {
+            println!(
+                "  FAIL: bad_b={bad_b} bad_a_single={bad_a_single} bad_a_warp={bad_a_warp}"
+            );
+            std::process::exit(1);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 12: Protocol A try_insert first-writer-wins across launches.
+    //          Pass 1 inserts v0; pass 2 attempts to insert v1 for the
+    //          same keys — must report PRESENT for every key and leave
+    //          the table at v0.
+    //
+    //          Cross-launch dedup is the case Protocol A handles
+    //          identically to Protocol B (stream-sync release-acquire
+    //          publishes pass 1's FULL(h2) before pass 2's Phase 1).
+    // -------------------------------------------------------------------------
+    println!("\n--- Test 12: Protocol A try_insert first-writer-wins (cross-launch) ---");
+    {
+        let map = GpuSwissMap::new(CAPACITY, &stream).expect("alloc");
+        let first_flags = map
+            .try_insert_bulk_proto_a(&keys_v0, &values_v0, &module, &stream)
+            .expect("A try_insert pass 1");
+        let all_fresh = first_flags.iter().all(|&b| b);
+
+        let values_v1: Vec<u32> = values_v0.iter().map(|v| v ^ 0xA5A5_A5A5).collect();
+        let second_flags = map
+            .try_insert_bulk_proto_a(&keys_v0, &values_v1, &module, &stream)
+            .expect("A try_insert pass 2");
+        let none_fresh = second_flags.iter().all(|&b| !b);
+
+        let found = map.find_bulk(&keys_v0, &module, &stream).expect("find");
+        let bad: usize = found
+            .iter()
+            .zip(&values_v0)
+            .filter(|(f, v)| *f != *v)
+            .count();
+
+        if all_fresh && none_fresh && bad == 0 {
+            println!("  pass 1: all {M} keys fresh; pass 2: no keys fresh, table preserves v0");
+        } else {
+            println!("  FAIL: all_fresh={all_fresh} none_fresh={none_fresh} bad_values={bad}");
+            std::process::exit(1);
+        }
+    }
+
+    println!("\n=== SUCCESS: All 12 hashmap v2 tests passed! ===");
 }
