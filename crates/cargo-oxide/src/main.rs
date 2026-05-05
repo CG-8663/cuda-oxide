@@ -63,6 +63,11 @@ enum Commands {
         /// Comma-separated list of features to enable
         #[arg(long)]
         features: Option<String>,
+        /// Pick a specific binary in a multi-bin package (forwarded as
+        /// `cargo run --bin <name>`). Defaults to the package's
+        /// `default-run`.
+        #[arg(long)]
+        bin: Option<String>,
         /// Show verbose compilation output
         #[arg(short, long)]
         verbose: bool,
@@ -154,6 +159,7 @@ fn main() {
             emit_nvvm_ir,
             arch,
             features,
+            bin,
             verbose,
         } => {
             let ctx = commands::resolve_context();
@@ -167,6 +173,7 @@ fn main() {
                 emit_nvvm_ir,
                 arch.as_deref(),
                 features.as_deref(),
+                bin.as_deref(),
             );
         }
         Commands::Build {

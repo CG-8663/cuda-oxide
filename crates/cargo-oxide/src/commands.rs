@@ -87,6 +87,7 @@ pub fn resolve_context() -> Context {
 /// Cleans stale artifacts, sets `RUSTFLAGS` to point at the backend `.so`,
 /// and invokes `cargo run --release` from the example directory. Environment
 /// variables control output format (PTX / LTOIR / NVVM IR) and verbosity.
+#[allow(clippy::too_many_arguments)]
 pub fn codegen_run(
     ctx: &Context,
     example: &str,
@@ -95,6 +96,7 @@ pub fn codegen_run(
     emit_nvvm_ir: bool,
     arch: Option<&str>,
     features: Option<&str>,
+    bin: Option<&str>,
 ) {
     let example_dir = if ctx.is_workspace {
         resolve_example_dir(ctx, example)
@@ -131,6 +133,9 @@ pub fn codegen_run(
         .current_dir(&example_dir)
         .env("RUSTFLAGS", &rustflags);
 
+    if let Some(bin) = bin {
+        cmd.args(["--bin", bin]);
+    }
     if let Some(features) = features {
         cmd.args(["--features", features]);
     }
@@ -147,7 +152,11 @@ pub fn codegen_run(
     apply_output_mode(&mut cmd, dlto, emit_nvvm_ir, target_arch);
     apply_ld_library_path(&mut cmd);
 
-    println!("Building and running {}...", example);
+    if let Some(bin) = bin {
+        println!("Building and running {} (bin: {})...", example, bin);
+    } else {
+        println!("Building and running {}...", example);
+    }
     println!();
 
     let status = cmd.status().expect("Failed to run cargo");
@@ -847,11 +856,18 @@ fn apply_ld_library_path(cmd: &mut Command) {
 
 /// Touch main.rs to force recompilation (faster than cargo clean).
 fn touch_main_rs(example_dir: &Path) {
-    let main_rs = example_dir.join("src/main.rs");
-    if main_rs.exists()
-        && let Ok(content) = std::fs::read(&main_rs)
-    {
-        let _ = std::fs::write(&main_rs, content);
+    // Force a rebuild so the codegen backend re-runs and emits a fresh
+    // .ptx alongside the example. Touch every source file that might
+    // host `#[kernel]` items so multi-bin layouts (kernels in `lib.rs`,
+    // tests in `main.rs`, perf bench in `bin/<name>.rs`, etc.) all
+    // re-codegen on every `cargo oxide run/build` invocation.
+    for rel in ["src/main.rs", "src/lib.rs"] {
+        let path = example_dir.join(rel);
+        if path.exists()
+            && let Ok(content) = std::fs::read(&path)
+        {
+            let _ = std::fs::write(&path, content);
+        }
     }
 }
 

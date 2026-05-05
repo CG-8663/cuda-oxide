@@ -27,8 +27,24 @@ lands in cut 2.
 ## Build and Run
 
 ```bash
+# Correctness tests (12 hardware checks):
 cargo oxide run hashmap_v2
+
+# Performance bench vs CPU `hashbrown::HashMap`:
+./crates/rustc-codegen-cuda/examples/hashmap_v2/run-bench.sh
+# (or directly: cargo oxide run hashmap_v2 --bin bench)
 ```
+
+The crate ships two binaries in one Cargo package:
+
+- `hashmap_v2` (default) — 12 correctness tests on real hardware. Picked
+  up by the workspace smoketest harness.
+- `bench` — head-to-head perf bench: GPU insert (Protocol B vs A) ×
+  find (single-thread vs warp-coop) × load factor (50/75/90 %), with a
+  single-threaded CPU `hashbrown` insert baseline and a rayon-parallel
+  CPU `hashbrown` find baseline (hashbrown allows any number of
+  concurrent `&self` readers, so rayon-parallel is the honest CPU
+  ceiling for find).
 
 ## Storage Layout
 
@@ -297,11 +313,54 @@ Default capacity is `1 << 14` slots.
 - **Single-launch dedup under Protocol A** — best-effort by design;
   use Protocol B if strict single-launch single-occurrence is required.
 
+## Performance vs CPU `hashbrown`
+
+`./run-bench.sh` runs the head-to-head bench against single-threaded
+`hashbrown` insert and rayon-parallel `hashbrown` find. GPU timings are
+CUDA-event kernel-only (no H2D/D2H), CPU timings are wall-clock
+`Instant::now()`. Numbers below are representative on a 24-core host
+with one Ada-class GPU at 1 M slot capacity, 10 measured iterations
+plus 3 warmup, in **Mops/s** (millions of operations per second):
+
+| Operation                        | load=50% | load=75% | load=90% | speedup vs CPU hashbrown |
+|:---------------------------------|:---------|:---------|:---------|:-------------------------|
+| GPU insert — Protocol B          |     4732 |     4852 |     4847 | ~21–27×                  |
+| GPU insert — Protocol A          |     3880 |     3952 |     3923 | ~17–22×                  |
+| CPU insert — `HashMap::insert`   |      222 |      206 |      181 | (1×, baseline)           |
+| GPU find  — single-thread (hits) |    22355 |    19357 |    17683 | ~12–34×                  |
+| GPU find  — warp-coop (hits)     |     9483 |     9361 |     9219 | ~6–15×                   |
+| CPU find  — rayon `.get` (hits)  |      650 |     1531 |      733 | (1×, baseline)           |
+| GPU find  — single-thread (miss) |    12158 |    12303 |    11409 | ~3–4×                    |
+| GPU find  — warp-coop    (miss)  |    11649 |    11608 |    10978 | ~3–4×                    |
+| CPU find  — rayon `.get` (miss)  |     2795 |     2823 |     3773 | (1×, baseline)           |
+
+Reading the table:
+
+- **Insert** is the most lopsided. Single-threaded CPU `hashbrown`
+  caps out around 200 Mops/s; the GPU pumps in ~5 G inserts/s using
+  one thread per key. Protocol B beats Protocol A by ~20 % at every
+  load — the slot-CAS does cost less than the two-stage RESERVED
+  handshake on this hardware, even though Protocol A skips the slot
+  CAS entirely. Protocol A's win is correctness latitude (`RESERVED`
+  decouples claim from publish), not raw insert throughput.
+- **Find on hits** is where single-thread find shines: probes
+  terminate fast, so spinning up 32 lanes per warp for warp-coop is
+  pure overhead at moderate load. Warp-coop only catches up under
+  long probe chains.
+- **Find on misses** is where CPU `hashbrown` claws back the most
+  ground — its SIMD ctrl scan checks 16 tag bytes per `pcmpeqb` and
+  hits an `EMPTY` quickly. The GPU still wins, but only ~3–4×.
+
+If you're comparing to a *concurrent* CPU hashmap (`DashMap`,
+`scc::HashMap`, etc.) the absolute CPU numbers above will shift, but
+the shape of the table — GPU inserts are 1–2 orders of magnitude
+faster, find ratios are tighter on misses than hits — stays the same.
+
 ## Next Steps
 
 | Cut | What lands                                                                                   |
 |:----|:---------------------------------------------------------------------------------------------|
 | 2.1 | done — single-thread + warp-coop find on a unified `PROBE_TILE` triangular probe             |
 | 2.2 | done — Protocol A insert + try_insert (RESERVED-tag handshake), Tests 10–12                  |
-| 2.3 | `--bench` harness: insert (B vs A) × find (single vs warp) at 50 / 75 / 90% load             |
+| 2.3 | done — bench binary: insert (B vs A) × find (single vs warp) × 50 / 75 / 90 % load           |
 | 3   | Cooperative-groups in cuda-oxide; then 16-lane subwarp find, rehash, DELETED reclaim, resize |
