@@ -202,6 +202,8 @@ cuda_launch_async! {
 .sync()?;
 ```
 
+(execution-choosing-block-size)=
+
 ### Choosing block size
 
 The block size is the single most important tuning knob:

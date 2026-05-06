@@ -279,6 +279,8 @@ The key: `dev` is captured by the `move` closure and is not dropped until the
 closure returns. Since the stream synchronizes before the `DeviceFuture`
 delivers the result, the async copy finishes before `dev` is freed.
 
+(concurrent-error-handling)=
+
 ## Error handling
 
 Errors from GPU work propagate through the `Result` chain just like any Rust

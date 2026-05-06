@@ -104,7 +104,7 @@ The `cuda_launch!` macro analyzes the closure at compile time:
    that are not parameters or local bindings. In `move |x| x * factor`, `x` is
    a parameter and `factor` is a capture.
 2. **Scalarize captures** -- each captured variable becomes a separate kernel
-   parameter (just like [argument scalarization](memory-and-data-movement.md#argument-scalarization)).
+   parameter (just like {ref}`argument scalarization <memory-argument-scalarization>`).
 3. **Reconstruct on device** -- inside the kernel, the compiler reassembles the
    closure from its individual scalar fields.
 

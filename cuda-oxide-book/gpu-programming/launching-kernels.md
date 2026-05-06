@@ -92,7 +92,7 @@ fn main() {
 ### Argument wrappers
 
 The `args` list uses wrapper functions to handle
-[scalarization](memory-and-data-movement.md#argument-scalarization):
+{ref}`scalarization <memory-argument-scalarization>`:
 
 | Syntax              | Kernel parameter   | What's passed to the GPU |
 |:--------------------|:-------------------|:-------------------------|
@@ -158,7 +158,7 @@ counterparts to compute row and column indices.
 ### Choosing block size
 
 The block size is the single most important tuning parameter (see the
-[Execution Model](execution-model.md#choosing-block-size) chapter for details).
+{ref}`Execution Model <execution-choosing-block-size>` chapter for details).
 Quick guidelines:
 
 - **256** is a safe default for most kernels.
@@ -172,7 +172,8 @@ immediately. No stream is specified at launch time -- the scheduling policy
 chooses one when the operation is executed:
 
 ```rust
-use cuda_async::{init_device_contexts, DeviceOperation};
+use cuda_async::device_context::init_device_contexts;
+use cuda_async::device_operation::DeviceOperation;
 use cuda_host::cuda_launch_async;
 
 init_device_contexts(0, 1)?;

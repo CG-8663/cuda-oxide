@@ -320,7 +320,8 @@ let ctx = CudaContext::new(0).unwrap();
 let stream = ctx.default_stream();
 let module = load_kernel_module(&ctx, "vecadd").unwrap();
 
-let input = DeviceBuffer::from_host(&stream, &host_data).unwrap();
+let a = DeviceBuffer::from_host(&stream, &a_host).unwrap();
+let b = DeviceBuffer::from_host(&stream, &b_host).unwrap();
 let mut output = DeviceBuffer::<f32>::zeroed(&stream, n).unwrap();
 
 cuda_launch! {
@@ -328,7 +329,7 @@ cuda_launch! {
     stream: stream,
     module: module,
     config: LaunchConfig::for_num_elems(n),
-    args: [slice(input), slice(b), slice_mut(output)]
+    args: [slice(a), slice(b), slice_mut(output)]
 }.unwrap();
 ```
 
@@ -342,7 +343,7 @@ let op = cuda_launch_async! {
     kernel: vecadd,
     module: module,
     config: LaunchConfig::for_num_elems(n),
-    args: [slice(input), slice(b), slice_mut(output)]
+    args: [slice(a), slice(b), slice_mut(output)]
 };
 
 op.sync()?;       // blocking

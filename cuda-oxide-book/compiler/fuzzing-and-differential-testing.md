@@ -67,7 +67,7 @@ The fuzzing setup is split into four parts:
 | `crates/fuzzer`                        | Shared trace API and vendored rustlantis       |
 | `crates/fuzzer/tools/mir_generator.py` | Seed-to-`generated_case.rs` adapter            |
 | `crates/fuzzer/tools/run_seed.py`      | Batch runner and artifact recorder             |
-| `examples/rustlantis-smoke`            | Stable CPU/GPU execution harness               |
+| `rustlantis-smoke`                     | Stable CPU/GPU execution harness               |
 
 `crates/fuzzer` is a normal workspace crate, but its library surface is
 `no_std`. Device code imports `trace_reset`, `trace_finish`, and the generic
@@ -75,9 +75,9 @@ The fuzzing setup is split into four parts:
 `crates/fuzzer/rustlantis`; it is invoked as an external generator, not used as
 a Rust library dependency.
 
-The `rustlantis-smoke` example is intentionally boring. It owns the host/GPU
-launch logic and a small hand-written sanity test, then includes one generated
-file:
+The `rustlantis-smoke` example lives under
+`crates/rustc-codegen-cuda/examples/`. It owns the host/GPU launch logic and a
+small hand-written sanity test, then includes one generated file:
 
 ```text
 crates/rustc-codegen-cuda/examples/rustlantis-smoke/src/generated_case.rs
@@ -107,7 +107,7 @@ One seed follows this path:
 6. **Classify.** `run_seed.py` records whether the seed passed, mismatched,
    failed to compile, or exceeded the adapter's current support surface.
 
-The checked-in generated case currently uses seed `192`, because it shows the
+The checked-in generated case currently uses seed `19`, because it shows the
 important property we want from the harness: multiple intermediate dumps, not
 just one final value.
 

@@ -1,8 +1,8 @@
 # Building from Source
 
 This appendix walks through setting up a development environment for cuda-oxide
-from a fresh checkout. If you just want to run an example, the [Quick
-Start](../getting-started/quick-start.md) chapter is faster.
+from a fresh checkout. If you just want to run an example, the
+[Writing Your First Kernel](../getting-started/hello-gpu.md) chapter is faster.
 
 ---
 
@@ -187,18 +187,22 @@ cuda-oxide/
 ├── rust-toolchain.toml     # Pinned nightly + components
 ├── crates/
 │   ├── cuda-device/          # Device intrinsics (#![no_std])
-│   ├── cuda-host/          # cuda_launch! macro
-│   ├── cuda-macros/        # Proc macros (#[kernel], #[device], gpu_printf!)
-│   ├── cuda-bindings/      # Raw bindgen FFI to cuda.h
-│   ├── cuda-core/        # Safe RAII wrappers (CudaContext, DeviceBuffer)
-│   ├── cuda-async/         # Async execution (DeviceOperation, DeviceFuture)
-│   ├── cargo-oxide/        # Cargo subcommand
-│   ├── rustc-codegen-cuda/ # Codegen backend (isolated, not a workspace member)
-│   ├── mir-importer/       # MIR → Pliron IR translation
-│   ├── mir-lower/          # `dialect-mir` → `dialect-llvm` lowering
-│   ├── dialect-mir/        # pliron dialect modelling Rust MIR
-│   ├── dialect-llvm/       # pliron dialect modelling LLVM IR (+ export)
-│   └── dialect-nvvm/       # NVVM intrinsics dialect
+│   ├── cuda-host/            # cuda_launch! macro
+│   ├── cuda-macros/          # Proc macros (#[kernel], #[device], gpu_printf!)
+│   ├── cuda-bindings/        # Raw bindgen FFI to cuda.h
+│   ├── cuda-core/            # Safe RAII wrappers (CudaContext, DeviceBuffer)
+│   ├── cuda-async/           # Async execution (DeviceOperation, DeviceFuture)
+│   ├── cargo-oxide/          # Cargo subcommand
+│   ├── rustc-codegen-cuda/   # Codegen backend (not a workspace member)
+│   ├── mir-importer/         # MIR → Pliron IR translation
+│   ├── mir-lower/            # `dialect-mir` → `dialect-llvm` lowering
+│   ├── dialect-mir/          # pliron dialect modelling Rust MIR
+│   ├── dialect-llvm/         # pliron dialect modelling LLVM IR (+ export)
+│   ├── dialect-nvvm/         # NVVM intrinsics dialect
+│   ├── libnvvm-sys/          # dlopen bindings to libNVVM
+│   ├── nvjitlink-sys/        # dlopen bindings to nvJitLink
+│   ├── reserved-oxide-symbols/ # Shared naming contract
+│   └── fuzzer/               # Differential testing support
 └── cuda-oxide-book/        # This book (Sphinx + MyST)
 ```
 

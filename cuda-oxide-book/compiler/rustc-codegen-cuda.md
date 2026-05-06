@@ -42,7 +42,8 @@ pub fn __rustc_codegen_backend() -> Box<dyn CodegenBackend> {
 
 Two things happen here. First, `CudaCodegenConfig::from_env()` reads
 environment variables (`CUDA_OXIDE_VERBOSE`, `CUDA_OXIDE_DUMP_MIR`, and
-friends -- see [Environment Variables](#environment-variables) below) to
+friends -- see {ref}`Environment Variables
+<rustc-codegen-environment-variables>` below) to
 configure the backend's behavior. Second, it creates the standard LLVM backend
 and stores it inside the `CudaCodegenBackend`. This is the wrapping pattern
 that makes the whole architecture work: cuda-oxide does not *replace* the LLVM
@@ -97,8 +98,8 @@ If any kernel or device function is found, two things happen in sequence:
 **a) Collect the device call graph.**
 `collector::collect_device_functions()` performs a breadth-first walk from
 every kernel entry point, discovering all functions that transitively get
-called from device code. More on this in
-[Device Function Collection](#device-function-collection).
+called from device code. More on this in {ref}`Device Function Collection
+<rustc-codegen-device-function-collection>`.
 
 **b) Generate device code.**
 `device_codegen::generate_device_code()` bridges the collected functions to
@@ -145,6 +146,8 @@ dozens triggers device compilation.
 ```
 
 ---
+
+(rustc-codegen-device-function-collection)=
 
 ## Device Function Collection
 
@@ -375,6 +378,8 @@ dialect, and runs the full lowering pipeline through to PTX. That process is
 covered in [The MIR Importer](mir-importer.md).
 
 ---
+
+(rustc-codegen-environment-variables)=
 
 ## Environment Variables
 

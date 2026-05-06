@@ -47,9 +47,10 @@ run the whole thing under Miri if you feel adventurous. Standard Rust tooling,
 all the way down.
 
 ```{note}
-`llc` is the one external binary. It ships with any LLVM/CUDA toolkit
-installation and is invoked as a subprocess. Everything upstream of the `.ll`
-file is pure Rust.
+`llc` is the one external binary. It comes from an LLVM installation with the
+NVPTX backend enabled; the CUDA Toolkit alone is not enough. All cuda-oxide
+stages up to LLVM IR emission are implemented in Rust; after the backend writes
+the `.ll` file, it invokes external LLVM `llc` to generate PTX.
 ```
 
 ---

@@ -101,10 +101,17 @@ fn main() {
     }
     .unwrap();
 
-    let result = c_dev.to_host_vec(&stream).unwrap();
-    assert!((result[0] - 0.0).abs() < 1e-5);
-    assert!((result[1] - 3.0).abs() < 1e-5);
-    println!("PASSED");
+    let c_host = c_dev.to_host_vec(&stream).unwrap();
+    let errors = (0..N)
+        .filter(|&i| (c_host[i] - (a_host[i] + b_host[i])).abs() > 1e-5)
+        .count();
+
+    if errors == 0 {
+        println!("PASSED: all {} elements correct", N);
+    } else {
+        eprintln!("FAILED: {} errors", errors);
+        std::process::exit(1);
+    }
 }
 ```
 

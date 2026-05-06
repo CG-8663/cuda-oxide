@@ -55,8 +55,8 @@ For each `MirFuncOp` in the module, `convert_func` (in `lowering.rs`):
 3. **Uses `inline_region`** to move MIR blocks into the LLVM function. The
    original blocks are preserved -- no manual block mapping needed.
 4. **Builds an entry prologue** that reconstructs aggregate values from
-   the flat LLVM arguments via `insertvalue` (see
-   [Argument Scalarization](#argument-scalarization) below).
+   the flat LLVM arguments via `insertvalue` (see {ref}`Argument Scalarization
+   <lowering-argument-scalarization>` below).
 5. **Runs `DialectConversion`** which walks every MIR operation and invokes
    its `MirToLlvmConversion::rewrite` implementation to replace it with
    LLVM operations.
@@ -103,6 +103,8 @@ different types. In LLVM, both are just `i32`. The sign information shifts to
 the operations: a signed less-than comparison is `icmp slt`, an unsigned one is
 `icmp ult`. The type converter drops the signedness, and the operation
 converters pick it back up when they emit comparison and division instructions.
+
+(lowering-argument-scalarization)=
 
 ### Argument Scalarization
 

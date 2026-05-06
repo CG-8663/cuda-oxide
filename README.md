@@ -29,7 +29,7 @@ Please see [CONTRIBUTING.md](CONTRIBUTING.md) if you're interested in contributi
 ```rust
 use cuda_device::{kernel, thread, DisjointSlice};
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
-use cuda_host::cuda_launch;
+use cuda_host::{cuda_launch, load_kernel_module};
 
 // Device: generic kernel that applies any function to each element.
 // F can be a closure with captures — rustc monomorphizes it to a concrete type.
@@ -49,7 +49,7 @@ fn main() {
     let input = DeviceBuffer::from_host(&stream, &data).unwrap();
     let mut output = DeviceBuffer::<f32>::zeroed(&stream, 1024).unwrap();
 
-    let module = ctx.load_module_from_file("host_closure.ptx").unwrap();
+    let module = load_kernel_module(&ctx, "host_closure").unwrap();
 
     // Launch with a closure — factor is captured and passed to the GPU automatically
     let factor = 2.5f32;
@@ -188,11 +188,12 @@ cargo oxide run vecadd
 
 `cargo oxide doctor` validates your Rust toolchain, CUDA toolkit, LLVM, and
 codegen backend. If everything is configured correctly, `cargo oxide run vecadd`
-compiles a Rust kernel to PTX, launches it on the GPU, and prints `PASSED`.
+compiles a Rust kernel to PTX, launches it on the GPU, and prints
+`✓ SUCCESS: All 1024 elements correct!`.
 
 ## Examples
 
-**38 examples** in `crates/rustc-codegen-cuda/examples/`. Highlights:
+**44 examples** in `crates/rustc-codegen-cuda/examples/`. Highlights:
 
 | Example              | Description                                                              |
 |----------------------|--------------------------------------------------------------------------|
@@ -270,7 +271,7 @@ cargo oxide run gemm_sol
 
 ## Documentation
 
-**WIP:** 🚧 🚧 The **[cuda-oxide book](https://nvlabs.github.io/cuda-oxide/)** is the primary reference for the project. It covers SIMT kernel authoring in Rust, synchronous and asynchronous GPU programming, the compiler architecture, and more.
+**WIP:** 🚧 The **[cuda-oxide book](https://nvlabs.github.io/cuda-oxide/)** is the primary reference for the project. It covers SIMT kernel authoring in Rust, synchronous and asynchronous GPU programming, the compiler architecture, and more.
 
 To build and serve the book locally, see [cuda-oxide-book/README.md](./cuda-oxide-book/README.md).
 

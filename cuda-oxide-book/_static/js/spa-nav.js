@@ -73,6 +73,10 @@
         scrollForUrl(url);
     }
 
+    function isPageUrl(url) {
+        return url.pathname.endsWith('/') || url.pathname.endsWith('.html');
+    }
+
     function swap(doc) {
         // --- Main content ---
         var newMain = doc.querySelector(SEL.main);
@@ -132,6 +136,9 @@
     document.addEventListener('click', function (e) {
         var a = e.target.closest('a[href]');
         if (!a || !a.href) return;
+        if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        if (a.target && a.target !== '_self') return;
+        if (a.hasAttribute('download')) return;
 
         var url = new URL(a.href, location.href);
 
@@ -154,9 +161,10 @@
             return;
         }
 
-        // Intercept SPA navigation in the left sidebar only.
-        var leftLink = e.target.closest(SEL.leftBar + ' a');
-        if (!leftLink || leftLink !== a) return;
+        // Intercept internal book page links from the article, sidebars, and
+        // navbar so cross-page section references can smooth-scroll after the
+        // new page content is swapped in.
+        if (!isPageUrl(url)) return;
 
         e.preventDefault();
         navigate(url, true);

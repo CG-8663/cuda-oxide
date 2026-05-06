@@ -513,7 +513,7 @@ using `SharedArray` and observe the speedup.
 
 **Add error recovery.** Replace `.unwrap()` in the kernel launch closures
 with proper `Result` propagation. Use the three-arm `match` pattern from
-the [Concurrent Execution](../async-programming/concurrent-execution.md#error-handling)
+the {ref}`Concurrent Execution <concurrent-error-handling>`
 chapter to handle GPU errors and task panics independently.
 
 **Multi-device.** Pass `init_device_contexts(0, 2)` to manage two GPUs.

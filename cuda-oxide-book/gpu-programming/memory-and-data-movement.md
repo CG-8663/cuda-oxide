@@ -147,7 +147,8 @@ and executes only after all preceding work on that stream completes. Critically,
 it does **not** synchronize the device:
 
 ```rust
-use cuda_async::{DeviceBox, init_device_contexts};
+use cuda_async::device_box::DeviceBox;
+use cuda_async::device_context::init_device_contexts;
 
 init_device_contexts(0, 1)?;  // Initialize device context map (default device 0)
 
@@ -172,6 +173,8 @@ For latency-sensitive teardown in multi-stream pipelines, prefer `DeviceBox`.
 For straightforward single-stream examples, `DeviceBuffer` is simpler and
 the synchronous free is effectively zero-cost.
 :::
+
+(memory-argument-scalarization)=
 
 ## Argument scalarization
 

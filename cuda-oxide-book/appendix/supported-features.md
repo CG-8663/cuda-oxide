@@ -2,7 +2,7 @@
 
 This appendix presents the cuda-oxide feature matrix: every compiler capability,
 runtime API, and hardware feature along with its current support status. The
-data is drawn from the project's internal tracking sheet and the test suite.
+data is drawn from the compiler/runtime sources and the test suite.
 
 **Legend:** **Full** = tested and working, **Planned** = on the roadmap,
 **N/A** = not applicable or no identified need.

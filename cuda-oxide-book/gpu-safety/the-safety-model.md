@@ -179,8 +179,8 @@ A kernel is fully safe -- Tier 1 -- when:
 2. All inputs are shared immutable references (`&[T]`)
 3. No shared memory, no raw pointers, no intrinsics beyond thread indexing
 
-Examples in this tier: `vecadd`, `saxpy`, `relu`, `matvec_naive`, and the
-naive GEMM kernels in the `gemm` and `async_mlp` examples.
+Examples in this tier include `vecadd`, `helper_fn`, `generic`, `host_closure`,
+and the naive GEMM kernels in the `gemm` and `async_mlp` examples.
 
 ---
 

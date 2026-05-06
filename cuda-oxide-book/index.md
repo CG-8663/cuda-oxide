@@ -19,7 +19,7 @@ For a refresher, see [The Rust Programming Language](https://doc.rust-lang.org/b
 
 ## Project Status
 
-The project is in an early stage (alpha) and under active development: **expect bugs, incomplete features, and API breakage** as we work to improve it. We hope you'll try it and help shape its direction by sharing feedback on your experience.
+The v0.1.0 release is an early-stage alpha: **expect bugs, incomplete features, and API breakage** as we work to improve it. We hope you'll try it and help shape its direction by sharing feedback on your experience.
 
 ---
 
@@ -59,6 +59,11 @@ fn main() {
 ```
 
 Build and run with `cargo oxide run vecadd` upon installing the [prerequisites](getting-started/installation.md).
+
+:::{note}
+The module name passed to `load_kernel_module` is the kernel artifact basename;
+for workspace examples that is the example name.
+:::
 
 ---
 

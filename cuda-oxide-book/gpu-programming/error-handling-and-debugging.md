@@ -123,7 +123,7 @@ The async path (`cuda_launch_async!` / `DeviceOperation`) uses `DeviceError`,
 which wraps driver errors alongside context and scheduling failures:
 
 ```rust
-use cuda_async::DeviceError;
+use cuda_async::error::DeviceError;
 
 let result: Result<Vec<f32>, DeviceError> = operation.sync();
 ```
