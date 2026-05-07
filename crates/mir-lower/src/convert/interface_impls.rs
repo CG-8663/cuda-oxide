@@ -34,29 +34,33 @@ use dialect_mir::ops::{
     MirStorageDeadOp, MirStorageLiveOp, MirStoreOp, MirSubOp, MirUndefOp, MirUnreachableOp,
 };
 use dialect_nvvm::ops::{
-    Barrier0Op, BreakpointOp, ClcQueryGetFirstCtaidXOp, ClcQueryGetFirstCtaidYOp,
-    ClcQueryGetFirstCtaidZOp, ClcQueryIsCanceledOp, ClcTryCancelMulticastOp, ClcTryCancelOp,
-    ClusterSyncOp, CpAsyncBulkCommitGroupOp, CpAsyncBulkTensorG2sTile1dOp,
-    CpAsyncBulkTensorG2sTile2dMulticastCg2Op, CpAsyncBulkTensorG2sTile2dMulticastOp,
-    CpAsyncBulkTensorG2sTile2dOp, CpAsyncBulkTensorG2sTile3dOp, CpAsyncBulkTensorG2sTile4dOp,
-    CpAsyncBulkTensorG2sTile5dOp, CpAsyncBulkTensorS2gTile1dOp, CpAsyncBulkTensorS2gTile2dOp,
-    CpAsyncBulkTensorS2gTile3dOp, CpAsyncBulkTensorS2gTile4dOp, CpAsyncBulkTensorS2gTile5dOp,
-    CpAsyncBulkWaitGroupOp, CpAsyncBulkWaitGroupReadOp, CvtF32x2Bf16x2Op, DsmemReadU32Op,
-    FenceProxyAsyncSharedCtaOp, MapaSharedClusterOp, MbarrierArriveClusterOp,
-    MbarrierArriveExpectTxSharedOp, MbarrierArriveSharedOp, MbarrierInitSharedOp,
-    MbarrierInvalSharedOp, MbarrierTestWaitSharedOp, MbarrierTryWaitParitySharedOp,
-    MbarrierTryWaitSharedOp, NanosleepOp, NvvmAtomicCmpxchgOp, NvvmAtomicLoadOp, NvvmAtomicRmwOp,
-    NvvmAtomicStoreOp, PmEventOp, ReadPtxSregClock64Op, ReadPtxSregClockOp,
-    ReadPtxSregClusterCtaidXOp, ReadPtxSregClusterCtaidYOp, ReadPtxSregClusterCtaidZOp,
-    ReadPtxSregClusterIdxOp, ReadPtxSregClusterNctaidXOp, ReadPtxSregClusterNctaidYOp,
-    ReadPtxSregClusterNctaidZOp, ReadPtxSregCtaidXOp, ReadPtxSregCtaidYOp, ReadPtxSregLaneIdOp,
-    ReadPtxSregNclusterIdOp, ReadPtxSregNtidXOp, ReadPtxSregNtidYOp, ReadPtxSregTidXOp,
-    ReadPtxSregTidYOp, ShflSyncBflyF32Op, ShflSyncBflyI32Op, ShflSyncDownF32Op, ShflSyncDownI32Op,
-    ShflSyncIdxF32Op, ShflSyncIdxI32Op, ShflSyncUpF32Op, ShflSyncUpI32Op, StmatrixM8n8X2Op,
-    StmatrixM8n8X2TransOp, StmatrixM8n8X4Op, StmatrixM8n8X4TransOp, Tcgen05AllocCg2Op,
-    Tcgen05AllocOp, Tcgen05CommitCg2Op, Tcgen05CommitMulticastCg2Op, Tcgen05CommitOp,
-    Tcgen05CommitSharedClusterCg2Op, Tcgen05CommitSharedClusterOp, Tcgen05CpSmemToTmemCg2Op,
-    Tcgen05CpSmemToTmemOp, Tcgen05DeallocCg2Op, Tcgen05DeallocOp, Tcgen05FenceAfterThreadSyncOp,
+    ActiveMaskOp, BarWarpSyncOp, Barrier0Op, BreakpointOp, ClcQueryGetFirstCtaidXOp,
+    ClcQueryGetFirstCtaidYOp, ClcQueryGetFirstCtaidZOp, ClcQueryIsCanceledOp,
+    ClcTryCancelMulticastOp, ClcTryCancelOp, ClusterSyncOp, CpAsyncBulkCommitGroupOp,
+    CpAsyncBulkTensorG2sTile1dOp, CpAsyncBulkTensorG2sTile2dMulticastCg2Op,
+    CpAsyncBulkTensorG2sTile2dMulticastOp, CpAsyncBulkTensorG2sTile2dOp,
+    CpAsyncBulkTensorG2sTile3dOp, CpAsyncBulkTensorG2sTile4dOp, CpAsyncBulkTensorG2sTile5dOp,
+    CpAsyncBulkTensorS2gTile1dOp, CpAsyncBulkTensorS2gTile2dOp, CpAsyncBulkTensorS2gTile3dOp,
+    CpAsyncBulkTensorS2gTile4dOp, CpAsyncBulkTensorS2gTile5dOp, CpAsyncBulkWaitGroupOp,
+    CpAsyncBulkWaitGroupReadOp, CvtF32x2Bf16x2Op, DsmemReadU32Op, FenceProxyAsyncSharedCtaOp,
+    MapaSharedClusterOp, MatchAllSyncI32Op, MatchAllSyncI64Op, MatchAnySyncI32Op,
+    MatchAnySyncI64Op, MbarrierArriveClusterOp, MbarrierArriveExpectTxSharedOp,
+    MbarrierArriveSharedOp, MbarrierInitSharedOp, MbarrierInvalSharedOp, MbarrierTestWaitSharedOp,
+    MbarrierTryWaitParitySharedOp, MbarrierTryWaitSharedOp, NanosleepOp, NvvmAtomicCmpxchgOp,
+    NvvmAtomicLoadOp, NvvmAtomicRmwOp, NvvmAtomicStoreOp, PmEventOp, ReadPtxSregClock64Op,
+    ReadPtxSregClockOp, ReadPtxSregClusterCtaidXOp, ReadPtxSregClusterCtaidYOp,
+    ReadPtxSregClusterCtaidZOp, ReadPtxSregClusterIdxOp, ReadPtxSregClusterNctaidXOp,
+    ReadPtxSregClusterNctaidYOp, ReadPtxSregClusterNctaidZOp, ReadPtxSregCtaidXOp,
+    ReadPtxSregCtaidYOp, ReadPtxSregCtaidZOp, ReadPtxSregEnvReg1Op, ReadPtxSregEnvReg2Op,
+    ReadPtxSregLaneIdOp, ReadPtxSregNclusterIdOp, ReadPtxSregNctaidXOp, ReadPtxSregNctaidYOp,
+    ReadPtxSregNctaidZOp, ReadPtxSregNtidXOp, ReadPtxSregNtidYOp, ReadPtxSregNtidZOp,
+    ReadPtxSregTidXOp, ReadPtxSregTidYOp, ReadPtxSregTidZOp, ShflSyncBflyF32Op, ShflSyncBflyI32Op,
+    ShflSyncDownF32Op, ShflSyncDownI32Op, ShflSyncIdxF32Op, ShflSyncIdxI32Op, ShflSyncUpF32Op,
+    ShflSyncUpI32Op, StmatrixM8n8X2Op, StmatrixM8n8X2TransOp, StmatrixM8n8X4Op,
+    StmatrixM8n8X4TransOp, Tcgen05AllocCg2Op, Tcgen05AllocOp, Tcgen05CommitCg2Op,
+    Tcgen05CommitMulticastCg2Op, Tcgen05CommitOp, Tcgen05CommitSharedClusterCg2Op,
+    Tcgen05CommitSharedClusterOp, Tcgen05CpSmemToTmemCg2Op, Tcgen05CpSmemToTmemOp,
+    Tcgen05DeallocCg2Op, Tcgen05DeallocOp, Tcgen05FenceAfterThreadSyncOp,
     Tcgen05FenceBeforeThreadSyncOp, Tcgen05Ld16x256bPureOp, Tcgen05Ld16x256bX8PureOp,
     Tcgen05LoadWaitOp, Tcgen05MmaF16Cg2Op, Tcgen05MmaF16Op, Tcgen05MmaWsBf16Op, Tcgen05MmaWsF16Op,
     Tcgen05MmaWsTf32Op, Tcgen05RelinquishAllocPermitCg2Op, Tcgen05RelinquishAllocPermitOp,
@@ -911,6 +915,150 @@ impl MirToLlvmConversion for ReadPtxSregNtidYOp {
 }
 
 #[op_interface_impl]
+impl MirToLlvmConversion for ReadPtxSregTidZOp {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::intrinsics::basic::convert_sreg_read_i32(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            operands_info,
+            "llvm_nvvm_read_ptx_sreg_tid_z",
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for ReadPtxSregCtaidZOp {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::intrinsics::basic::convert_sreg_read_i32(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            operands_info,
+            "llvm_nvvm_read_ptx_sreg_ctaid_z",
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for ReadPtxSregNtidZOp {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::intrinsics::basic::convert_sreg_read_i32(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            operands_info,
+            "llvm_nvvm_read_ptx_sreg_ntid_z",
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for ReadPtxSregNctaidXOp {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::intrinsics::basic::convert_sreg_read_i32(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            operands_info,
+            "llvm_nvvm_read_ptx_sreg_nctaid_x",
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for ReadPtxSregNctaidYOp {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::intrinsics::basic::convert_sreg_read_i32(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            operands_info,
+            "llvm_nvvm_read_ptx_sreg_nctaid_y",
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for ReadPtxSregNctaidZOp {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::intrinsics::basic::convert_sreg_read_i32(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            operands_info,
+            "llvm_nvvm_read_ptx_sreg_nctaid_z",
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for ReadPtxSregEnvReg1Op {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::intrinsics::basic::convert_sreg_read_i32(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            operands_info,
+            "llvm_nvvm_read_ptx_sreg_envreg1",
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for ReadPtxSregEnvReg2Op {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::intrinsics::basic::convert_sreg_read_i32(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            operands_info,
+            "llvm_nvvm_read_ptx_sreg_envreg2",
+        )
+    }
+}
+
+#[op_interface_impl]
 impl MirToLlvmConversion for ReadPtxSregLaneIdOp {
     fn convert(
         &self,
@@ -1491,6 +1639,136 @@ impl MirToLlvmConversion for VoteSyncBallotOp {
             self.get_operation(),
             operands_info,
             "llvm_nvvm_vote_ballot_sync",
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for MatchAnySyncI32Op {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        let i32_ty = pliron::builtin::types::IntegerType::get(
+            ctx,
+            32,
+            pliron::builtin::types::Signedness::Signless,
+        );
+        super::intrinsics::warp::convert_match_any(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            operands_info,
+            "llvm_nvvm_match_any_sync_i32",
+            i32_ty.into(),
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for MatchAnySyncI64Op {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        let i64_ty = pliron::builtin::types::IntegerType::get(
+            ctx,
+            64,
+            pliron::builtin::types::Signedness::Signless,
+        );
+        super::intrinsics::warp::convert_match_any(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            operands_info,
+            "llvm_nvvm_match_any_sync_i64",
+            i64_ty.into(),
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for MatchAllSyncI32Op {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        let i32_ty = pliron::builtin::types::IntegerType::get(
+            ctx,
+            32,
+            pliron::builtin::types::Signedness::Signless,
+        );
+        super::intrinsics::warp::convert_match_all(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            operands_info,
+            "llvm_nvvm_match_all_sync_i32p",
+            i32_ty.into(),
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for ActiveMaskOp {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::intrinsics::warp::convert_active_mask(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            operands_info,
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for BarWarpSyncOp {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::intrinsics::warp::convert_bar_warp_sync(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            operands_info,
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for MatchAllSyncI64Op {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        let i64_ty = pliron::builtin::types::IntegerType::get(
+            ctx,
+            64,
+            pliron::builtin::types::Signedness::Signless,
+        );
+        super::intrinsics::warp::convert_match_all(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            operands_info,
+            "llvm_nvvm_match_all_sync_i64p",
+            i64_ty.into(),
         )
     }
 }

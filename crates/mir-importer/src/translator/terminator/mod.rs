@@ -1651,6 +1651,106 @@ fn try_dispatch_intrinsic(
                 loc,
             )?))
         }
+        "cuda_device::threadIdx_z" | "cuda_device::thread::threadIdx_z" => {
+            Ok(Some(helpers::emit_nvvm_intrinsic(
+                ctx,
+                dialect_nvvm::ops::ReadPtxSregTidZOp::get_concrete_op_info(),
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+        "cuda_device::blockIdx_z" | "cuda_device::thread::blockIdx_z" => {
+            Ok(Some(helpers::emit_nvvm_intrinsic(
+                ctx,
+                dialect_nvvm::ops::ReadPtxSregCtaidZOp::get_concrete_op_info(),
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+        "cuda_device::blockDim_z" | "cuda_device::thread::blockDim_z" => {
+            Ok(Some(helpers::emit_nvvm_intrinsic(
+                ctx,
+                dialect_nvvm::ops::ReadPtxSregNtidZOp::get_concrete_op_info(),
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+        "cuda_device::gridDim_x" | "cuda_device::thread::gridDim_x" => {
+            Ok(Some(helpers::emit_nvvm_intrinsic(
+                ctx,
+                dialect_nvvm::ops::ReadPtxSregNctaidXOp::get_concrete_op_info(),
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+        "cuda_device::gridDim_y" | "cuda_device::thread::gridDim_y" => {
+            Ok(Some(helpers::emit_nvvm_intrinsic(
+                ctx,
+                dialect_nvvm::ops::ReadPtxSregNctaidYOp::get_concrete_op_info(),
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+        "cuda_device::gridDim_z" | "cuda_device::thread::gridDim_z" => {
+            Ok(Some(helpers::emit_nvvm_intrinsic(
+                ctx,
+                dialect_nvvm::ops::ReadPtxSregNctaidZOp::get_concrete_op_info(),
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+        "cuda_device::grid::envreg1" => Ok(Some(helpers::emit_nvvm_intrinsic(
+            ctx,
+            dialect_nvvm::ops::ReadPtxSregEnvReg1Op::get_concrete_op_info(),
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+        "cuda_device::grid::envreg2" => Ok(Some(helpers::emit_nvvm_intrinsic(
+            ctx,
+            dialect_nvvm::ops::ReadPtxSregEnvReg2Op::get_concrete_op_info(),
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
 
         // =================================================================
         // Thread Index Helpers (from intrinsics::indexing)
@@ -2109,7 +2209,20 @@ fn try_dispatch_intrinsic(
             block_map,
             loc,
         )?)),
-        "cuda_device::warp::shuffle" => Ok(Some(intrinsics::warp::emit_warp_shuffle_i32(
+        "cuda_device::warp::active_mask" => Ok(Some(intrinsics::warp::emit_active_mask(
+            ctx,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+        "cuda_device::warp::sync_mask" => Ok(Some(intrinsics::warp::emit_warp_sync_mask(
+            ctx, body, args, target, block_ptr, prev_op, value_map, block_map, loc,
+        )?)),
+        "cuda_device::warp::shuffle_sync" => Ok(Some(intrinsics::warp::emit_warp_shuffle_i32(
             ctx,
             body,
             dialect_nvvm::ops::ShflSyncIdxI32Op::get_concrete_op_info(),
@@ -2122,7 +2235,7 @@ fn try_dispatch_intrinsic(
             block_map,
             loc,
         )?)),
-        "cuda_device::warp::shuffle_up" => Ok(Some(intrinsics::warp::emit_warp_shuffle_i32(
+        "cuda_device::warp::shuffle_up_sync" => Ok(Some(intrinsics::warp::emit_warp_shuffle_i32(
             ctx,
             body,
             dialect_nvvm::ops::ShflSyncUpI32Op::get_concrete_op_info(),
@@ -2135,20 +2248,22 @@ fn try_dispatch_intrinsic(
             block_map,
             loc,
         )?)),
-        "cuda_device::warp::shuffle_down" => Ok(Some(intrinsics::warp::emit_warp_shuffle_i32(
-            ctx,
-            body,
-            dialect_nvvm::ops::ShflSyncDownI32Op::get_concrete_op_info(),
-            args,
-            destination,
-            target,
-            block_ptr,
-            prev_op,
-            value_map,
-            block_map,
-            loc,
-        )?)),
-        "cuda_device::warp::shuffle_xor" => Ok(Some(intrinsics::warp::emit_warp_shuffle_i32(
+        "cuda_device::warp::shuffle_down_sync" => {
+            Ok(Some(intrinsics::warp::emit_warp_shuffle_i32(
+                ctx,
+                body,
+                dialect_nvvm::ops::ShflSyncDownI32Op::get_concrete_op_info(),
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+        "cuda_device::warp::shuffle_xor_sync" => Ok(Some(intrinsics::warp::emit_warp_shuffle_i32(
             ctx,
             body,
             dialect_nvvm::ops::ShflSyncBflyI32Op::get_concrete_op_info(),
@@ -2161,7 +2276,7 @@ fn try_dispatch_intrinsic(
             block_map,
             loc,
         )?)),
-        "cuda_device::warp::shuffle_f32" => Ok(Some(intrinsics::warp::emit_warp_shuffle_f32(
+        "cuda_device::warp::shuffle_f32_sync" => Ok(Some(intrinsics::warp::emit_warp_shuffle_f32(
             ctx,
             body,
             dialect_nvvm::ops::ShflSyncIdxF32Op::get_concrete_op_info(),
@@ -2174,46 +2289,52 @@ fn try_dispatch_intrinsic(
             block_map,
             loc,
         )?)),
-        "cuda_device::warp::shuffle_up_f32" => Ok(Some(intrinsics::warp::emit_warp_shuffle_f32(
-            ctx,
-            body,
-            dialect_nvvm::ops::ShflSyncUpF32Op::get_concrete_op_info(),
-            args,
-            destination,
-            target,
-            block_ptr,
-            prev_op,
-            value_map,
-            block_map,
-            loc,
-        )?)),
-        "cuda_device::warp::shuffle_down_f32" => Ok(Some(intrinsics::warp::emit_warp_shuffle_f32(
-            ctx,
-            body,
-            dialect_nvvm::ops::ShflSyncDownF32Op::get_concrete_op_info(),
-            args,
-            destination,
-            target,
-            block_ptr,
-            prev_op,
-            value_map,
-            block_map,
-            loc,
-        )?)),
-        "cuda_device::warp::shuffle_xor_f32" => Ok(Some(intrinsics::warp::emit_warp_shuffle_f32(
-            ctx,
-            body,
-            dialect_nvvm::ops::ShflSyncBflyF32Op::get_concrete_op_info(),
-            args,
-            destination,
-            target,
-            block_ptr,
-            prev_op,
-            value_map,
-            block_map,
-            loc,
-        )?)),
-        "cuda_device::warp::all" => Ok(Some(intrinsics::warp::emit_warp_vote(
+        "cuda_device::warp::shuffle_up_f32_sync" => {
+            Ok(Some(intrinsics::warp::emit_warp_shuffle_f32(
+                ctx,
+                body,
+                dialect_nvvm::ops::ShflSyncUpF32Op::get_concrete_op_info(),
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+        "cuda_device::warp::shuffle_down_f32_sync" => {
+            Ok(Some(intrinsics::warp::emit_warp_shuffle_f32(
+                ctx,
+                body,
+                dialect_nvvm::ops::ShflSyncDownF32Op::get_concrete_op_info(),
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+        "cuda_device::warp::shuffle_xor_f32_sync" => {
+            Ok(Some(intrinsics::warp::emit_warp_shuffle_f32(
+                ctx,
+                body,
+                dialect_nvvm::ops::ShflSyncBflyF32Op::get_concrete_op_info(),
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+        "cuda_device::warp::all_sync" => Ok(Some(intrinsics::warp::emit_warp_vote(
             ctx,
             body,
             dialect_nvvm::ops::VoteSyncAllOp::get_concrete_op_info(),
@@ -2227,7 +2348,7 @@ fn try_dispatch_intrinsic(
             block_map,
             loc,
         )?)),
-        "cuda_device::warp::any" => Ok(Some(intrinsics::warp::emit_warp_vote(
+        "cuda_device::warp::any_sync" => Ok(Some(intrinsics::warp::emit_warp_vote(
             ctx,
             body,
             dialect_nvvm::ops::VoteSyncAnyOp::get_concrete_op_info(),
@@ -2241,10 +2362,66 @@ fn try_dispatch_intrinsic(
             block_map,
             loc,
         )?)),
-        "cuda_device::warp::ballot" => Ok(Some(intrinsics::warp::emit_warp_vote(
+        "cuda_device::warp::ballot_sync" => Ok(Some(intrinsics::warp::emit_warp_vote(
             ctx,
             body,
             dialect_nvvm::ops::VoteSyncBallotOp::get_concrete_op_info(),
+            true,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+        "cuda_device::warp::match_any_sync" => Ok(Some(intrinsics::warp::emit_warp_match(
+            ctx,
+            body,
+            dialect_nvvm::ops::MatchAnySyncI32Op::get_concrete_op_info(),
+            false,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+        "cuda_device::warp::match_any_i64_sync" => Ok(Some(intrinsics::warp::emit_warp_match(
+            ctx,
+            body,
+            dialect_nvvm::ops::MatchAnySyncI64Op::get_concrete_op_info(),
+            true,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+        "cuda_device::warp::match_all_sync" => Ok(Some(intrinsics::warp::emit_warp_match(
+            ctx,
+            body,
+            dialect_nvvm::ops::MatchAllSyncI32Op::get_concrete_op_info(),
+            false,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+        "cuda_device::warp::match_all_i64_sync" => Ok(Some(intrinsics::warp::emit_warp_match(
+            ctx,
+            body,
+            dialect_nvvm::ops::MatchAllSyncI64Op::get_concrete_op_info(),
             true,
             args,
             destination,

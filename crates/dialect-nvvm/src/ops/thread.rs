@@ -13,10 +13,18 @@
 //! ├──────────────────────┼──────────────┼────────────────────────────┤
 //! │ ReadPtxSregTidXOp    │ %tid.x       │ Thread ID within block (X) │
 //! │ ReadPtxSregTidYOp    │ %tid.y       │ Thread ID within block (Y) │
+//! │ ReadPtxSregTidZOp    │ %tid.z       │ Thread ID within block (Z) │
 //! │ ReadPtxSregCtaidXOp  │ %ctaid.x     │ Block ID within grid (X)   │
 //! │ ReadPtxSregCtaidYOp  │ %ctaid.y     │ Block ID within grid (Y)   │
+//! │ ReadPtxSregCtaidZOp  │ %ctaid.z     │ Block ID within grid (Z)   │
 //! │ ReadPtxSregNtidXOp   │ %ntid.x      │ Block dimension (X)        │
 //! │ ReadPtxSregNtidYOp   │ %ntid.y      │ Block dimension (Y)        │
+//! │ ReadPtxSregNtidZOp   │ %ntid.z      │ Block dimension (Z)        │
+//! │ ReadPtxSregNctaidXOp │ %nctaid.x    │ Grid dimension (X)         │
+//! │ ReadPtxSregNctaidYOp │ %nctaid.y    │ Grid dimension (Y)         │
+//! │ ReadPtxSregNctaidZOp │ %nctaid.z    │ Grid dimension (Z)         │
+//! │ ReadPtxSregEnvReg1Op │ %envreg1     │ Driver ABI envreg 1        │
+//! │ ReadPtxSregEnvReg2Op │ %envreg2     │ Driver ABI envreg 2        │
 //! │ Barrier0Op           │ bar.sync 0   │ Block-wide barrier         │
 //! │ ThreadfenceBlockOp   │ membar.cta   │ Block-scoped memory fence  │
 //! │ ThreadfenceOp        │ membar.gl    │ Device-scoped memory fence │
@@ -340,6 +348,375 @@ impl Verify for ReadPtxSregNtidYOp {
 }
 
 // =============================================================================
+// Z-Dimension Indexing
+// =============================================================================
+
+/// Read the Z component of the thread ID within the block.
+///
+/// Corresponds to `llvm.nvvm.read.ptx.sreg.tid.z` / PTX `%tid.z`.
+///
+/// # Verification
+///
+/// - Must have 0 operands
+/// - Must have 1 result of type `i32`
+#[pliron_op(
+    name = "nvvm.read_ptx_sreg_tid_z",
+    format,
+    interfaces = [NOpdsInterface<0>, NResultsInterface<1>],
+)]
+pub struct ReadPtxSregTidZOp;
+
+impl ReadPtxSregTidZOp {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        ReadPtxSregTidZOp { op }
+    }
+}
+
+impl Verify for ReadPtxSregTidZOp {
+    fn verify(&self, ctx: &Context) -> Result<(), Error> {
+        let op = &*self.get_operation().deref(ctx);
+        let res = op.get_result(0);
+        let ty = res.get_type(ctx);
+
+        let ty_obj = ty.deref(ctx);
+        let int_ty = match ty_obj.downcast_ref::<IntegerType>() {
+            Some(ty) => ty,
+            None => {
+                return verify_err!(op.loc(), "nvvm.read_ptx_sreg_tid_z result must be integer");
+            }
+        };
+
+        if int_ty.width() != 32 {
+            return verify_err!(
+                op.loc(),
+                "nvvm.read_ptx_sreg_tid_z result must be 32-bit integer"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Read the Z component of the block ID within the grid.
+///
+/// Corresponds to `llvm.nvvm.read.ptx.sreg.ctaid.z` / PTX `%ctaid.z`.
+#[pliron_op(
+    name = "nvvm.read_ptx_sreg_ctaid_z",
+    format,
+    interfaces = [NOpdsInterface<0>, NResultsInterface<1>],
+)]
+pub struct ReadPtxSregCtaidZOp;
+
+impl ReadPtxSregCtaidZOp {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        ReadPtxSregCtaidZOp { op }
+    }
+}
+
+impl Verify for ReadPtxSregCtaidZOp {
+    fn verify(&self, ctx: &Context) -> Result<(), Error> {
+        let op = &*self.get_operation().deref(ctx);
+        let res = op.get_result(0);
+        let ty = res.get_type(ctx);
+
+        let ty_obj = ty.deref(ctx);
+        let int_ty = match ty_obj.downcast_ref::<IntegerType>() {
+            Some(ty) => ty,
+            None => {
+                return verify_err!(
+                    op.loc(),
+                    "nvvm.read_ptx_sreg_ctaid_z result must be integer"
+                );
+            }
+        };
+
+        if int_ty.width() != 32 {
+            return verify_err!(
+                op.loc(),
+                "nvvm.read_ptx_sreg_ctaid_z result must be 32-bit integer"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Read the Z component of the block dimension (threads per block).
+///
+/// Corresponds to `llvm.nvvm.read.ptx.sreg.ntid.z` / PTX `%ntid.z`.
+#[pliron_op(
+    name = "nvvm.read_ptx_sreg_ntid_z",
+    format,
+    interfaces = [NOpdsInterface<0>, NResultsInterface<1>],
+)]
+pub struct ReadPtxSregNtidZOp;
+
+impl ReadPtxSregNtidZOp {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        ReadPtxSregNtidZOp { op }
+    }
+}
+
+impl Verify for ReadPtxSregNtidZOp {
+    fn verify(&self, ctx: &Context) -> Result<(), Error> {
+        let op = &*self.get_operation().deref(ctx);
+        let res = op.get_result(0);
+        let ty = res.get_type(ctx);
+
+        let ty_obj = ty.deref(ctx);
+        let int_ty = match ty_obj.downcast_ref::<IntegerType>() {
+            Some(ty) => ty,
+            None => {
+                return verify_err!(op.loc(), "nvvm.read_ptx_sreg_ntid_z result must be integer");
+            }
+        };
+
+        if int_ty.width() != 32 {
+            return verify_err!(
+                op.loc(),
+                "nvvm.read_ptx_sreg_ntid_z result must be 32-bit integer"
+            );
+        }
+        Ok(())
+    }
+}
+
+// =============================================================================
+// Grid Dimension Indexing (nctaid)
+// =============================================================================
+
+/// Read the X component of the grid dimension (number of blocks per grid).
+///
+/// Corresponds to `llvm.nvvm.read.ptx.sreg.nctaid.x` / PTX `%nctaid.x`.
+#[pliron_op(
+    name = "nvvm.read_ptx_sreg_nctaid_x",
+    format,
+    interfaces = [NOpdsInterface<0>, NResultsInterface<1>],
+)]
+pub struct ReadPtxSregNctaidXOp;
+
+impl ReadPtxSregNctaidXOp {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        ReadPtxSregNctaidXOp { op }
+    }
+}
+
+impl Verify for ReadPtxSregNctaidXOp {
+    fn verify(&self, ctx: &Context) -> Result<(), Error> {
+        let op = &*self.get_operation().deref(ctx);
+        let res = op.get_result(0);
+        let ty = res.get_type(ctx);
+
+        let ty_obj = ty.deref(ctx);
+        let int_ty = match ty_obj.downcast_ref::<IntegerType>() {
+            Some(ty) => ty,
+            None => {
+                return verify_err!(
+                    op.loc(),
+                    "nvvm.read_ptx_sreg_nctaid_x result must be integer"
+                );
+            }
+        };
+
+        if int_ty.width() != 32 {
+            return verify_err!(
+                op.loc(),
+                "nvvm.read_ptx_sreg_nctaid_x result must be 32-bit integer"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Read the Y component of the grid dimension.
+///
+/// Corresponds to `llvm.nvvm.read.ptx.sreg.nctaid.y` / PTX `%nctaid.y`.
+#[pliron_op(
+    name = "nvvm.read_ptx_sreg_nctaid_y",
+    format,
+    interfaces = [NOpdsInterface<0>, NResultsInterface<1>],
+)]
+pub struct ReadPtxSregNctaidYOp;
+
+impl ReadPtxSregNctaidYOp {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        ReadPtxSregNctaidYOp { op }
+    }
+}
+
+impl Verify for ReadPtxSregNctaidYOp {
+    fn verify(&self, ctx: &Context) -> Result<(), Error> {
+        let op = &*self.get_operation().deref(ctx);
+        let res = op.get_result(0);
+        let ty = res.get_type(ctx);
+
+        let ty_obj = ty.deref(ctx);
+        let int_ty = match ty_obj.downcast_ref::<IntegerType>() {
+            Some(ty) => ty,
+            None => {
+                return verify_err!(
+                    op.loc(),
+                    "nvvm.read_ptx_sreg_nctaid_y result must be integer"
+                );
+            }
+        };
+
+        if int_ty.width() != 32 {
+            return verify_err!(
+                op.loc(),
+                "nvvm.read_ptx_sreg_nctaid_y result must be 32-bit integer"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Read the Z component of the grid dimension.
+///
+/// Corresponds to `llvm.nvvm.read.ptx.sreg.nctaid.z` / PTX `%nctaid.z`.
+#[pliron_op(
+    name = "nvvm.read_ptx_sreg_nctaid_z",
+    format,
+    interfaces = [NOpdsInterface<0>, NResultsInterface<1>],
+)]
+pub struct ReadPtxSregNctaidZOp;
+
+impl ReadPtxSregNctaidZOp {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        ReadPtxSregNctaidZOp { op }
+    }
+}
+
+impl Verify for ReadPtxSregNctaidZOp {
+    fn verify(&self, ctx: &Context) -> Result<(), Error> {
+        let op = &*self.get_operation().deref(ctx);
+        let res = op.get_result(0);
+        let ty = res.get_type(ctx);
+
+        let ty_obj = ty.deref(ctx);
+        let int_ty = match ty_obj.downcast_ref::<IntegerType>() {
+            Some(ty) => ty,
+            None => {
+                return verify_err!(
+                    op.loc(),
+                    "nvvm.read_ptx_sreg_nctaid_z result must be integer"
+                );
+            }
+        };
+
+        if int_ty.width() != 32 {
+            return verify_err!(
+                op.loc(),
+                "nvvm.read_ptx_sreg_nctaid_z result must be 32-bit integer"
+            );
+        }
+        Ok(())
+    }
+}
+
+// =============================================================================
+// Driver-ABI Environment Registers (envreg)
+// =============================================================================
+//
+// PTX exposes 32 environment registers (%envreg0..%envreg31) that the CUDA
+// driver populates before kernel entry. For cooperative launches the driver
+// writes the address of a per-launch "grid workspace" struct into envreg1
+// (low 32 bits) and envreg2 (high 32 bits). The grid workspace contains the
+// barrier counter used by `cooperative_groups::grid::sync()`.
+
+/// Read PTX environment register 1.
+///
+/// For cooperative launches: low 32 bits of the grid workspace pointer.
+#[pliron_op(
+    name = "nvvm.read_ptx_sreg_envreg1",
+    format,
+    interfaces = [NOpdsInterface<0>, NResultsInterface<1>],
+)]
+pub struct ReadPtxSregEnvReg1Op;
+
+impl ReadPtxSregEnvReg1Op {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        ReadPtxSregEnvReg1Op { op }
+    }
+}
+
+impl Verify for ReadPtxSregEnvReg1Op {
+    fn verify(&self, ctx: &Context) -> Result<(), Error> {
+        let op = &*self.get_operation().deref(ctx);
+        let res = op.get_result(0);
+        let ty = res.get_type(ctx);
+
+        let ty_obj = ty.deref(ctx);
+        let int_ty = match ty_obj.downcast_ref::<IntegerType>() {
+            Some(ty) => ty,
+            None => {
+                return verify_err!(
+                    op.loc(),
+                    "nvvm.read_ptx_sreg_envreg1 result must be integer"
+                );
+            }
+        };
+
+        if int_ty.width() != 32 {
+            return verify_err!(
+                op.loc(),
+                "nvvm.read_ptx_sreg_envreg1 result must be 32-bit integer"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Read PTX environment register 2.
+///
+/// For cooperative launches: high 32 bits of the grid workspace pointer.
+#[pliron_op(
+    name = "nvvm.read_ptx_sreg_envreg2",
+    format,
+    interfaces = [NOpdsInterface<0>, NResultsInterface<1>],
+)]
+pub struct ReadPtxSregEnvReg2Op;
+
+impl ReadPtxSregEnvReg2Op {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        ReadPtxSregEnvReg2Op { op }
+    }
+}
+
+impl Verify for ReadPtxSregEnvReg2Op {
+    fn verify(&self, ctx: &Context) -> Result<(), Error> {
+        let op = &*self.get_operation().deref(ctx);
+        let res = op.get_result(0);
+        let ty = res.get_type(ctx);
+
+        let ty_obj = ty.deref(ctx);
+        let int_ty = match ty_obj.downcast_ref::<IntegerType>() {
+            Some(ty) => ty,
+            None => {
+                return verify_err!(
+                    op.loc(),
+                    "nvvm.read_ptx_sreg_envreg2 result must be integer"
+                );
+            }
+        };
+
+        if int_ty.width() != 32 {
+            return verify_err!(
+                op.loc(),
+                "nvvm.read_ptx_sreg_envreg2 result must be 32-bit integer"
+            );
+        }
+        Ok(())
+    }
+}
+
+// =============================================================================
 // Block Synchronization
 // =============================================================================
 
@@ -437,6 +814,17 @@ pub(super) fn register(ctx: &mut Context) {
     ReadPtxSregTidYOp::register(ctx);
     ReadPtxSregCtaidYOp::register(ctx);
     ReadPtxSregNtidYOp::register(ctx);
+    // Z-dimension
+    ReadPtxSregTidZOp::register(ctx);
+    ReadPtxSregCtaidZOp::register(ctx);
+    ReadPtxSregNtidZOp::register(ctx);
+    // Grid dimensions
+    ReadPtxSregNctaidXOp::register(ctx);
+    ReadPtxSregNctaidYOp::register(ctx);
+    ReadPtxSregNctaidZOp::register(ctx);
+    // Driver-ABI environment registers
+    ReadPtxSregEnvReg1Op::register(ctx);
+    ReadPtxSregEnvReg2Op::register(ctx);
     // Synchronization
     Barrier0Op::register(ctx);
     ThreadfenceBlockOp::register(ctx);
