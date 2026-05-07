@@ -260,8 +260,51 @@ pub fn blockIdx_y() -> u32 {
 /// with the appropriate PTX intrinsic. The body should never execute.
 #[inline(never)]
 pub fn blockDim_y() -> u32 {
-    // Lowered to: call i32 @llvm.nvvm.read.ptx.sreg.ntid.y()
     unreachable!("blockDim_y called outside CUDA kernel context")
+}
+
+// =============================================================================
+// Z-Dimension Intrinsics
+// =============================================================================
+
+/// Get threadIdx.z (thread index within block, Z dimension).
+#[inline(never)]
+pub fn threadIdx_z() -> u32 {
+    unreachable!("threadIdx_z called outside CUDA kernel context")
+}
+
+/// Get blockIdx.z (block index within grid, Z dimension).
+#[inline(never)]
+pub fn blockIdx_z() -> u32 {
+    unreachable!("blockIdx_z called outside CUDA kernel context")
+}
+
+/// Get blockDim.z (block dimension, Z dimension).
+#[inline(never)]
+pub fn blockDim_z() -> u32 {
+    unreachable!("blockDim_z called outside CUDA kernel context")
+}
+
+// =============================================================================
+// Grid Dimensions (gridDim)
+// =============================================================================
+
+/// Get gridDim.x — number of blocks along the X axis of the grid.
+#[inline(never)]
+pub fn gridDim_x() -> u32 {
+    unreachable!("gridDim_x called outside CUDA kernel context")
+}
+
+/// Get gridDim.y — number of blocks along the Y axis of the grid.
+#[inline(never)]
+pub fn gridDim_y() -> u32 {
+    unreachable!("gridDim_y called outside CUDA kernel context")
+}
+
+/// Get gridDim.z — number of blocks along the Z axis of the grid.
+#[inline(never)]
+pub fn gridDim_z() -> u32 {
+    unreachable!("gridDim_z called outside CUDA kernel context")
 }
 
 // =============================================================================

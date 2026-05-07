@@ -1481,6 +1481,10 @@ struct CudaLaunchInput {
     /// Optional cluster dimensions (x, y, z) for thread block cluster launches.
     /// When present, uses `cuLaunchKernelEx` via `launch_cluster()` instead of `cuLaunchKernel`.
     cluster_dim: Option<syn::Expr>,
+    /// Optional cooperative-launch flag. When `true`, the kernel is launched
+    /// via `cuLaunchKernelEx` with `CU_LAUNCH_ATTRIBUTE_COOPERATIVE = 1`,
+    /// which is required for `cuda_device::grid::sync()` to work.
+    cooperative: Option<syn::Expr>,
 }
 
 impl CudaLaunchInput {
@@ -1517,6 +1521,7 @@ impl Parse for CudaLaunchInput {
         let mut config = None;
         let mut args = Vec::new();
         let mut cluster_dim = None;
+        let mut cooperative = None;
 
         while !input.is_empty() {
             let key: Ident = input.parse()?;
@@ -1528,6 +1533,7 @@ impl Parse for CudaLaunchInput {
                 "module" => module = Some(input.parse()?),
                 "config" => config = Some(input.parse()?),
                 "cluster_dim" => cluster_dim = Some(input.parse()?),
+                "cooperative" => cooperative = Some(input.parse()?),
                 "args" => {
                     let content;
                     bracketed!(content in input);
@@ -1541,7 +1547,7 @@ impl Parse for CudaLaunchInput {
                     return Err(syn::Error::new(
                         key.span(),
                         format!(
-                            "unknown field: {}. Expected: kernel, stream, module, config, cluster_dim, args",
+                            "unknown field: {}. Expected: kernel, stream, module, config, cluster_dim, cooperative, args",
                             key
                         ),
                     ));
@@ -1551,6 +1557,14 @@ impl Parse for CudaLaunchInput {
             let _ = input.parse::<Token![,]>();
         }
 
+        if cluster_dim.is_some() && cooperative.is_some() {
+            return Err(syn::Error::new(
+                input.span(),
+                "cuda_launch!: `cluster_dim` and `cooperative` are mutually exclusive — \
+                 cooperative cluster launches are not yet supported by this macro",
+            ));
+        }
+
         Ok(CudaLaunchInput {
             kernel: kernel.ok_or_else(|| syn::Error::new(input.span(), "missing 'kernel'"))?,
             stream: stream.ok_or_else(|| syn::Error::new(input.span(), "missing 'stream'"))?,
@@ -1558,6 +1572,7 @@ impl Parse for CudaLaunchInput {
             config: config.ok_or_else(|| syn::Error::new(input.span(), "missing 'config'"))?,
             args,
             cluster_dim,
+            cooperative,
         })
     }
 }
@@ -1589,7 +1604,10 @@ impl Parse for CudaLaunchInput {
 /// | `module`      | `Arc<CudaModule>` | Loaded PTX module containing the kernel       |
 /// | `config`      | `LaunchConfig`    | Grid/block dimensions, shared memory          |
 /// | `cluster_dim` | `(u32,u32,u32)`   | *(optional)* Cluster dims for `cuLaunchKernelEx` |
+/// | `cooperative` | `bool`            | *(optional)* Set `true` to launch via `cuLaunchKernelEx` with `CU_LAUNCH_ATTRIBUTE_COOPERATIVE` (required for `grid::sync()`) |
 /// | `args`        | `[arg, ...]`      | Kernel arguments (see below)                  |
+///
+/// `cluster_dim` and `cooperative` are mutually exclusive at this layer.
 ///
 /// # Argument forms
 ///
@@ -1613,6 +1631,7 @@ pub fn cuda_launch(input: TokenStream) -> TokenStream {
     let module = &input.module;
     let config = &input.config;
     let cluster_dim = &input.cluster_dim;
+    let cooperative = &input.cooperative;
 
     // Get base kernel name and generic arguments
     let (kernel_base, generics) = input.kernel_parts();
@@ -1726,9 +1745,9 @@ pub fn cuda_launch(input: TokenStream) -> TokenStream {
     // Build the instantiate helper name (for closures)
     let instantiate_name = format_ident!("{}{}", INSTANTIATE_PREFIX, kernel_base);
 
-    // Generate the launch call — either regular or cluster.
+    // Generate the launch call — regular, cluster, or cooperative.
     //
-    // Both paths use the stream-aware cuda_core helpers. Those helpers bind the
+    // All paths use the stream-aware cuda_core helpers. Those helpers bind the
     // stream's owning CUDA context to the calling thread and then delegate to
     // the raw cuLaunchKernel/cuLaunchKernelEx wrappers.
     let launch_call = if let Some(cdim) = cluster_dim {
@@ -1744,6 +1763,32 @@ pub fn cuda_launch(input: TokenStream) -> TokenStream {
                     (#stream).as_ref(),
                     &mut __args,
                 )
+            }
+        }
+    } else if let Some(coop) = cooperative {
+        quote! {
+            {
+                let __cfg = #config;
+                let __cooperative: bool = #coop;
+                if __cooperative {
+                    cuda_core::launch_kernel_cooperative_on_stream(
+                        &__func,
+                        __cfg.grid_dim,
+                        __cfg.block_dim,
+                        __cfg.shared_mem_bytes,
+                        (#stream).as_ref(),
+                        &mut __args,
+                    )
+                } else {
+                    cuda_core::launch_kernel_on_stream(
+                        &__func,
+                        __cfg.grid_dim,
+                        __cfg.block_dim,
+                        __cfg.shared_mem_bytes,
+                        (#stream).as_ref(),
+                        &mut __args,
+                    )
+                }
             }
         }
     } else {

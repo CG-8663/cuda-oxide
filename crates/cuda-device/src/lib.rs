@@ -14,19 +14,18 @@ pub mod atomic;
 pub mod barrier;
 pub mod clc;
 pub mod cluster;
+pub mod cooperative_groups;
 pub mod cusimd;
 pub mod debug;
 pub mod disjoint;
 pub mod fence;
+pub mod grid;
 pub mod shared;
 pub mod tcgen05;
 pub mod thread;
 pub mod tma;
 pub mod warp;
 pub mod wgmma;
-
-// Atomics module added -- see atomic.rs
-// TODO (npasham): Add cooperative_groups module - ThreadBlock, TiledPartition, grid::sync()
 
 pub use barrier::{
     // Core type

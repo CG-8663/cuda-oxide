@@ -12,7 +12,7 @@
 cuda-oxide is a custom rustc backend for compiling GPU kernels in pure Rust.
 The workspace combines:
 
-- single-source compilation -- host and device code live in the same file, built with one `cargo build`
+- single-source compilation -- host and device code live in the same file, built with one `cargo oxide build`
 - a rustc codegen backend that compiles `#[kernel]` functions to CUDA PTX
 - device-side abstractions (type-safe indexing, shared memory, scoped atomics, barriers, TMA, warp/cluster ops)
 - a host-side runtime for memory management and kernel launching (`cuda-core`, `cuda-async`)

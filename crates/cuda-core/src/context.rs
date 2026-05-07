@@ -213,6 +213,26 @@ impl CudaContext {
         }))
     }
 
+    /// Queries the device's marketing name (e.g. `"NVIDIA GeForce RTX 5090"`).
+    ///
+    /// Wraps `cuDeviceGetName` with a 256-byte buffer (driver guarantees
+    /// the name fits in 256 bytes including the trailing NUL). Returns the
+    /// decoded UTF-8 string with any trailing NULs stripped.
+    pub fn device_name(&self) -> Result<String, DriverError> {
+        self.bind_to_thread()?;
+        let mut buf = [0i8; 256];
+        unsafe {
+            cuda_bindings::cuDeviceGetName(buf.as_mut_ptr(), buf.len() as c_int, self.cu_device)
+                .result()?;
+        }
+        let bytes: Vec<u8> = buf
+            .iter()
+            .take_while(|&&c| c != 0)
+            .map(|&c| c as u8)
+            .collect();
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
     /// Queries the compute capability (SM version) of the device.
     ///
     /// Returns `(major, minor)` -- e.g. `(9, 0)` for Hopper H100.

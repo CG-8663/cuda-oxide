@@ -70,6 +70,69 @@ pub fn lane_id() -> u32 {
     unreachable!("lane_id called outside CUDA kernel context")
 }
 
+/// Synchronize a subset of warp lanes given by `mask`.
+///
+/// PTX `bar.warp.sync mask` (LLVM `@llvm.nvvm.bar.warp.sync(i32)`). All
+/// lanes whose bit is set in `mask` must reach this call with the **same**
+/// mask value before any of them proceeds. Lanes whose bit is clear are
+/// not affected and need not reach the call.
+///
+/// This is the primitive that backs `CoalescedThreads::sync()` and
+/// `WarpTile<N>::sync()` for sub-warp tiles. Straight-line warp-uniform
+/// code does not need it — but on Volta and newer the SIMT reconvergence
+/// model requires it after a divergent branch and before any other
+/// `*.sync` collective on a subset of lanes.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// if some_predicate {
+///     let mask = warp::active_mask();
+///     // ... do divergent work ...
+///     warp::sync_mask(mask);  // formal convergence point
+///     let leader = mask.trailing_zeros();
+///     let value = warp::shuffle_sync(mask, my_value, leader);
+/// }
+/// ```
+#[inline(never)]
+pub fn sync_mask(mask: u32) {
+    let _ = mask;
+    unreachable!("sync_mask called outside CUDA kernel context")
+}
+
+/// Bitmask of currently-converged lanes in this warp.
+///
+/// PTX `activemask.b32` (PTX 6.2+, sm_30+). Returns a 32-bit value where bit
+/// `k` is set iff lane `k` is currently converged with this thread (i.e.
+/// participating in this dynamic execution region).
+///
+/// In straight-line warp-uniform code this is `0xFFFFFFFF`. In divergent
+/// branches it shrinks to the subset of lanes that took the same branch.
+///
+/// # Common uses
+///
+/// - **Build a mask for `*_sync` calls inside divergent code**: when only
+///   some lanes reach a `ballot`/`shuffle`/`match` call site, pass
+///   `active_mask()` as the mask so the intrinsic only synchronises the
+///   participating lanes.
+/// - **Construct a `CoalescedThreads` group**: the typed group's membership
+///   set is the active mask captured at construction time.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// if some_predicate {
+///     // Only some lanes get here. Build a mask of who's actually present.
+///     let mask = warp::active_mask();
+///     let count = mask.count_ones();        // how many lanes converged here
+///     let leader = mask.trailing_zeros();   // lowest converged lane
+/// }
+/// ```
+#[inline(never)]
+pub fn active_mask() -> u32 {
+    unreachable!("active_mask called outside CUDA kernel context")
+}
+
 /// Get the warp ID within the current block.
 ///
 /// Computes: `threadIdx.x / 32`
@@ -83,18 +146,74 @@ pub fn warp_id() -> u32 {
 }
 
 // =============================================================================
+// Masked sync intrinsics — operand convention
+// =============================================================================
+//
+// The `*_sync(mask, ...)` functions below are the actual lowering targets.
+// They take an explicit 32-bit warp participation mask: bit `k` set means
+// lane `k` joins the collective. All non-exited lanes set in the mask must
+// reach the call with the same mask value (PTX `*.sync` intrinsic
+// constraints; see CUDA Programming Guide §5.4.6.6).
+//
+// The mask-less convenience functions (`ballot`, `shuffle`, ...) are
+// `#[inline(always)]` wrappers that pass `u32::MAX` (full warp). After MIR
+// inlining the codegen only ever sees the `*_sync` form.
+//
+// Typed group APIs (`WarpTile<N>`, `CoalescedThreads`) bake the right mask
+// into the call site; they're built on top of these primitives.
+
+// =============================================================================
 // Warp Shuffle - Integer (u32)
 // =============================================================================
 
-/// Shuffle: get value from any lane in the warp.
+/// Shuffle (masked): read `var` from `src_lane` for the given participation mask.
 ///
-/// Returns the value of `var` from the thread at `src_lane`.
-/// All threads in the warp execute this simultaneously.
+/// PTX `shfl.sync.idx.b32`. The full-warp shorthand is [`shuffle`].
 ///
 /// # Parameters
 ///
-/// - `var`: The value to share (each thread provides its own)
-/// - `src_lane`: The lane ID (0-31) to read from
+/// - `mask`: warp lane participation mask (`u32::MAX` = all 32 lanes)
+/// - `var`: the value to share (each lane provides its own)
+/// - `src_lane`: the lane ID (0-31) to read from
+#[inline(never)]
+pub fn shuffle_sync(mask: u32, var: u32, src_lane: u32) -> u32 {
+    let _ = (mask, var, src_lane);
+    unreachable!("shuffle_sync called outside CUDA kernel context")
+}
+
+/// Shuffle XOR (masked): butterfly exchange under a mask.
+///
+/// PTX `shfl.sync.bfly.b32`. The full-warp shorthand is [`shuffle_xor`].
+#[inline(never)]
+pub fn shuffle_xor_sync(mask: u32, var: u32, lane_mask: u32) -> u32 {
+    let _ = (mask, var, lane_mask);
+    unreachable!("shuffle_xor_sync called outside CUDA kernel context")
+}
+
+/// Shuffle down (masked): read from `(lane_id + delta)` under a mask.
+///
+/// PTX `shfl.sync.down.b32`. The full-warp shorthand is [`shuffle_down`].
+#[inline(never)]
+pub fn shuffle_down_sync(mask: u32, var: u32, delta: u32) -> u32 {
+    let _ = (mask, var, delta);
+    unreachable!("shuffle_down_sync called outside CUDA kernel context")
+}
+
+/// Shuffle up (masked): read from `(lane_id - delta)` under a mask.
+///
+/// PTX `shfl.sync.up.b32`. The full-warp shorthand is [`shuffle_up`].
+#[inline(never)]
+pub fn shuffle_up_sync(mask: u32, var: u32, delta: u32) -> u32 {
+    let _ = (mask, var, delta);
+    unreachable!("shuffle_up_sync called outside CUDA kernel context")
+}
+
+/// Shuffle: get value from any lane in the warp (full-warp shorthand).
+///
+/// Equivalent to [`shuffle_sync`]`(u32::MAX, var, src_lane)`.
+///
+/// All 32 lanes of the warp must reach this call together. Use
+/// [`shuffle_sync`] when you need to scope to a sub-warp.
 ///
 /// # Example
 ///
@@ -102,204 +221,180 @@ pub fn warp_id() -> u32 {
 /// // Broadcast lane 0's value to all lanes
 /// let broadcasted = warp::shuffle(my_value, 0);
 /// ```
-#[inline(never)]
+#[inline(always)]
 pub fn shuffle(var: u32, src_lane: u32) -> u32 {
-    let _ = (var, src_lane);
-    // Lowered to: call i32 @llvm.nvvm.shfl.sync.idx.i32(i32 -1, i32 %var, i32 %src_lane, i32 31)
-    unreachable!("shuffle called outside CUDA kernel context")
+    shuffle_sync(u32::MAX, var, src_lane)
 }
 
-/// Shuffle XOR: exchange values with lane at `(lane_id ^ lane_mask)`.
+/// Shuffle XOR: butterfly exchange across the full warp.
 ///
-/// This is commonly used for butterfly reductions. Each lane exchanges
-/// with a partner determined by XOR-ing its lane ID with the mask.
-///
-/// # Parameters
-///
-/// - `var`: The value to exchange
-/// - `lane_mask`: XOR mask (typically powers of 2: 1, 2, 4, 8, 16)
+/// Equivalent to [`shuffle_xor_sync`]`(u32::MAX, var, lane_mask)`.
 ///
 /// # Example: Butterfly Reduction
 ///
 /// ```rust,ignore
-/// // Sum all 32 values in warp
 /// let mut sum = my_value;
-/// sum = sum + warp::shuffle_xor(sum, 16);  // Exchange with lane +/- 16
-/// sum = sum + warp::shuffle_xor(sum, 8);   // Exchange with lane +/- 8
-/// sum = sum + warp::shuffle_xor(sum, 4);   // etc.
+/// sum = sum + warp::shuffle_xor(sum, 16);
+/// sum = sum + warp::shuffle_xor(sum, 8);
+/// sum = sum + warp::shuffle_xor(sum, 4);
 /// sum = sum + warp::shuffle_xor(sum, 2);
 /// sum = sum + warp::shuffle_xor(sum, 1);
-/// // Now all lanes have the sum
 /// ```
-#[inline(never)]
+#[inline(always)]
 pub fn shuffle_xor(var: u32, lane_mask: u32) -> u32 {
-    let _ = (var, lane_mask);
-    // Lowered to: call i32 @llvm.nvvm.shfl.sync.bfly.i32(i32 -1, i32 %var, i32 %lane_mask, i32 31)
-    unreachable!("shuffle_xor called outside CUDA kernel context")
+    shuffle_xor_sync(u32::MAX, var, lane_mask)
 }
 
-/// Shuffle down: get value from lane at `(lane_id + delta)`.
+/// Shuffle down: read from `(lane_id + delta)` across the full warp.
 ///
-/// Commonly used for sequential reductions where each lane reads from
-/// a higher-numbered lane.
-///
-/// # Parameters
-///
-/// - `var`: The value to share
-/// - `delta`: Offset to add to lane ID (positive direction)
-///
-/// # Example
-///
-/// ```rust,ignore
-/// // Sequential reduction
-/// let mut sum = my_value;
-/// sum = sum + warp::shuffle_down(sum, 16);
-/// sum = sum + warp::shuffle_down(sum, 8);
-/// sum = sum + warp::shuffle_down(sum, 4);
-/// sum = sum + warp::shuffle_down(sum, 2);
-/// sum = sum + warp::shuffle_down(sum, 1);
-/// // Lane 0 has the sum
-/// ```
-#[inline(never)]
+/// Equivalent to [`shuffle_down_sync`]`(u32::MAX, var, delta)`.
+#[inline(always)]
 pub fn shuffle_down(var: u32, delta: u32) -> u32 {
-    let _ = (var, delta);
-    // Lowered to: call i32 @llvm.nvvm.shfl.sync.down.i32(i32 -1, i32 %var, i32 %delta, i32 31)
-    unreachable!("shuffle_down called outside CUDA kernel context")
+    shuffle_down_sync(u32::MAX, var, delta)
 }
 
-/// Shuffle up: get value from lane at `(lane_id - delta)`.
+/// Shuffle up: read from `(lane_id - delta)` across the full warp.
 ///
-/// Commonly used for prefix sums (scan) where each lane reads from
-/// a lower-numbered lane.
-///
-/// # Parameters
-///
-/// - `var`: The value to share
-/// - `delta`: Offset to subtract from lane ID (negative direction)
-///
-/// # Example
-///
-/// ```rust,ignore
-/// // Prefix sum (inclusive scan)
-/// let mut sum = my_value;
-/// let tmp = warp::shuffle_up(sum, 1);
-/// if warp::lane_id() >= 1 { sum = sum + tmp; }
-/// let tmp = warp::shuffle_up(sum, 2);
-/// if warp::lane_id() >= 2 { sum = sum + tmp; }
-/// // ... continue for 4, 8, 16
-/// ```
-#[inline(never)]
+/// Equivalent to [`shuffle_up_sync`]`(u32::MAX, var, delta)`.
+#[inline(always)]
 pub fn shuffle_up(var: u32, delta: u32) -> u32 {
-    let _ = (var, delta);
-    // Lowered to: call i32 @llvm.nvvm.shfl.sync.up.i32(i32 -1, i32 %var, i32 %delta, i32 0)
-    unreachable!("shuffle_up called outside CUDA kernel context")
+    shuffle_up_sync(u32::MAX, var, delta)
 }
 
 // =============================================================================
 // Warp Shuffle - Float (f32)
 // =============================================================================
 
-/// Shuffle f32: get value from any lane in the warp.
-///
-/// Float version of [`shuffle`]. Returns the value of `var` from the thread at `src_lane`.
+/// Shuffle (masked) f32: float variant of [`shuffle_sync`].
 #[inline(never)]
+pub fn shuffle_f32_sync(mask: u32, var: f32, src_lane: u32) -> f32 {
+    let _ = (mask, var, src_lane);
+    unreachable!("shuffle_f32_sync called outside CUDA kernel context")
+}
+
+/// Shuffle XOR (masked) f32: float variant of [`shuffle_xor_sync`].
+#[inline(never)]
+pub fn shuffle_xor_f32_sync(mask: u32, var: f32, lane_mask: u32) -> f32 {
+    let _ = (mask, var, lane_mask);
+    unreachable!("shuffle_xor_f32_sync called outside CUDA kernel context")
+}
+
+/// Shuffle down (masked) f32: float variant of [`shuffle_down_sync`].
+#[inline(never)]
+pub fn shuffle_down_f32_sync(mask: u32, var: f32, delta: u32) -> f32 {
+    let _ = (mask, var, delta);
+    unreachable!("shuffle_down_f32_sync called outside CUDA kernel context")
+}
+
+/// Shuffle up (masked) f32: float variant of [`shuffle_up_sync`].
+#[inline(never)]
+pub fn shuffle_up_f32_sync(mask: u32, var: f32, delta: u32) -> f32 {
+    let _ = (mask, var, delta);
+    unreachable!("shuffle_up_f32_sync called outside CUDA kernel context")
+}
+
+/// Shuffle f32 (full-warp): equivalent to [`shuffle_f32_sync`]`(u32::MAX, ...)`.
+#[inline(always)]
 pub fn shuffle_f32(var: f32, src_lane: u32) -> f32 {
-    let _ = (var, src_lane);
-    // Lowered to: call float @llvm.nvvm.shfl.sync.idx.f32(i32 -1, float %var, i32 %src_lane, i32 31)
-    unreachable!("shuffle_f32 called outside CUDA kernel context")
+    shuffle_f32_sync(u32::MAX, var, src_lane)
 }
 
-/// Shuffle XOR f32: exchange values with lane at `(lane_id ^ lane_mask)`.
-///
-/// Float version of [`shuffle_xor`]. Commonly used for floating-point reductions.
-#[inline(never)]
+/// Shuffle XOR f32 (full-warp): equivalent to [`shuffle_xor_f32_sync`]`(u32::MAX, ...)`.
+#[inline(always)]
 pub fn shuffle_xor_f32(var: f32, lane_mask: u32) -> f32 {
-    let _ = (var, lane_mask);
-    // Lowered to: call float @llvm.nvvm.shfl.sync.bfly.f32(i32 -1, float %var, i32 %lane_mask, i32 31)
-    unreachable!("shuffle_xor_f32 called outside CUDA kernel context")
+    shuffle_xor_f32_sync(u32::MAX, var, lane_mask)
 }
 
-/// Shuffle down f32: get value from lane at `(lane_id + delta)`.
-///
-/// Float version of [`shuffle_down`].
-#[inline(never)]
+/// Shuffle down f32 (full-warp): equivalent to [`shuffle_down_f32_sync`]`(u32::MAX, ...)`.
+#[inline(always)]
 pub fn shuffle_down_f32(var: f32, delta: u32) -> f32 {
-    let _ = (var, delta);
-    // Lowered to: call float @llvm.nvvm.shfl.sync.down.f32(i32 -1, float %var, i32 %delta, i32 31)
-    unreachable!("shuffle_down_f32 called outside CUDA kernel context")
+    shuffle_down_f32_sync(u32::MAX, var, delta)
 }
 
-/// Shuffle up f32: get value from lane at `(lane_id - delta)`.
-///
-/// Float version of [`shuffle_up`].
-#[inline(never)]
+/// Shuffle up f32 (full-warp): equivalent to [`shuffle_up_f32_sync`]`(u32::MAX, ...)`.
+#[inline(always)]
 pub fn shuffle_up_f32(var: f32, delta: u32) -> f32 {
-    let _ = (var, delta);
-    // Lowered to: call float @llvm.nvvm.shfl.sync.up.f32(i32 -1, float %var, i32 %delta, i32 0)
-    unreachable!("shuffle_up_f32 called outside CUDA kernel context")
+    shuffle_up_f32_sync(u32::MAX, var, delta)
 }
 
 // =============================================================================
 // Warp Vote Operations
 // =============================================================================
 
+/// Vote ALL (masked): true if `predicate` holds for every participating lane.
+///
+/// PTX `vote.sync.all`. The full-warp shorthand is [`all`].
+#[inline(never)]
+pub fn all_sync(mask: u32, predicate: bool) -> bool {
+    let _ = (mask, predicate);
+    unreachable!("all_sync called outside CUDA kernel context")
+}
+
+/// Vote ANY (masked): true if `predicate` holds for at least one participating lane.
+///
+/// PTX `vote.sync.any`. The full-warp shorthand is [`any`].
+#[inline(never)]
+pub fn any_sync(mask: u32, predicate: bool) -> bool {
+    let _ = (mask, predicate);
+    unreachable!("any_sync called outside CUDA kernel context")
+}
+
+/// Vote BALLOT (masked): bitmask of lanes whose `predicate` is true.
+///
+/// PTX `vote.sync.ballot`. Returned bit `k` is set iff lane `k` is in `mask`
+/// and its predicate is true; all other bits are 0. The full-warp shorthand
+/// is [`ballot`].
+#[inline(never)]
+pub fn ballot_sync(mask: u32, predicate: bool) -> u32 {
+    let _ = (mask, predicate);
+    unreachable!("ballot_sync called outside CUDA kernel context")
+}
+
 /// Warp vote: returns true if ALL active threads have predicate true.
 ///
-/// This is a collective operation - all threads in the warp participate.
+/// Equivalent to [`all_sync`]`(u32::MAX, predicate)`. Requires every lane
+/// in the warp to reach the call.
 ///
 /// # Example
 ///
 /// ```rust,ignore
 /// let all_valid = warp::all(my_value > 0.0);
-/// if !all_valid {
-///     // At least one thread has invalid data
-/// }
 /// ```
-#[inline(never)]
+#[inline(always)]
 pub fn all(predicate: bool) -> bool {
-    let _ = predicate;
-    // Lowered to: call i1 @llvm.nvvm.vote.sync.all(i32 -1, i1 %predicate)
-    unreachable!("all called outside CUDA kernel context")
+    all_sync(u32::MAX, predicate)
 }
 
 /// Warp vote: returns true if ANY active thread has predicate true.
 ///
-/// This is a collective operation - all threads in the warp participate.
+/// Equivalent to [`any_sync`]`(u32::MAX, predicate)`.
 ///
 /// # Example
 ///
 /// ```rust,ignore
 /// let any_overflow = warp::any(result > MAX_VALUE);
-/// if any_overflow {
-///     // At least one thread detected overflow
-/// }
 /// ```
-#[inline(never)]
+#[inline(always)]
 pub fn any(predicate: bool) -> bool {
-    let _ = predicate;
-    // Lowered to: call i1 @llvm.nvvm.vote.sync.any(i32 -1, i1 %predicate)
-    unreachable!("any called outside CUDA kernel context")
+    any_sync(u32::MAX, predicate)
 }
 
-/// Warp ballot: returns a 32-bit mask where bit i is set if thread i has predicate true.
+/// Warp ballot: 32-bit mask where bit `i` indicates lane `i`'s predicate.
 ///
-/// This is useful for counting threads, finding active lanes, and
-/// implementing warp-level control flow.
+/// Equivalent to [`ballot_sync`]`(u32::MAX, predicate)`. Useful for counting
+/// matching lanes, finding the first match, and implementing warp-level
+/// control flow.
 ///
 /// # Example
 ///
 /// ```rust,ignore
 /// let mask = warp::ballot(my_value > 0.0);
-/// let count = mask.count_ones();  // How many threads have positive values
-///
-/// // Find the first lane with positive value
+/// let count = mask.count_ones();
 /// let first_positive_lane = mask.trailing_zeros();
 /// ```
-#[inline(never)]
+#[inline(always)]
 pub fn ballot(predicate: bool) -> u32 {
-    let _ = predicate;
-    // Lowered to: call i32 @llvm.nvvm.vote.sync.ballot(i32 -1, i1 %predicate)
-    unreachable!("ballot called outside CUDA kernel context")
+    ballot_sync(u32::MAX, predicate)
 }
 
 /// Count threads with predicate true (population count of ballot).
@@ -308,4 +403,91 @@ pub fn ballot(predicate: bool) -> u32 {
 #[inline(always)]
 pub fn popc(predicate: bool) -> u32 {
     ballot(predicate).count_ones()
+}
+
+// =============================================================================
+// Warp Match Operations (sm_70+)
+// =============================================================================
+//
+// `match.any.sync` and `match.all.sync` are warp-wide broadcast-and-compare
+// instructions introduced on Volta. They take a 32-bit value from each
+// participating lane and return a 32-bit bitmask describing which lanes share
+// my value.
+//
+// Both come in 32-bit and 64-bit value variants, lowered to
+// `@llvm.nvvm.match.{any,all}.sync.{i32,i64}` at codegen time.
+//
+// Use cases:
+// - Bulk-insert deduplication: `match_any_sync(mask, key)` tells me which
+//   lanes in the warp are inserting the *same* key, so the lowest such lane
+//   can be the "winner" for the actual atomic write.
+// - Cluster head detection: lane `k` is a cluster head iff bit `k` is the
+//   lowest set bit in `match_any_sync(mask, value)`.
+// - Equality reductions: `match_all_sync(mask, value) != 0` is true iff all
+//   participating lanes hold the same value.
+//
+// Floating-point: bitcast the value to u32/u64 first. Cooperative groups
+// match.any.sync compares bit patterns, so NaN handling is bit-exact (two
+// NaNs match iff their bit representations match — the IEEE comparison
+// semantics for NaN do *not* apply here).
+
+/// Match-any (32-bit, masked): bitmask of lanes whose `value` equals mine.
+///
+/// PTX `match.any.sync.b32`. Lowered to `@llvm.nvvm.match.any.sync.i32`.
+/// Requires sm_70+. Returned bit `k` is set iff lane `k` is in `mask` and
+/// its `value` equals this lane's `value`.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// // Find the lowest lane in my warp that has my key (bulk-insert leader).
+/// let same_key_lanes = warp::match_any_sync(u32::MAX, key);
+/// let leader_lane = same_key_lanes.trailing_zeros();
+/// if warp::lane_id() == leader_lane {
+///     // I'm the leader for this key — do the atomic insert.
+/// }
+/// ```
+#[inline(never)]
+pub fn match_any_sync(mask: u32, value: u32) -> u32 {
+    let _ = (mask, value);
+    unreachable!("match_any_sync called outside CUDA kernel context")
+}
+
+/// Match-any (64-bit value variant of [`match_any_sync`]).
+///
+/// PTX `match.any.sync.b64`. Lowered to `@llvm.nvvm.match.any.sync.i64`.
+#[inline(never)]
+pub fn match_any_i64_sync(mask: u32, value: u64) -> u32 {
+    let _ = (mask, value);
+    unreachable!("match_any_i64_sync called outside CUDA kernel context")
+}
+
+/// Match-all (32-bit, masked): full mask if every participating lane agrees, else 0.
+///
+/// PTX `match.all.sync.b32`. Lowered to `@llvm.nvvm.match.all.sync.i32p`
+/// with the predicate field discarded. Requires sm_70+.
+///
+/// Returns `mask` if every lane in `mask` has the same `value`; otherwise 0.
+/// Recover the all-match predicate as `result != 0`.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// if warp::match_all_sync(u32::MAX, my_value) != 0 {
+///     // Every lane in the warp had the same value.
+/// }
+/// ```
+#[inline(never)]
+pub fn match_all_sync(mask: u32, value: u32) -> u32 {
+    let _ = (mask, value);
+    unreachable!("match_all_sync called outside CUDA kernel context")
+}
+
+/// Match-all (64-bit value variant of [`match_all_sync`]).
+///
+/// PTX `match.all.sync.b64`. Lowered to `@llvm.nvvm.match.all.sync.i64p`.
+#[inline(never)]
+pub fn match_all_i64_sync(mask: u32, value: u64) -> u32 {
+    let _ = (mask, value);
+    unreachable!("match_all_i64_sync called outside CUDA kernel context")
 }
