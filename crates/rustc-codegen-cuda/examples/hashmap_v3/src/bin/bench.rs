@@ -5,16 +5,22 @@
 
 //! `hashmap_v3` performance bench — head-to-head GPU vs CPU `hashbrown`.
 //!
-//! Measures three operation classes across three load factors:
+//! Measures four operation classes:
 //!
-//! - **insert**:      payload-first protocol, one thread per key.
+//! - **insert**:      payload-first protocol, one thread per key. Naive
+//!   `insert_kernel` and the `match_any`-deduped `insert_kernel_dedup`
+//!   on the same zero-duplicate input.
 //! - **lookup**:      every query hits. Single-thread find vs
 //!   tile_32 (full-warp, 1 query/warp) vs tile_16 (sub-warp,
 //!   2 queries/warp), both built on the typed cooperative-groups API.
 //! - **lookup_fail**: every query misses. Same kernels, fresh
 //!   disjoint random keys.
+//! - **insert_dedup**: head-to-head naive vs `match_any`-dedup on
+//!   inputs that DO have duplicates (50/90/99 % dup rate, fixed input
+//!   size). The dup row is where the deduped path earns its keep.
 //!
-//! Load factors: 50%, 75%, 90% of `CAPACITY` slots.
+//! Load factors for the standard ops: 50%, 75%, 90% of `CAPACITY`
+//! slots.
 //!
 //! GPU timing uses CUDA events around the kernel launch loop only —
 //! no H2D upload of keys, no D2H of results — so the comparison is
@@ -286,6 +292,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Per-load-factor cells.
     let mut row_b_insert = [0.0f64; 3];
+    let mut row_b_insert_dedup = [0.0f64; 3];
     let mut row_single_lookup = [0.0f64; 3];
     let mut row_tile_32_lookup = [0.0f64; 3];
     let mut row_tile_16_lookup = [0.0f64; 3];
@@ -320,6 +327,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             bench_gpu_insert(&map, &keys_dev, &values_dev, n_keys, &stream, |m, k, v| {
                 cuda_launch! {
                     kernel: insert_kernel,
+                    stream: stream,
+                    module: module,
+                    config: cfg,
+                    args: [slice(m.ctrl), slice(m.slots), slice(*k), slice(*v)]
+                }?;
+                Ok(())
+            })?;
+
+        // ---- GPU INSERT (dedup variant on zero-dup input) ---------------
+        // Same input as row_b_insert; this row measures the cost of the
+        // intra-warp `match_any` machinery when there are no duplicates
+        // to collapse. Should be within a few percent of `insert_kernel`.
+        row_b_insert_dedup[col_idx] =
+            bench_gpu_insert(&map, &keys_dev, &values_dev, n_keys, &stream, |m, k, v| {
+                cuda_launch! {
+                    kernel: insert_kernel_dedup,
                     stream: stream,
                     module: module,
                     config: cfg,
@@ -458,8 +481,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     print_section_header("Insert (Mops/s; higher is better)");
     print_row("GPU                      ", &row_b_insert);
+    print_row("GPU dedup (no dups)      ", &row_b_insert_dedup);
     print_row("CPU hashbrown (1 thread) ", &row_cpu_insert);
     print_ratios("GPU            / CPU     ", &row_b_insert, &row_cpu_insert);
+    print_ratios(
+        "dedup / naive            ",
+        &row_b_insert_dedup,
+        &row_b_insert,
+    );
 
     print_section_header("Find — lookup (every query hits)");
     print_row("GPU single-thread        ", &row_single_lookup);
@@ -511,6 +540,114 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "tile_16 / tile_32        ",
         &row_tile_16_lookup_fail,
         &row_tile_32_lookup_fail,
+    );
+
+    // -----------------------------------------------------------------
+    // Dedup-shines section: identical input size, varying duplicate rate.
+    //
+    // Inputs are laid out **clustered by key** — all occurrences of key
+    // K appear in consecutive positions — which is the realistic
+    // "bulk-load from a sorted log" pattern. Random-permuted duplicates
+    // would give the dedup path almost no intra-warp dups to collapse
+    // (32 random picks from N>>32 are nearly-distinct), so the
+    // headline match_any win only shows up under clustering.
+    // -----------------------------------------------------------------
+    println!();
+    println!("[dedup section: 1 M inputs, varying duplicate rate, key-clustered layout]");
+
+    const DEDUP_INPUT: usize = 1 << 20;
+    const DEDUP_LABELS: [(f64, &str); 3] = [(0.50, "50% dup"), (0.90, "90% dup"), (0.99, "99% dup")];
+    let mut row_dedup_naive = [0.0f64; 3];
+    let mut row_dedup_match_any = [0.0f64; 3];
+
+    for (col_idx, &(dup_rate, label)) in DEDUP_LABELS.iter().enumerate() {
+        let unique_count = ((DEDUP_INPUT as f64) * (1.0 - dup_rate)).round() as usize;
+        let unique_count = unique_count.max(1);
+        let unique_keys = random_distinct_u32_keys(unique_count, 0xDEAD_BEEF + col_idx as u64);
+        let reps = DEDUP_INPUT / unique_count;
+        let mut keys = Vec::with_capacity(DEDUP_INPUT);
+        let mut values = Vec::with_capacity(DEDUP_INPUT);
+        for (k_idx, &k) in unique_keys.iter().enumerate() {
+            for r in 0..reps {
+                keys.push(k);
+                values.push((k_idx * reps + r) as u32);
+            }
+        }
+        // Pad with the first key to reach DEDUP_INPUT; affects only the
+        // tail (~tens of inputs for these dup rates).
+        while keys.len() < DEDUP_INPUT {
+            keys.push(unique_keys[0]);
+            values.push(0);
+        }
+        let keys_dev = DeviceBuffer::from_host(&stream, &keys)?;
+        let values_dev = DeviceBuffer::from_host(&stream, &values)?;
+
+        let map = GpuSwissMap::new(CAPACITY, &stream)?;
+        let cfg = LaunchConfig::for_num_elems(DEDUP_INPUT as u32);
+
+        println!(
+            "  {:>10}: {:>10} unique keys, {:>10} total inputs",
+            label, unique_count, DEDUP_INPUT
+        );
+
+        row_dedup_naive[col_idx] = bench_gpu_insert(
+            &map,
+            &keys_dev,
+            &values_dev,
+            DEDUP_INPUT,
+            &stream,
+            |m, k, v| {
+                cuda_launch! {
+                    kernel: insert_kernel,
+                    stream: stream,
+                    module: module,
+                    config: cfg,
+                    args: [slice(m.ctrl), slice(m.slots), slice(*k), slice(*v)]
+                }?;
+                Ok(())
+            },
+        )?;
+
+        row_dedup_match_any[col_idx] = bench_gpu_insert(
+            &map,
+            &keys_dev,
+            &values_dev,
+            DEDUP_INPUT,
+            &stream,
+            |m, k, v| {
+                cuda_launch! {
+                    kernel: insert_kernel_dedup,
+                    stream: stream,
+                    module: module,
+                    config: cfg,
+                    args: [slice(m.ctrl), slice(m.slots), slice(*k), slice(*v)]
+                }?;
+                Ok(())
+            },
+        )?;
+    }
+
+    println!();
+    println!("------------------------------------------------------------");
+    println!("Insert with duplicates (Mops/s; higher is better)");
+    println!("------------------------------------------------------------");
+    println!(
+        "                          {:>10} {:>10} {:>10}",
+        DEDUP_LABELS[0].1, DEDUP_LABELS[1].1, DEDUP_LABELS[2].1
+    );
+    println!(
+        "GPU naive insert         {:>10.1} {:>10.1} {:>10.1}",
+        row_dedup_naive[0], row_dedup_naive[1], row_dedup_naive[2]
+    );
+    println!(
+        "GPU dedup (match_any)    {:>10.1} {:>10.1} {:>10.1}",
+        row_dedup_match_any[0], row_dedup_match_any[1], row_dedup_match_any[2]
+    );
+    println!(
+        "dedup / naive            {:>9.1}x {:>9.1}x {:>9.1}x",
+        row_dedup_match_any[0] / row_dedup_naive[0],
+        row_dedup_match_any[1] / row_dedup_naive[1],
+        row_dedup_match_any[2] / row_dedup_naive[2]
     );
 
     println!();

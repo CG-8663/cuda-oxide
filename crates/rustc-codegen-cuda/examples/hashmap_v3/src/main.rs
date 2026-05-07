@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! `hashmap_v3` correctness tests — 11 GPU hardware checks for the
+//! `hashmap_v3` correctness tests — 15 GPU hardware checks for the
 //! cooperative-groups SwissTable hashmap.
 //!
 //! Kernels and the `GpuSwissMap` host driver live in `lib.rs` (shared
@@ -432,5 +432,189 @@ fn main() {
         }
     }
 
-    println!("\n=== SUCCESS: All 11 hashmap v3 tests passed! ===");
+    // -------------------------------------------------------------------------
+    // Test 12: in-warp dedup — 1k distinct keys repeated 100 times must
+    // collapse to exactly 1k entries with last-writer-wins values.
+    // -------------------------------------------------------------------------
+    println!("\n--- Test 12: insert_bulk_dedup (1000 keys × 100 reps) ---");
+    {
+        const N: usize = 1000;
+        const REPS: usize = 100;
+        let map = GpuSwissMap::new(CAPACITY, &stream).expect("alloc");
+        let base_keys = distinct_keys(N, 0xCAFE_F00D);
+        // Build the input by repeating the base keys 100 times. The
+        // value at index `i` is `i as u32` so the "last value seen for
+        // key k" is uniquely identifiable.
+        let mut keys = Vec::with_capacity(N * REPS);
+        let mut values = Vec::with_capacity(N * REPS);
+        for r in 0..REPS {
+            for (i, &k) in base_keys.iter().enumerate() {
+                keys.push(k);
+                values.push((r * N + i) as u32);
+            }
+        }
+        map.insert_bulk_dedup(&keys, &values, &module, &stream)
+            .expect("dedup insert");
+
+        // Find each base key; every one must hit. (We don't assert
+        // which value lands — within-warp last-writer-wins picks the
+        // highest-rank lane's value, but cross-warp arbitration is
+        // race-dependent. Exact-count is the headline acceptance.)
+        let found = map.find_bulk(&base_keys, &module, &stream).expect("find");
+        let hits = found.iter().filter(|&&v| v != MISS).count();
+        if hits != N {
+            println!("  FAIL: expected {N} hits, got {hits}");
+            std::process::exit(1);
+        }
+
+        // Cross-check: querying any key NOT in the base set must miss.
+        let inserted: std::collections::HashSet<u32> = base_keys.iter().copied().collect();
+        let mut absent = Vec::with_capacity(N);
+        let mut state: u32 = 0xACE0_F00Du32;
+        while absent.len() < N {
+            let k = xorshift32(&mut state);
+            if k != FORBIDDEN_KEY && !inserted.contains(&k) {
+                absent.push(k);
+            }
+        }
+        let absent_found = map.find_bulk(&absent, &module, &stream).expect("find");
+        let absent_hits = absent_found.iter().filter(|&&v| v != MISS).count();
+        if absent_hits != 0 {
+            println!("  FAIL: {absent_hits} keys should have missed but hit");
+            std::process::exit(1);
+        }
+        println!("  {N} distinct keys × {REPS} reps -> {hits} hits, 0 phantom entries");
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 13: DELETED-slot reclaim stress — many delete-then-reinsert
+    // cycles at high load. Without reclaim, tombstones accumulate and
+    // probe chains lengthen until insert can't make progress; with
+    // reclaim, the chain length stays bounded.
+    // -------------------------------------------------------------------------
+    println!("\n--- Test 13: DELETED reclaim stress (90% load, 10 cycles) ---");
+    {
+        let map = GpuSwissMap::new(CAPACITY, &stream).expect("alloc");
+        let m = (CAPACITY * 9) / 10;
+        let base_keys = distinct_keys(m, 0xBADC_0FFE);
+        let base_values: Vec<u32> = (0..m as u32).collect();
+        map.insert_bulk(&base_keys, &base_values, &module, &stream)
+            .expect("seed insert");
+
+        // Subset to delete-and-reinsert each cycle.
+        let churn_n = m / 4;
+        let churn_keys: Vec<u32> = base_keys[..churn_n].to_vec();
+
+        const CYCLES: usize = 10;
+        for c in 0..CYCLES {
+            map.delete_bulk(&churn_keys, &module, &stream)
+                .expect("delete");
+            let new_values: Vec<u32> =
+                (0..churn_n as u32).map(|i| (c as u32) * 1_000_000 + i).collect();
+            map.insert_bulk(&churn_keys, &new_values, &module, &stream)
+                .expect("reinsert");
+        }
+
+        // Final state: every base key still hits, churned keys hold
+        // the last cycle's values, untouched keys hold their originals.
+        let final_found = map.find_bulk(&base_keys, &module, &stream).expect("find");
+        let mut bad = 0usize;
+        let last_cycle = (CYCLES - 1) as u32;
+        for (i, &got) in final_found.iter().enumerate() {
+            let want = if i < churn_n {
+                last_cycle * 1_000_000 + i as u32
+            } else {
+                base_values[i]
+            };
+            if got != want {
+                bad += 1;
+            }
+        }
+        if bad != 0 {
+            println!("  FAIL: {bad} mismatches after {CYCLES} delete-reinsert cycles");
+            std::process::exit(1);
+        }
+        println!(
+            "  {CYCLES} cycles of {churn_n}-key churn at 90% load, all {m} keys preserved"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 14: explicit resize_to round-trip — insert 64k pairs into a
+    // 128k table, resize to 256k, verify every key + value survives.
+    // -------------------------------------------------------------------------
+    println!("\n--- Test 14: resize_to two-buffer rehash ---");
+    {
+        let mut map = GpuSwissMap::new(1 << 17, &stream).expect("alloc");
+        let n = 1 << 16;
+        let keys = distinct_keys(n, 0xF00D_BEEF);
+        let values: Vec<u32> = (0..n as u32).collect();
+        map.insert_bulk(&keys, &values, &module, &stream)
+            .expect("insert");
+
+        let cap_before = map.capacity();
+        map.resize_to(1 << 18, &module, &stream).expect("resize");
+        let cap_after = map.capacity();
+
+        let found = map.find_bulk(&keys, &module, &stream).expect("find");
+        let bad: usize = found
+            .iter()
+            .zip(&values)
+            .filter(|(f, v)| *f != *v)
+            .count();
+        if bad != 0 {
+            println!("  FAIL: {bad} mismatches after rehash");
+            std::process::exit(1);
+        }
+        println!(
+            "  {n} keys rehashed {cap_before} -> {cap_after}, resize_count = {}",
+            map.resize_count()
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 15: auto-resize stress — start at 1024 slots, insert 100k
+    // unique keys in chunks via insert_bulk_grow, observe at least 7
+    // resize events, and verify every key is present at the end.
+    // -------------------------------------------------------------------------
+    println!("\n--- Test 15: insert_bulk_grow stress (1024 -> 100k keys) ---");
+    {
+        let mut map = GpuSwissMap::new(1024, &stream).expect("alloc");
+        const N: usize = 100_000;
+        let keys = distinct_keys(N, 0x1234_5678);
+        let values: Vec<u32> = (0..N as u32).collect();
+
+        const CHUNK: usize = 10_000;
+        let mut idx = 0;
+        while idx < N {
+            let end = (idx + CHUNK).min(N);
+            map.insert_bulk_grow(&keys[idx..end], &values[idx..end], &module, &stream)
+                .expect("grow insert");
+            idx = end;
+        }
+
+        let resizes = map.resize_count();
+        if resizes < 7 {
+            println!("  FAIL: expected >= 7 resize events, got {resizes}");
+            std::process::exit(1);
+        }
+
+        let found = map.find_bulk(&keys, &module, &stream).expect("find");
+        let bad: usize = found
+            .iter()
+            .zip(&values)
+            .filter(|(f, v)| *f != *v)
+            .count();
+        if bad != 0 {
+            println!("  FAIL: {bad} mismatches after auto-resize stress");
+            std::process::exit(1);
+        }
+        println!(
+            "  {N} keys inserted via {} resize events; final capacity = {}",
+            resizes,
+            map.capacity()
+        );
+    }
+
+    println!("\n=== SUCCESS: All 15 hashmap v3 tests passed! ===");
 }

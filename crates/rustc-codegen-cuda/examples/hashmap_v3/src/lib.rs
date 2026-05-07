@@ -20,22 +20,30 @@
 //!     parameterised over a `WarpTile<N>` lane-tile size (`N = 32`
 //!     for one query per warp, `N = 16` for two queries per warp).
 //!
-//! Single insert protocol — payload-first: one
-//! `DeviceAtomicU64::compare_exchange` on the slot followed by one
-//! `DeviceAtomicU32::compare_exchange` on the ctrl word. The slot CAS
-//! is the serialization point — concurrent inserts of the same key in
-//! the same launch always see each other via `Err(actual)` and
-//! degenerate into the duplicate-handling path. (v2 also shipped a
-//! ctrl-first "Protocol A" with a RESERVED-tag handshake; v3 drops it
-//! because the v2 perf table showed payload-first beats it by ~20 %
-//! at every load and the "no slot CAS" trade-off doesn't unlock
-//! anything v3 needs.)
+//! Insert is payload-first when claiming a fresh `EMPTY` slot:
+//! `DeviceAtomicU64::compare_exchange` on the slot first, then
+//! `DeviceAtomicU32::compare_exchange` to flip the ctrl byte to
+//! `FULL(h2)`. The slot CAS is the serialization point —
+//! concurrent inserts of the same key in the same launch always see
+//! each other via `Err(actual)` and degenerate into the duplicate-
+//! handling path.
 //!
-//! Find observers treat the three tag values as: `FULL(h2)` -> peek
-//! the slot, `EMPTY` -> terminate probe with MISS, `DELETED` ->
-//! advance within tile. Insert does not yet reclaim `DELETED`
-//! slots; reclaim-on-insert is a planned enhancement and will not
-//! change find's behaviour.
+//! Insert also reclaims `DELETED` slots. While walking Phase 2,
+//! insert remembers the first `DELETED` byte it sees in the chain.
+//! On hitting `EMPTY` it claims the remembered `DELETED` (if any)
+//! via a two-stage handshake: tag-CAS `DELETED -> RESERVED` to
+//! exclude other claimers, plain release-store the new
+//! `(key, value)` payload over the stale data, then tag-CAS
+//! `RESERVED -> FULL(h2)` to publish. The reclaim slot lies before
+//! the chain's first `EMPTY`, so find's `EMPTY`-termination invariant
+//! is preserved (find walks the chain in order, hits the
+//! now-`FULL` reclaimed slot before any `EMPTY` further down).
+//!
+//! Find observers treat the four tag values as: `FULL(h2)` -> peek
+//! the slot, `EMPTY` -> terminate probe with MISS, `DELETED` and
+//! `RESERVED` -> advance within tile. `RESERVED` (top bit set,
+//! distinct from `EMPTY` and `DELETED`) does NOT terminate find and
+//! does NOT match h2, so the find kernels need no special-casing.
 //!
 //! Library crate: kernels, device-side helpers, and the host-side
 //! `GpuSwissMap` driver are defined here so two binaries in the same
@@ -52,7 +60,7 @@ use std::sync::Arc;
 
 use cuda_core::{CudaModule, CudaStream, DeviceBuffer, LaunchConfig};
 use cuda_device::atomic::{AtomicOrdering, DeviceAtomicU32, DeviceAtomicU64};
-use cuda_device::cooperative_groups::{ThreadGroup, WarpCollective, this_thread_block};
+use cuda_device::cooperative_groups::{ThreadGroup, WarpCollective, this_grid, this_thread_block};
 use cuda_device::{DisjointSlice, kernel, thread};
 use cuda_host::cuda_launch;
 
@@ -92,11 +100,25 @@ pub const PROBE_TILE: usize = 32;
 /// `memset_d8_async(0xFF, ...)`.
 pub const EMPTY_TAG: u8 = 0xFF;
 
-/// Tag byte = "this slot was once occupied; do not stop probing here, but
-/// also do not treat it as live". v3 inherits v2's behaviour: insert
-/// does **not** reclaim these slots. Reclaim-on-insert is a planned
-/// enhancement.
+/// Tag byte = "this slot was once occupied; do not stop probing here,
+/// but also do not treat it as live". Insert reclaims these slots
+/// when the probe chain it is walking has a `DELETED` byte before
+/// the chain's first `EMPTY`; otherwise they linger until the next
+/// rehash.
 pub const DELETED_TAG: u8 = 0x80;
+
+/// Tag byte = "an insert has claimed this slot's ctrl byte and is
+/// about to publish a fresh payload". Used only by the
+/// `DELETED -> RESERVED -> FULL(h2)` reclaim handshake — the regular
+/// `EMPTY -> FULL(h2)` claim path goes through the slot CAS first
+/// and never visits this state.
+///
+/// Top bit is set (`0xFE > 0x7F`) so it can never collide with a
+/// `FULL(h2)` fingerprint. It is also distinct from `EMPTY_TAG
+/// (0xFF)` and `DELETED_TAG (0x80)`, so existing find/delete logic
+/// (look for h2 to peek, look for EMPTY to terminate) skips
+/// `RESERVED` automatically as "neither — advance".
+pub const RESERVED_TAG: u8 = 0xFE;
 
 /// Tag byte for an occupied slot is `FULL(h2)` — the top bit is clear and
 /// the low seven bits are `h2`, the high-byte fingerprint of the key's
@@ -196,125 +218,26 @@ pub fn unpack_value(slot: u64) -> u32 {
 ///   - `ctrl[g]` is the `u32` packing tags for slots `g*GROUP .. g*GROUP+GROUP`.
 ///   - `slots[s]` is the packed `(key, value)` for slot `s`.
 ///
-/// Probe shape: triangular in `PROBE_TILE`-byte tiles. Each step
-/// examines `PROBE_TILE` consecutive tag bytes (= `PROBE_TILE / GROUP`
-/// ctrl words) starting at `probe_base`, and advances by `stride *
-/// PROBE_TILE` (with `stride += 1` per step). All four kernels — and
-/// the warp-cooperative find — share this exact shape so they walk
-/// the same sequence and EMPTY-termination remains correct.
-///
-/// Insert protocol (payload-first):
-///   1. Phase 1 — walk the tile ctrl word by ctrl word looking for any
-///      `FULL(h2)` tag whose slot holds our key. On match, slot-CAS
-///      overwrite the value (last-writer-wins) and return.
-///   2. Phase 2 — re-walk the tile looking for any `EMPTY_TAG` byte.
-///      For each one, try the slot CAS `EMPTY_SLOT -> pack(k, v)`.
-///      The slot CAS is the serialization point: concurrent inserts of
-///      the same key see `Err(actual)` with a matching key and
-///      degenerate to the overwrite path; concurrent inserts of
-///      *different* keys see `Err(actual)` with a mismatched key and
-///      skip past.
-///   3. After a successful slot CAS, publish via a ctrl-word CAS retry
-///      loop: `set_tag(current_word, j, FULL(h2))` on the specific
-///      ctrl word containing byte `j`. Other bytes in that word may
-///      have changed concurrently, so the loop re-reads on failure;
-///      byte `j` itself cannot change under us because no other thread
-///      can claim a slot we already own.
-///   4. No FULL(h2) match anywhere in the tile and no EMPTY_TAG to
-///      claim → triangular advance and repeat.
+/// Thin wrapper around [`insert_into_table_core`]: bounds-check the
+/// thread, look up its `(key, value)`, and dispatch with
+/// `overwrite = true` (existing values for the same key are replaced
+/// last-writer-wins). Probe and reclaim mechanics live in the helper.
 #[kernel]
 pub fn insert_kernel(ctrl: &[u32], slots: &[u64], keys: &[u32], values: &[u32]) {
     let tid = thread::index_1d().get();
     if tid >= keys.len() {
         return;
     }
-
-    let key = keys[tid];
-    let value = values[tid];
-    let hash = hash_u32(key);
-    let h2 = h2_from_hash(hash);
-    let mask = slots.len() - 1;
-    let mut probe_base = (hash as usize) & mask & !(PROBE_TILE - 1);
-    let mut stride = 0usize;
-
-    loop {
-        // Phase 1: walk the entire 32-byte tile, ctrl word by ctrl word,
-        // checking for an already-published FULL(h2) entry holding our key.
-        let mut g = 0usize;
-        while g < PROBE_TILE {
-            let ctrl_word_idx = (probe_base + g) / GROUP;
-            let ctrl_atomic =
-                unsafe { DeviceAtomicU32::from_ptr(ctrl.as_ptr().add(ctrl_word_idx).cast_mut()) };
-            let word = ctrl_atomic.load(AtomicOrdering::Acquire);
-            let mut j = 0;
-            while j < GROUP {
-                if get_tag(word, j) == h2 {
-                    let slot_idx = probe_base + g + j;
-                    let slot_atomic = unsafe {
-                        DeviceAtomicU64::from_ptr(slots.as_ptr().add(slot_idx).cast_mut())
-                    };
-                    let observed = slot_atomic.load(AtomicOrdering::Acquire);
-                    if unpack_key(observed) == key {
-                        insert_overwrite(slot_atomic, observed, key, value);
-                        return;
-                    }
-                }
-                j += 1;
-            }
-            g += GROUP;
-        }
-
-        // Phase 2: try to claim an EMPTY tag anywhere in this tile.
-        let mut g = 0usize;
-        while g < PROBE_TILE {
-            let ctrl_word_idx = (probe_base + g) / GROUP;
-            let ctrl_atomic =
-                unsafe { DeviceAtomicU32::from_ptr(ctrl.as_ptr().add(ctrl_word_idx).cast_mut()) };
-            // Re-read this word: another thread may have mutated it
-            // between Phase 1 and now.
-            let word = ctrl_atomic.load(AtomicOrdering::Acquire);
-            let mut j = 0;
-            while j < GROUP {
-                if get_tag(word, j) == EMPTY_TAG {
-                    let slot_idx = probe_base + g + j;
-                    let slot_atomic = unsafe {
-                        DeviceAtomicU64::from_ptr(slots.as_ptr().add(slot_idx).cast_mut())
-                    };
-                    match slot_atomic.compare_exchange(
-                        EMPTY_SLOT,
-                        pack(key, value),
-                        AtomicOrdering::AcqRel,
-                        AtomicOrdering::Relaxed,
-                    ) {
-                        Ok(_) => {
-                            publish_full_tag(ctrl_atomic, word, j, h2);
-                            return;
-                        }
-                        Err(actual) => {
-                            if unpack_key(actual) == key {
-                                insert_overwrite(slot_atomic, actual, key, value);
-                                return;
-                            }
-                            // Different key already in this slot; skip.
-                        }
-                    }
-                }
-                j += 1;
-            }
-            g += GROUP;
-        }
-
-        // No FULL(h2) match and no claimable EMPTY in this tile: advance.
-        stride += 1;
-        probe_base = (probe_base + stride * PROBE_TILE) & mask;
-    }
+    let _ = insert_into_table_core(ctrl, slots, keys[tid], values[tid], true);
 }
 
 /// `try_insert_kernel` — first-writer-wins variant.
 ///
-/// Same probe / claim shape as `insert_kernel`, but on duplicate it leaves
-/// the existing slot untouched and writes per-thread output:
+/// Same probe / claim mechanics as [`insert_kernel`] (delegates to
+/// [`insert_into_table_core`] with `overwrite = false`), but writes
+/// per-thread output reflecting whether the slot was fresh:
 ///   `out[tid] = FLAG_FRESH_OR_OK (0)`  -> we claimed a fresh slot
+///                                         (or reclaimed a `DELETED` one)
 ///   `out[tid] = FLAG_PRESENT (1)`      -> key was already in the table
 #[kernel]
 pub fn try_insert_kernel(
@@ -329,89 +252,112 @@ pub fn try_insert_kernel(
     if i_thread >= keys.len() {
         return;
     }
+    let fresh = insert_into_table_core(ctrl, slots, keys[i_thread], values[i_thread], false);
+    if let Some(o) = out.get_mut(tid) {
+        *o = if fresh { FLAG_FRESH_OR_OK } else { FLAG_PRESENT };
+    }
+}
 
-    let key = keys[i_thread];
-    let value = values[i_thread];
-    let hash = hash_u32(key);
-    let h2 = h2_from_hash(hash);
-    let mask = slots.len() - 1;
-    let mut probe_base = (hash as usize) & mask & !(PROBE_TILE - 1);
-    let mut stride = 0usize;
+/// `insert_kernel_dedup` — bulk insert with intra-warp duplicate
+/// detection via `tile.match_any(my_key)`.
+///
+/// One thread per input. Each warp tile partitions its 32 lanes into
+/// duplicate-groups (by key) using `match_any`; only the highest-rank
+/// lane in each group performs the global insert via
+/// [`insert_into_table_core`]. Other lanes in the group drop their
+/// duplicate insert silently. Cross-warp duplicates still race on the
+/// global path and are arbitrated by the slot CAS plus the Phase 2
+/// `FULL(h2)+key` re-check.
+///
+/// Picking the highest-rank lane per group gives "last-writer-wins
+/// within a warp" (the highest-rank lane has the largest input index
+/// in that warp, so its value is the most-recent for the warp).
+#[kernel]
+pub fn insert_kernel_dedup(ctrl: &[u32], slots: &[u64], keys: &[u32], values: &[u32]) {
+    let block = this_thread_block();
+    let tile = block.tiled_partition::<32>();
+    let lane = tile.thread_rank();
+    let global_tid = thread::index_1d().get();
 
-    loop {
-        // Phase 1: published-FULL duplicate detection across the tile.
-        let mut g = 0usize;
-        while g < PROBE_TILE {
-            let ctrl_word_idx = (probe_base + g) / GROUP;
-            let ctrl_atomic =
-                unsafe { DeviceAtomicU32::from_ptr(ctrl.as_ptr().add(ctrl_word_idx).cast_mut()) };
-            let word = ctrl_atomic.load(AtomicOrdering::Acquire);
-            let mut j = 0;
-            while j < GROUP {
-                if get_tag(word, j) == h2 {
-                    let slot_idx = probe_base + g + j;
-                    let slot_atomic = unsafe {
-                        DeviceAtomicU64::from_ptr(slots.as_ptr().add(slot_idx).cast_mut())
-                    };
-                    let observed = slot_atomic.load(AtomicOrdering::Acquire);
-                    if unpack_key(observed) == key {
-                        if let Some(o) = out.get_mut(tid) {
-                            *o = FLAG_PRESENT;
-                        }
-                        return;
-                    }
-                }
-                j += 1;
-            }
-            g += GROUP;
+    // Tail lanes (past keys.len()) must still participate in `match_any`
+    // — `WarpCollective::match_any` is a sync collective and requires
+    // all lanes in the tile to call it. Inactive lanes contribute the
+    // sentinel `FORBIDDEN_KEY` (= `u32::MAX`), which user keys are
+    // forbidden from using, so they form their own dup group disjoint
+    // from any active key.
+    let active = global_tid < keys.len();
+    let key = if active { keys[global_tid] } else { FORBIDDEN_KEY };
+    let value = if active { values[global_tid] } else { 0 };
+
+    let dup_mask = tile.match_any(key);
+
+    if !active {
+        return;
+    }
+
+    // Highest set bit in the dup mask is the in-warp leader for this
+    // duplicate group. All lanes in the group agree on the same
+    // leader because they all see the same dup_mask.
+    let leader = 31u32 - dup_mask.leading_zeros();
+    if lane == leader {
+        let _ = insert_into_table_core(ctrl, slots, key, value, true);
+    }
+}
+
+/// `rehash_kernel` — single-kernel rehash via `grid.sync()`.
+///
+/// Cooperative-launch only. Phase 1: each thread reads its assigned
+/// slot in the old table and stashes the `(key, value)` pair (or a
+/// "not live" marker) into registers. After `grid.sync()`, Phase 2:
+/// each thread that read a `FULL(h2)` slot re-inserts its pair into
+/// the new table via [`insert_into_table_core`].
+///
+/// The grid barrier costs a single `cudaCGSync()` and lets one kernel
+/// invocation replace the "two launches plus a stream sync" pattern
+/// that would otherwise be needed: it sequences the entire read
+/// phase before any write into the destination buffer with no
+/// host-side coordination.
+///
+/// v3 ships the two-buffer mode only (`old != new`); the new buffer
+/// is `memset`-cleared by the host before launch. In-place
+/// compaction (`old == new`, which would also need a clear step
+/// between read and re-insert) is a future extension; the grid
+/// barrier is in place so that extension can land without rewriting
+/// the kernel.
+///
+/// Launch with one thread per old slot:
+/// `LaunchConfig::for_num_elems(old_capacity as u32)`. The host
+/// wrapper [`GpuSwissMap::resize_to`] passes `cooperative: true` to
+/// `cuda_launch!`.
+#[kernel]
+pub fn rehash_kernel(old_ctrl: &[u32], old_slots: &[u64], new_ctrl: &[u32], new_slots: &[u64]) {
+    let grid = this_grid();
+    let tid = thread::index_1d().get();
+
+    let (live, key, value) = if tid < old_slots.len() {
+        let ctrl_word_idx = tid / GROUP;
+        let byte_in_word = tid % GROUP;
+        let ctrl_atomic = unsafe {
+            DeviceAtomicU32::from_ptr(old_ctrl.as_ptr().add(ctrl_word_idx).cast_mut())
+        };
+        let ctrl_word = ctrl_atomic.load(AtomicOrdering::Acquire);
+        let tag = get_tag(ctrl_word, byte_in_word);
+        if tag <= 0x7F {
+            let slot_atomic =
+                unsafe { DeviceAtomicU64::from_ptr(old_slots.as_ptr().add(tid).cast_mut()) };
+            let slot = slot_atomic.load(AtomicOrdering::Acquire);
+            (true, unpack_key(slot), unpack_value(slot))
+        } else {
+            (false, 0u32, 0u32)
         }
+    } else {
+        (false, 0u32, 0u32)
+    };
 
-        // Phase 2: claim an EMPTY slot.
-        let mut g = 0usize;
-        while g < PROBE_TILE {
-            let ctrl_word_idx = (probe_base + g) / GROUP;
-            let ctrl_atomic =
-                unsafe { DeviceAtomicU32::from_ptr(ctrl.as_ptr().add(ctrl_word_idx).cast_mut()) };
-            let word = ctrl_atomic.load(AtomicOrdering::Acquire);
-            let mut j = 0;
-            while j < GROUP {
-                if get_tag(word, j) == EMPTY_TAG {
-                    let slot_idx = probe_base + g + j;
-                    let slot_atomic = unsafe {
-                        DeviceAtomicU64::from_ptr(slots.as_ptr().add(slot_idx).cast_mut())
-                    };
-                    match slot_atomic.compare_exchange(
-                        EMPTY_SLOT,
-                        pack(key, value),
-                        AtomicOrdering::AcqRel,
-                        AtomicOrdering::Relaxed,
-                    ) {
-                        Ok(_) => {
-                            publish_full_tag(ctrl_atomic, word, j, h2);
-                            if let Some(o) = out.get_mut(tid) {
-                                *o = FLAG_FRESH_OR_OK;
-                            }
-                            return;
-                        }
-                        Err(actual) => {
-                            if unpack_key(actual) == key {
-                                // Same-key race; some other thread is the
-                                // first-writer. Report PRESENT, leave slot.
-                                if let Some(o) = out.get_mut(tid) {
-                                    *o = FLAG_PRESENT;
-                                }
-                                return;
-                            }
-                        }
-                    }
-                }
-                j += 1;
-            }
-            g += GROUP;
-        }
+    grid.sync();
 
-        stride += 1;
-        probe_base = (probe_base + stride * PROBE_TILE) & mask;
+    if live {
+        let _ = insert_into_table_core(new_ctrl, new_slots, key, value, true);
     }
 }
 
@@ -754,9 +700,266 @@ pub fn delete_kernel(ctrl: &[u32], slots: &[u64], keys: &[u32], mut out: Disjoin
 // DEVICE-SIDE HELPERS
 // =============================================================================
 
+/// Outcome of [`try_reclaim_deleted`]: a remembered `DELETED` byte
+/// either becomes ours, was reclaimed by a peer with our key (we're
+/// already done), or was reclaimed by a peer with a different key
+/// (we have to fall back to the standard `EMPTY` claim path).
+enum ReclaimOutcome {
+    Reclaimed,
+    AlreadyHasOurKey,
+    Lost,
+}
+
+/// Try to reclaim a `DELETED` slot at `(del_word_idx, del_j)` for
+/// `(key, value)` via a two-stage handshake:
+///
+///   1. Tag-CAS `DELETED -> RESERVED` to claim exclusivity over the
+///      byte. Concurrent inserts and finds skip `RESERVED` because it
+///      is neither `h2` nor `EMPTY` — only the publisher (us) cares
+///      about it.
+///   2. Plain release-store `(key, value)` into the slot. The byte is
+///      `RESERVED`, so the slot is invisible to all other readers.
+///   3. Tag-CAS `RESERVED -> FULL(h2)` to publish via the standard
+///      [`publish_full_tag`] retry loop.
+///
+/// On a CAS conflict at stage 1, re-load and re-classify the byte:
+///   - Still `DELETED` -> retry the CAS (a sibling byte mutated).
+///   - `RESERVED` -> spin until the racing publisher finishes.
+///   - `FULL(h2')` -> the racing publisher landed; if its key equals
+///     ours, treat as already-present (overwrite if `overwrite=true`),
+///     else return `Lost` so the caller falls back to `EMPTY` claim.
+///
+/// `del_word_idx * GROUP + del_j` is the absolute slot index.
+#[inline(always)]
+fn try_reclaim_deleted(
+    ctrl: &[u32],
+    slots: &[u64],
+    del_word_idx: usize,
+    del_j: usize,
+    key: u32,
+    value: u32,
+    h2: u8,
+    overwrite: bool,
+) -> ReclaimOutcome {
+    let ctrl_atomic =
+        unsafe { DeviceAtomicU32::from_ptr(ctrl.as_ptr().add(del_word_idx).cast_mut()) };
+    let slot_idx = del_word_idx * GROUP + del_j;
+    let slot_atomic =
+        unsafe { DeviceAtomicU64::from_ptr(slots.as_ptr().add(slot_idx).cast_mut()) };
+
+    loop {
+        let cur = ctrl_atomic.load(AtomicOrdering::Acquire);
+        let cur_tag = get_tag(cur, del_j);
+        if cur_tag == DELETED_TAG {
+            let new_word = set_tag(cur, del_j, RESERVED_TAG);
+            if ctrl_atomic
+                .compare_exchange(
+                    cur,
+                    new_word,
+                    AtomicOrdering::AcqRel,
+                    AtomicOrdering::Relaxed,
+                )
+                .is_ok()
+            {
+                slot_atomic.store(pack(key, value), AtomicOrdering::Release);
+                let post = ctrl_atomic.load(AtomicOrdering::Relaxed);
+                publish_full_tag(ctrl_atomic, post, del_j, h2);
+                return ReclaimOutcome::Reclaimed;
+            }
+            // Else: a sibling byte changed; retry.
+        } else if cur_tag == RESERVED_TAG {
+            // A concurrent reclaim is publishing here; spin.
+            continue;
+        } else if cur_tag <= 0x7F {
+            // Reclaim landed before us. If their key matches ours,
+            // treat as already-present.
+            let observed = slot_atomic.load(AtomicOrdering::Acquire);
+            if unpack_key(observed) == key {
+                if overwrite {
+                    insert_overwrite(slot_atomic, observed, key, value);
+                }
+                return ReclaimOutcome::AlreadyHasOurKey;
+            }
+            return ReclaimOutcome::Lost;
+        } else {
+            // EMPTY_TAG (impossible under our state machine) or any
+            // other unknown value: bail out.
+            return ReclaimOutcome::Lost;
+        }
+    }
+}
+
+/// Core insert routine shared by every insert path
+/// (`insert_kernel`, `try_insert_kernel`, `insert_kernel_dedup`,
+/// `rehash_kernel`).
+///
+/// Returns `true` if the slot was fresh (claimed an `EMPTY` or
+/// reclaimed a `DELETED`); `false` if the key was already present
+/// (overwritten if `overwrite = true`, otherwise left untouched).
+///
+/// Probe shape: triangular in `PROBE_TILE`-byte tiles, identical to
+/// every other v3 kernel so EMPTY-termination remains correct.
+///
+/// Per-tile algorithm:
+///
+///   * **Phase 1** — full tile scan. For each `FULL(h2)` tag whose
+///     slot holds our key, take the duplicate path (overwrite or
+///     report present, depending on `overwrite`). For each
+///     `DELETED` tag, remember the first one for potential reclaim.
+///
+///   * **Reclaim attempt** — if we remembered a `DELETED`, try
+///     [`try_reclaim_deleted`]. On `Reclaimed` / `AlreadyHasOurKey`,
+///     return immediately. On `Lost`, forget the remembered byte
+///     (don't second-guess) and fall through to the EMPTY claim.
+///
+///   * **Phase 2** — re-walk the tile looking for an `EMPTY` byte
+///     to claim. Critically, also re-check `FULL(h2)` bytes for our
+///     key here: a concurrent insert (or reclaim) may have published
+///     our key into one of them in the window between Phase 1 and
+///     Phase 2, and last-writer-wins requires we observe it instead
+///     of landing a phantom duplicate at a later EMPTY.
+///
+///   * On EMPTY, slot-CAS `EMPTY_SLOT -> pack(k, v)`. On success,
+///     publish via [`publish_full_tag`] and return fresh. On
+///     same-key CAS failure, take the duplicate path. On
+///     different-key CAS failure, keep scanning.
+///
+///   * **Advance** — no claim possible in this tile: triangular step
+///     and repeat.
+#[inline(always)]
+fn insert_into_table_core(
+    ctrl: &[u32],
+    slots: &[u64],
+    key: u32,
+    value: u32,
+    overwrite: bool,
+) -> bool {
+    let hash = hash_u32(key);
+    let h2 = h2_from_hash(hash);
+    let mask = slots.len() - 1;
+    let mut probe_base = (hash as usize) & mask & !(PROBE_TILE - 1);
+    let mut stride = 0usize;
+    let mut first_deleted_word: usize = 0;
+    let mut first_deleted_byte: usize = 0;
+    let mut have_first_deleted: bool = false;
+
+    loop {
+        // Phase 1: scan tile for FULL(h2)+key (already-present check)
+        // and remember the first DELETED byte for potential reclaim.
+        let mut g = 0usize;
+        while g < PROBE_TILE {
+            let ctrl_word_idx = (probe_base + g) / GROUP;
+            let ctrl_atomic =
+                unsafe { DeviceAtomicU32::from_ptr(ctrl.as_ptr().add(ctrl_word_idx).cast_mut()) };
+            let word = ctrl_atomic.load(AtomicOrdering::Acquire);
+            let mut j = 0;
+            while j < GROUP {
+                let tag = get_tag(word, j);
+                if tag == h2 {
+                    let slot_idx = probe_base + g + j;
+                    let slot_atomic = unsafe {
+                        DeviceAtomicU64::from_ptr(slots.as_ptr().add(slot_idx).cast_mut())
+                    };
+                    let observed = slot_atomic.load(AtomicOrdering::Acquire);
+                    if unpack_key(observed) == key {
+                        if overwrite {
+                            insert_overwrite(slot_atomic, observed, key, value);
+                        }
+                        return false;
+                    }
+                } else if tag == DELETED_TAG && !have_first_deleted {
+                    first_deleted_word = ctrl_word_idx;
+                    first_deleted_byte = j;
+                    have_first_deleted = true;
+                }
+                j += 1;
+            }
+            g += GROUP;
+        }
+
+        // Reclaim path (only if we saw a DELETED in Phase 1).
+        if have_first_deleted {
+            match try_reclaim_deleted(
+                ctrl,
+                slots,
+                first_deleted_word,
+                first_deleted_byte,
+                key,
+                value,
+                h2,
+                overwrite,
+            ) {
+                ReclaimOutcome::Reclaimed => return true,
+                ReclaimOutcome::AlreadyHasOurKey => return false,
+                ReclaimOutcome::Lost => {
+                    have_first_deleted = false; // don't retry on later tiles
+                }
+            }
+        }
+
+        // Phase 2: claim an EMPTY byte. Also re-check FULL(h2)+key in
+        // case a concurrent insert or reclaim published our key between
+        // Phase 1 and now.
+        let mut g = 0usize;
+        while g < PROBE_TILE {
+            let ctrl_word_idx = (probe_base + g) / GROUP;
+            let ctrl_atomic =
+                unsafe { DeviceAtomicU32::from_ptr(ctrl.as_ptr().add(ctrl_word_idx).cast_mut()) };
+            let word = ctrl_atomic.load(AtomicOrdering::Acquire);
+            let mut j = 0;
+            while j < GROUP {
+                let tag = get_tag(word, j);
+                if tag == h2 {
+                    let slot_idx = probe_base + g + j;
+                    let slot_atomic = unsafe {
+                        DeviceAtomicU64::from_ptr(slots.as_ptr().add(slot_idx).cast_mut())
+                    };
+                    let observed = slot_atomic.load(AtomicOrdering::Acquire);
+                    if unpack_key(observed) == key {
+                        if overwrite {
+                            insert_overwrite(slot_atomic, observed, key, value);
+                        }
+                        return false;
+                    }
+                } else if tag == EMPTY_TAG {
+                    let slot_idx = probe_base + g + j;
+                    let slot_atomic = unsafe {
+                        DeviceAtomicU64::from_ptr(slots.as_ptr().add(slot_idx).cast_mut())
+                    };
+                    match slot_atomic.compare_exchange(
+                        EMPTY_SLOT,
+                        pack(key, value),
+                        AtomicOrdering::AcqRel,
+                        AtomicOrdering::Relaxed,
+                    ) {
+                        Ok(_) => {
+                            publish_full_tag(ctrl_atomic, word, j, h2);
+                            return true;
+                        }
+                        Err(actual) => {
+                            if unpack_key(actual) == key {
+                                if overwrite {
+                                    insert_overwrite(slot_atomic, actual, key, value);
+                                }
+                                return false;
+                            }
+                            // Different key landed; continue scanning.
+                        }
+                    }
+                }
+                j += 1;
+            }
+            g += GROUP;
+        }
+
+        stride += 1;
+        probe_base = (probe_base + stride * PROBE_TILE) & mask;
+    }
+}
+
 /// Inner CAS loop that overwrites a slot's value while preserving its key.
-/// Used by both `insert_kernel` and `try_insert_kernel`'s last-writer-wins
-/// branches, and only ever entered when the slot already holds our key.
+/// Used by every insert path's last-writer-wins branch; only ever entered
+/// when the slot already holds our key.
 #[inline(always)]
 fn insert_overwrite(slot_atomic: &DeviceAtomicU64, mut expected: u64, key: u32, value: u32) {
     let desired = pack(key, value);
@@ -817,6 +1020,13 @@ pub const FORBIDDEN_KEY: u32 = u32::MAX;
 ///
 /// Both buffers are `memset_d8_async(0xFF)` at construction so every tag
 /// reads as `EMPTY_TAG` and every slot reads as `EMPTY_SLOT`.
+///
+/// `live_estimate` is a conservative upper bound on the number of live
+/// keys (over-counts duplicates and re-inserts of the same key). It
+/// is incremented only by the auto-resize-aware paths
+/// ([`Self::insert_bulk_grow`]), never by [`Self::insert_bulk`] or
+/// [`Self::insert_bulk_dedup`]; the bound is correct as a load-factor
+/// trigger but should not be treated as a key count.
 pub struct GpuSwissMap {
     /// Packed tag bytes; 4 tags per `u32` word.
     pub ctrl: DeviceBuffer<u32>,
@@ -824,6 +1034,11 @@ pub struct GpuSwissMap {
     pub slots: DeviceBuffer<u64>,
     /// Number of slots. Power of two, multiple of `GROUP`.
     capacity: usize,
+    /// Conservative upper bound on live entries; only updated by
+    /// auto-resize-aware insert paths.
+    live_estimate: usize,
+    /// Number of `resize_to` invocations completed on this table.
+    resize_count: usize,
 }
 
 impl GpuSwissMap {
@@ -861,12 +1076,28 @@ impl GpuSwissMap {
             ctrl,
             slots,
             capacity,
+            live_estimate: 0,
+            resize_count: 0,
         })
     }
 
-    /// Number of slots in the table. Fixed at construction time.
+    /// Number of slots in the table. May change across [`Self::resize_to`].
     pub fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    /// Number of [`Self::resize_to`] invocations completed on this
+    /// table. Used by the resize stress tests to verify that
+    /// auto-resize is actually firing.
+    pub fn resize_count(&self) -> usize {
+        self.resize_count
+    }
+
+    /// Conservative upper bound on the number of live entries.
+    /// Tracks only inserts that went through the auto-resize-aware
+    /// path; see the [`GpuSwissMap`] doc for the exact contract.
+    pub fn live_estimate(&self) -> usize {
+        self.live_estimate
     }
 
     /// Last-writer-wins bulk insert. Overwrites existing values.
@@ -892,6 +1123,51 @@ impl GpuSwissMap {
         let cfg = LaunchConfig::for_num_elems(keys.len() as u32);
         cuda_launch! {
             kernel: insert_kernel,
+            stream: stream,
+            module: module,
+            config: cfg,
+            args: [slice(self.ctrl), slice(self.slots), slice(keys_dev), slice(values_dev)]
+        }?;
+
+        Ok(())
+    }
+
+    /// Last-writer-wins bulk insert with intra-warp duplicate dedup
+    /// via `tile.match_any(my_key)`.
+    ///
+    /// For inputs with high duplicate rates this is a strict win over
+    /// [`insert_bulk`]: in-warp dups collapse to a single global insert
+    /// per duplicate group (highest-rank lane wins), which both
+    /// reduces global atomic traffic and concentrates the
+    /// last-writer-wins arbitration into the per-group leader. Across
+    /// warps the standard slot-CAS + Phase 2 `FULL(h2)+key` re-check
+    /// still arbitrates correctly.
+    ///
+    /// For low-duplicate inputs the per-thread cost of `match_any`
+    /// (one warp-sync vote + a `leading_zeros`) shows up; prefer
+    /// [`insert_bulk`] when duplicates are statistically rare.
+    pub fn insert_bulk_dedup(
+        &self,
+        keys: &[u32],
+        values: &[u32],
+        module: &Arc<CudaModule>,
+        stream: &Arc<CudaStream>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(keys.len(), values.len());
+        if keys.is_empty() {
+            return Ok(());
+        }
+        debug_assert!(
+            keys.iter().all(|&k| k != FORBIDDEN_KEY),
+            "u32::MAX is reserved and may not be used as a key"
+        );
+
+        let keys_dev = DeviceBuffer::from_host(stream, keys)?;
+        let values_dev = DeviceBuffer::from_host(stream, values)?;
+
+        let cfg = LaunchConfig::for_num_elems(keys.len() as u32);
+        cuda_launch! {
+            kernel: insert_kernel_dedup,
             stream: stream,
             module: module,
             config: cfg,
@@ -1042,6 +1318,109 @@ impl GpuSwissMap {
         }?;
 
         Ok(out_dev.to_host_vec(stream)?)
+    }
+
+    /// Reallocate `ctrl` and `slots` to `new_capacity` slots and
+    /// rehash all live entries from the old buffers into the new
+    /// via the cooperative-launch [`rehash_kernel`] (one thread per
+    /// old slot, single grid barrier between read and re-insert).
+    ///
+    /// Both growing and shrinking are supported. `new_capacity` must
+    /// be a power of two and at least `PROBE_TILE`. After this call,
+    /// the old buffers are dropped (freed once the launch completes
+    /// and the borrowed device pointers go out of scope).
+    ///
+    /// Cooperative launch caveat: the kernel runs with one thread per
+    /// old slot, so `self.capacity()` must fit the GPU's cooperative-
+    /// launch resident-block budget. On modern GPUs this comfortably
+    /// covers tables up to ~1 M slots. Larger tables would need a
+    /// strided variant (each thread handles multiple slots in a
+    /// chunked loop) — out of scope for v3.
+    pub fn resize_to(
+        &mut self,
+        new_capacity: usize,
+        module: &Arc<CudaModule>,
+        stream: &Arc<CudaStream>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        assert!(
+            new_capacity.is_power_of_two(),
+            "new_capacity must be a power of two"
+        );
+        assert!(
+            new_capacity >= PROBE_TILE,
+            "new_capacity must be >= PROBE_TILE ({PROBE_TILE})"
+        );
+
+        let new_ctrl = DeviceBuffer::<u32>::zeroed(stream, new_capacity / GROUP)?;
+        let new_slots = DeviceBuffer::<u64>::zeroed(stream, new_capacity)?;
+        unsafe {
+            cuda_core::memory::memset_d8_async(
+                new_ctrl.cu_deviceptr(),
+                0xFF,
+                new_ctrl.num_bytes(),
+                stream.cu_stream(),
+            )?;
+            cuda_core::memory::memset_d8_async(
+                new_slots.cu_deviceptr(),
+                0xFF,
+                new_slots.num_bytes(),
+                stream.cu_stream(),
+            )?;
+        }
+
+        let cfg = LaunchConfig::for_num_elems(self.capacity as u32);
+        cuda_launch! {
+            kernel: rehash_kernel,
+            stream: stream,
+            module: module,
+            config: cfg,
+            cooperative: true,
+            args: [
+                slice(self.ctrl), slice(self.slots),
+                slice(new_ctrl), slice(new_slots)
+            ]
+        }?;
+
+        self.ctrl = new_ctrl;
+        self.slots = new_slots;
+        self.capacity = new_capacity;
+        self.resize_count += 1;
+        // live_estimate stays as-is: rehash drops DELETED slots but
+        // doesn't change the live-key count, and the estimate was
+        // already a conservative upper bound.
+        Ok(())
+    }
+
+    /// Last-writer-wins bulk insert with automatic resize-on-load.
+    ///
+    /// Before launching `insert_kernel`, doubles `capacity` (one or
+    /// more times in a loop) until `(live_estimate + keys.len()) * 8
+    /// <= capacity * 7`, i.e. the load factor would stay under 7/8.
+    /// Each doubling invokes [`Self::resize_to`] and increments
+    /// `resize_count`.
+    ///
+    /// Use this when input size isn't known in advance. For known
+    /// upper bounds, sizing the table once via [`Self::new`] and
+    /// using [`Self::insert_bulk`] is strictly cheaper.
+    pub fn insert_bulk_grow(
+        &mut self,
+        keys: &[u32],
+        values: &[u32],
+        module: &Arc<CudaModule>,
+        stream: &Arc<CudaStream>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(keys.len(), values.len());
+
+        let projected = self.live_estimate + keys.len();
+        while projected * 8 > self.capacity * 7 {
+            let target = self.capacity * 2;
+            self.resize_to(target, module, stream)?;
+        }
+        if !keys.is_empty() {
+            self.insert_bulk(keys, values, module, stream)?;
+            self.live_estimate = projected;
+        }
+        Ok(())
     }
 
     /// Bulk delete (tombstone). Returns a `Vec<bool>` of length `keys.len()`;
