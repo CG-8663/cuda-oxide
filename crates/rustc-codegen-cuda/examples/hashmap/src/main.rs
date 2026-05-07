@@ -6,10 +6,12 @@
 //! GPU Hashmap v1 — Open-Addressed Static Map
 //!
 //! A fixed-capacity, open-addressed `u32 -> u32` hashmap that runs entirely
-//! on the GPU. This is the v1 baseline: the point is to prove the end-to-end
-//! pipeline — host allocation, kernel launch, atomic CAS, correctness
-//! harness — before adding SwissTable machinery (control-byte fingerprints,
-//! triangular probing, warp-cooperative group probe) in v2.
+//! on the GPU. This is the v1 baseline: the smallest possible algorithm
+//! that proves the end-to-end pipeline — host allocation, kernel launch,
+//! atomic CAS, correctness harness — so the moving parts are obvious.
+//! `hashmap_v2` and `hashmap_v3` are sibling example crates that layer
+//! SwissTable machinery (control-byte fingerprints, triangular probing,
+//! warp-cooperative probe, cooperative-groups insert/find) on top.
 //!
 //! Storage is a single `DeviceBuffer<u64>` of length `N` (power of two) where
 //! each `u64` slot packs `(key as u64) << 32 | value as u64`. The empty
@@ -47,8 +49,9 @@ const FX_K: u64 = 0x517c_c1b7_2722_0a95;
 
 /// FxHash-style single-multiply hash from a `u32` key to a 64-bit hash.
 ///
-/// The full 64 bits are used so v2 can later split into a low-bit `h1`
-/// (probe position) and a high-bit `h2` (fingerprint).
+/// Returns 64 bits so the SwissTable variants in `hashmap_v2` and
+/// `hashmap_v3` can split into a low-bit `h1` (probe position) and
+/// a high-bit `h2` (fingerprint) without a second hash call.
 #[inline(always)]
 fn hash_u32(key: u32) -> u64 {
     (key as u64).wrapping_mul(FX_K)

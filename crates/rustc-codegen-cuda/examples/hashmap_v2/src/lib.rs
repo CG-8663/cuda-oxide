@@ -5,7 +5,8 @@
 
 //! GPU Hashmap v2 — SwissTable-Inspired
 //!
-//! Layered on top of the v1 baseline. v2 introduces:
+//! A `u32 -> u32` GPU hashmap that ports the three structural ideas
+//! behind hashbrown's SwissTable to a CUDA backend:
 //!   - A separate control-byte array (`ctrl: DeviceBuffer<u32>` packing 4
 //!     1-byte tags per word) so probe walks examine fingerprints, not the
 //!     full `(key, value)` payload.
@@ -80,19 +81,19 @@ pub const GROUP: usize = 4;
 /// Probe-step width in tag bytes. Both single-thread and warp-cooperative
 /// kernels examine `PROBE_TILE` consecutive tag bytes per probe step and
 /// advance triangularly in `PROBE_TILE` units. Fixed at 32 because:
-///   - The warp-cooperative kernel uses 32 lanes (one tag byte per lane).
-///   - cuda-oxide's `warp::ballot` and `warp::shuffle` operate on the
-///     full 32-lane warp; no sub-warp mask is exposed today.
+///   - The warp-cooperative kernel uses 32 lanes (one tag byte per lane),
+///     so a 32-byte tile maps one-to-one onto cuda-oxide's full-warp
+///     `warp::ballot` and `warp::shuffle` primitives.
 ///   - Insert and find MUST use the same `PROBE_TILE` so they walk the
 ///     same triangular sequence — otherwise find can terminate early
 ///     on an `EMPTY` slot that insert had skipped, missing valid keys.
+///   - `PROBE_TILE` must be a multiple of `GROUP` (one ctrl word covers
+///     `GROUP` tag bytes; we read `PROBE_TILE / GROUP` ctrl words per
+///     step).
 ///
-/// `PROBE_TILE` must be a multiple of `GROUP` (one ctrl word covers
-/// `GROUP` tag bytes; we read `PROBE_TILE / GROUP` ctrl words per step).
-///
-/// (Kept at 32 for v2 even though sub-warp `WarpTile<N>` masks are now
-/// available via `cuda_device::cooperative_groups`. v3 will revisit
-/// `PROBE_TILE = 16` and the resulting two-keys-per-warp packing.)
+/// Sub-warp `WarpTile<N>` masks via `cuda_device::cooperative_groups`
+/// shipped after v2 was frozen; `hashmap_v3`'s `find_kernel_tile_16`
+/// uses them for two-keys-per-warp packing.
 pub const PROBE_TILE: usize = 32;
 
 /// Tag byte = "this slot is free". All slots start as `EMPTY_TAG`. The
@@ -138,12 +139,12 @@ pub fn full_tag(h2: u8) -> u8 {
     h2
 }
 
-/// Slot sentinel for "this slot is unclaimed". Same value as v1's `EMPTY`
-/// — a `u64::MAX` packed pair `(u32::MAX, u32::MAX)`. Initial `slots`
-/// buffer is `memset` to all-`0xFF` bytes so every slot reads as this.
+/// Slot sentinel for "this slot is unclaimed" — `u64::MAX`, which packs
+/// as `(u32::MAX, u32::MAX)`. The `slots` buffer is `memset` to all-`0xFF`
+/// bytes at construction so every slot reads as this.
 pub const EMPTY_SLOT: u64 = u64::MAX;
 
-/// Sentinel returned by `find_bulk` for missing keys. Same as v1.
+/// Sentinel returned by `find_bulk` for missing keys.
 pub const MISS: u32 = u32::MAX;
 
 /// Per-key flag value for "this key was already present" (`try_insert_bulk`)
@@ -153,7 +154,7 @@ pub const FLAG_PRESENT: u32 = 1;
 /// Per-key flag value for "fresh insert" / "successful delete".
 pub const FLAG_FRESH_OR_OK: u32 = 0;
 
-/// FxHash multiplier — same constant as v1.
+/// FxHash multiplier.
 pub const FX_K: u64 = 0x517c_c1b7_2722_0a95;
 
 /// FxHash-style single-multiply hash. Returns 64 bits so we can split into
@@ -186,7 +187,9 @@ pub fn set_tag(word: u32, i: usize, tag: u8) -> u32 {
     (word & !(0xFFu32 << shift)) | ((tag as u32) << shift)
 }
 
-/// Pack `(key, value)` into a single `u64` slot. Same layout as v1.
+/// Pack `(key, value)` into a single `u64` slot — key in the upper 32
+/// bits, value in the lower 32. The packed sentinel `u64::MAX` matches
+/// `(FORBIDDEN_KEY, u32::MAX)` and is reserved for `EMPTY_SLOT`.
 #[inline(always)]
 pub fn pack(key: u32, value: u32) -> u64 {
     ((key as u64) << 32) | (value as u64)
@@ -1105,10 +1108,9 @@ fn publish_full_tag(ctrl_atomic: &DeviceAtomicU32, mut current_word: u32, i: usi
 // HOST DRIVER
 // =============================================================================
 
-/// Forbidden user key. `(FORBIDDEN_KEY, _)` and `(_, _)` for any value
-/// produce an `EMPTY_SLOT` collision when the value also happens to be
-/// `u32::MAX`; the simplest invariant is to forbid `u32::MAX` as a key
-/// outright (matches v1).
+/// Forbidden user key. `(u32::MAX, u32::MAX)` collides with the
+/// `EMPTY_SLOT` sentinel, so the simplest invariant is to forbid
+/// `u32::MAX` as a key outright.
 pub const FORBIDDEN_KEY: u32 = u32::MAX;
 
 /// Host-side handle to a v2 SwissTable-style GPU hashmap.
@@ -1117,14 +1119,14 @@ pub const FORBIDDEN_KEY: u32 = u32::MAX;
 ///   - `ctrl`: `DeviceBuffer<u32>` of length `capacity / GROUP`. Each `u32`
 ///     holds 4 tag bytes packed little-endian.
 ///   - `slots`: `DeviceBuffer<u64>` of length `capacity`. Each `u64` packs
-///     a `(key, value)` pair, same layout as v1.
+///     `(key, value)` with the key in the upper 32 bits.
 ///
 /// Both buffers are `memset_d8_async(0xFF)` at construction so every tag
 /// reads as `EMPTY_TAG` and every slot reads as `EMPTY_SLOT`.
 pub struct GpuSwissMap {
     /// Packed tag bytes; 4 tags per `u32` word.
     pub ctrl: DeviceBuffer<u32>,
-    /// Packed `(key, value)` slots, same layout as v1.
+    /// Packed `(key, value)` slots — key in the upper 32 bits.
     pub slots: DeviceBuffer<u64>,
     /// Number of slots. Power of two, multiple of `GROUP`.
     capacity: usize,
@@ -1413,7 +1415,8 @@ impl GpuSwissMap {
 // SHARED UTILITIES (used by both `main` tests and `bench`)
 // =============================================================================
 
-/// Tiny xorshift32 — same as v1; avoids pulling in a crate for randomness.
+/// Tiny xorshift32 — avoids pulling in a crate just for deterministic
+/// pseudo-random keys in tests and benches.
 pub fn xorshift32(state: &mut u32) -> u32 {
     let mut x = *state;
     x ^= x << 13;
@@ -1435,4 +1438,93 @@ pub fn distinct_keys(n: usize, seed: u32) -> Vec<u32> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pack_unpack_roundtrip() {
+        for (k, v) in [
+            (0u32, 0u32),
+            (1, 0xDEAD_BEEF),
+            (0xCAFE_BABE, 0x5555_5555),
+            (FORBIDDEN_KEY - 1, u32::MAX),
+        ] {
+            let s = pack(k, v);
+            assert_eq!(unpack_key(s), k, "key roundtrip for ({k:#x}, {v:#x})");
+            assert_eq!(unpack_value(s), v, "value roundtrip for ({k:#x}, {v:#x})");
+        }
+    }
+
+    #[test]
+    fn empty_slot_matches_forbidden_pair() {
+        // The slot sentinel and the forbidden key must agree: this is
+        // the invariant that lets `memset_d8(0xFF)` safely initialise
+        // the slots buffer to all-EMPTY.
+        assert_eq!(EMPTY_SLOT, pack(FORBIDDEN_KEY, u32::MAX));
+        assert_eq!(EMPTY_SLOT, u64::MAX);
+    }
+
+    #[test]
+    fn set_tag_preserves_siblings() {
+        let word = 0xAABB_CCDDu32;
+        for i in 0..GROUP {
+            let updated = set_tag(word, i, 0x42);
+            assert_eq!(get_tag(updated, i), 0x42, "byte {i} read-back");
+            for j in 0..GROUP {
+                if j != i {
+                    assert_eq!(
+                        get_tag(updated, j),
+                        get_tag(word, j),
+                        "sibling byte {j} clobbered when writing {i}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn h2_from_hash_in_range() {
+        // h2 must always be representable as a FULL(h2) tag, i.e. fit
+        // in 7 bits (top bit clear). Sample a range of inputs.
+        let mut state = 0xDEAD_BEEFu32;
+        for _ in 0..1024 {
+            let key = xorshift32(&mut state);
+            let h2 = h2_from_hash(hash_u32(key));
+            assert!(h2 <= 0x7F, "h2 out of range for key {key:#x}: {h2:#x}");
+        }
+    }
+
+    #[test]
+    fn tag_namespaces_disjoint() {
+        // EMPTY, DELETED, RESERVED, and any FULL(h2) fingerprint must
+        // all be distinguishable by tag-byte value alone.
+        assert_ne!(EMPTY_TAG, DELETED_TAG);
+        assert_ne!(EMPTY_TAG, RESERVED_TAG);
+        assert_ne!(DELETED_TAG, RESERVED_TAG);
+        for h2 in 0u8..=0x7F {
+            let full = full_tag(h2);
+            assert_ne!(EMPTY_TAG, full, "EMPTY collides with FULL({h2:#x})");
+            assert_ne!(DELETED_TAG, full, "DELETED collides with FULL({h2:#x})");
+            assert_ne!(RESERVED_TAG, full, "RESERVED collides with FULL({h2:#x})");
+        }
+    }
+
+    #[test]
+    fn full_tag_is_identity_on_valid_h2() {
+        for h2 in 0u8..=0x7F {
+            assert_eq!(full_tag(h2), h2);
+        }
+    }
+
+    #[test]
+    fn distinct_keys_excludes_forbidden() {
+        let ks = distinct_keys(4096, 0xABCD_1234);
+        assert_eq!(ks.len(), 4096);
+        let unique: std::collections::HashSet<u32> = ks.iter().copied().collect();
+        assert_eq!(unique.len(), ks.len(), "duplicate keys produced");
+        assert!(!unique.contains(&FORBIDDEN_KEY));
+    }
 }

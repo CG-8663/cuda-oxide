@@ -219,11 +219,10 @@ fn test_threadfence_system_lowers_to_inline_asm() -> Result<(), anyhow::Error> {
             for func_block in func_region.deref(&ctx).iter(&ctx) {
                 for body_op in func_block.deref(&ctx).iter(&ctx) {
                     if let Some(inline_asm) = Operation::get_op::<llvm::InlineAsmOp>(body_op, &ctx)
+                        && inline_asm.asm_template(&ctx) == "membar.sys;"
                     {
-                        if inline_asm.asm_template(&ctx) == "membar.sys;" {
-                            found_inline_asm = true;
-                            assert!(inline_asm.is_convergent(&ctx));
-                        }
+                        found_inline_asm = true;
+                        assert!(inline_asm.is_convergent(&ctx));
                     }
                 }
             }
@@ -233,6 +232,152 @@ fn test_threadfence_system_lowers_to_inline_asm() -> Result<(), anyhow::Error> {
     assert!(
         found_inline_asm,
         "Expected membar.sys inline asm in lowered kernel"
+    );
+    Ok(())
+}
+
+/// Regression cover for the per-call-site address-space coercion pass.
+///
+/// When a caller passes a pointer in one address space to a callee whose
+/// declared parameter lives in a different address space (the
+/// `*mut SharedArray<T, N>` / `addrspace(3)` case that surfaces from
+/// `block_reduce` and friends), the lowerer must look up the callee's
+/// declared signature and insert an `llvm.addrspacecast` so the LLVM-IR
+/// verifier sees matching pointer types at the call site.
+///
+/// This test builds two MIR functions in one module:
+///   - `callee(p: *mut i32 in addrspace(3))`
+///   - `caller(p: *mut i32 in addrspace(0)) { callee(p) }`
+///
+/// and asserts the lowered `caller` body contains an `AddrSpaceCastOp`.
+#[test]
+fn addrspace_coercion_inserts_addrspacecast_at_call_site() -> Result<(), anyhow::Error> {
+    use dialect_llvm::ops::AddrSpaceCastOp;
+    use dialect_mir::types::MirPtrType;
+    use pliron::basic_block::BasicBlock;
+    use pliron::builtin::attributes::{StringAttr, TypeAttr};
+    use pliron::builtin::types::{FunctionType, IntegerType, Signedness};
+
+    let mut ctx = Context::new();
+    dialect_llvm::register(&mut ctx);
+    dialect_mir::register(&mut ctx);
+    dialect_nvvm::register(&mut ctx);
+    mir_lower::register(&mut ctx);
+
+    let module = ModuleOp::new(&mut ctx, "test_addrspace_coercion".try_into().unwrap());
+    let module_ptr = module.get_operation();
+    let module_region = module_ptr.deref(&ctx).get_region(0);
+    let module_block = module_region.deref(&ctx).iter(&ctx).next().unwrap();
+
+    let i32_ty = IntegerType::get(&mut ctx, 32, Signedness::Signless);
+    let shared_ptr_ty = MirPtrType::get_shared(&mut ctx, i32_ty.into(), true);
+    let generic_ptr_ty = MirPtrType::get_generic(&mut ctx, i32_ty.into(), true);
+
+    // Callee: takes a *mut i32 in addrspace(3), returns ().
+    let callee_func_ty = FunctionType::get(&mut ctx, vec![shared_ptr_ty.into()], vec![]);
+    let callee_func_op = Operation::new(
+        &mut ctx,
+        mir::MirFuncOp::get_concrete_op_info(),
+        vec![],
+        vec![],
+        vec![],
+        1,
+    );
+    let callee_func =
+        mir::MirFuncOp::new(&mut ctx, callee_func_op, TypeAttr::new(callee_func_ty.into()));
+    callee_func.set_symbol_name(&mut ctx, "callee".try_into().unwrap());
+    {
+        let region = callee_func.get_operation().deref(&ctx).get_region(0);
+        let block = BasicBlock::new(&mut ctx, None, vec![shared_ptr_ty.into()]);
+        block.insert_at_back(region, &ctx);
+
+        let ret_op = Operation::new(
+            &mut ctx,
+            mir::MirReturnOp::get_concrete_op_info(),
+            vec![],
+            vec![],
+            vec![],
+            0,
+        );
+        ret_op.insert_at_back(block, &ctx);
+    }
+    callee_func
+        .get_operation()
+        .insert_at_back(module_block, &ctx);
+
+    // Caller: takes a *mut i32 in addrspace(0), calls `callee` with that
+    // pointer. The lowerer is responsible for inserting an addrspacecast
+    // since the callee's declared addrspace differs.
+    let caller_func_ty = FunctionType::get(&mut ctx, vec![generic_ptr_ty.into()], vec![]);
+    let caller_func_op = Operation::new(
+        &mut ctx,
+        mir::MirFuncOp::get_concrete_op_info(),
+        vec![],
+        vec![],
+        vec![],
+        1,
+    );
+    let caller_func =
+        mir::MirFuncOp::new(&mut ctx, caller_func_op, TypeAttr::new(caller_func_ty.into()));
+    caller_func.set_symbol_name(&mut ctx, "caller".try_into().unwrap());
+    {
+        let region = caller_func.get_operation().deref(&ctx).get_region(0);
+        let block = BasicBlock::new(&mut ctx, None, vec![generic_ptr_ty.into()]);
+        block.insert_at_back(region, &ctx);
+        let arg = block.deref(&ctx).get_argument(0);
+
+        let call_op_ptr = Operation::new(
+            &mut ctx,
+            mir::MirCallOp::get_concrete_op_info(),
+            vec![],
+            vec![arg],
+            vec![],
+            0,
+        );
+        let call_op = mir::MirCallOp::new(call_op_ptr);
+        call_op.set_attr_callee(&ctx, StringAttr::new("callee".to_string()));
+        call_op_ptr.insert_at_back(block, &ctx);
+
+        let ret_op = Operation::new(
+            &mut ctx,
+            mir::MirReturnOp::get_concrete_op_info(),
+            vec![],
+            vec![],
+            vec![],
+            0,
+        );
+        ret_op.insert_at_back(block, &ctx);
+    }
+    caller_func
+        .get_operation()
+        .insert_at_back(module_block, &ctx);
+
+    mir_lower::lower_mir_to_llvm(&mut ctx, module_ptr).map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let mut found_addrspace_cast = false;
+    let module_op = module_ptr.deref(&ctx);
+    let region = module_op.get_region(0);
+    let block = region.deref(&ctx).iter(&ctx).next().unwrap();
+    for op in block.deref(&ctx).iter(&ctx) {
+        let Some(func_op) = Operation::get_op::<llvm::FuncOp>(op, &ctx) else {
+            continue;
+        };
+        if func_op.get_symbol_name(&ctx).to_string() != "caller" {
+            continue;
+        }
+        let func_region = func_op.get_operation().deref(&ctx).get_region(0);
+        for func_block in func_region.deref(&ctx).iter(&ctx) {
+            for body_op in func_block.deref(&ctx).iter(&ctx) {
+                if Operation::get_op::<AddrSpaceCastOp>(body_op, &ctx).is_some() {
+                    found_addrspace_cast = true;
+                }
+            }
+        }
+    }
+
+    assert!(
+        found_addrspace_cast,
+        "caller body must contain llvm.addrspacecast for the addrspace(0) -> (3) coercion at the call site",
     );
     Ok(())
 }

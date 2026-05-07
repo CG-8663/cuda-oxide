@@ -1225,9 +1225,8 @@ fn main() {
     let host = out.to_host_vec(&stream).unwrap();
     let mut ok = true;
     for b in 0..NUM_BLOCKS {
-        for tid in 0..BLOCK_SIZE {
+        for (tid, want) in scan_u32_expected.iter().enumerate() {
             let global_tid = b * BLOCK_SIZE + tid;
-            let want = scan_u32_expected[tid];
             for (j, &w) in want.iter().enumerate() {
                 if host[global_tid * 6 + j] != w {
                     println!(
@@ -1266,9 +1265,8 @@ fn main() {
     let host = out.to_host_vec(&stream).unwrap();
     let mut ok = true;
     for b in 0..NUM_BLOCKS {
-        for tid in 0..BLOCK_SIZE {
+        for (tid, want) in scan_i32_expected.iter().enumerate() {
             let global_tid = b * BLOCK_SIZE + tid;
-            let want = scan_i32_expected[tid];
             for (j, &w) in want.iter().enumerate() {
                 if host[global_tid * 3 + j] != w {
                     println!(
@@ -1307,9 +1305,8 @@ fn main() {
     let host = out.to_host_vec(&stream).unwrap();
     let mut ok = true;
     for b in 0..NUM_BLOCKS {
-        for tid in 0..BLOCK_SIZE {
+        for (tid, want) in scan_f32_expected.iter().enumerate() {
             let global_tid = b * BLOCK_SIZE + tid;
-            let want = scan_f32_expected[tid];
             for (j, &w) in want.iter().enumerate() {
                 if (host[global_tid * 3 + j] - w).abs() > 1e-2 {
                     println!(

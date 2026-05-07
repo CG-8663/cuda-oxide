@@ -3,7 +3,8 @@
 ## GPU Hashmap v2 — SwissTable-Inspired
 
 A `u32 -> u32` hashmap that adds the three structural ideas behind
-hashbrown's SwissTable to the v1 baseline:
+hashbrown's SwissTable to the open-addressed v1 baseline (the sibling
+`hashmap` example crate):
 
 1. **Control-byte array.** Probing reads a packed `ctrl: DeviceBuffer<u32>`
    of 1-byte tags (4 tags per word) instead of the full `(key, value)`
@@ -13,11 +14,11 @@ hashbrown's SwissTable to the v1 baseline:
 3. **Triangular probing.** Probe step `i` advances by `i` groups, which
    visits every group exactly once and avoids primary clustering.
 
-Plus the operation v1 didn't have:
+Plus the operation the v1 baseline didn't have:
 
 4. **Tombstone delete.** A successful delete CAS-flips the slot's tag
-   from `FULL(h2)` to `DELETED`. Find skips past tombstones; insert
-   does **not** reclaim them (left for v3, which adds rehash).
+   from `FULL(h2)` to `DELETED`. Find skips past tombstones; v2's insert
+   does **not** reclaim them — `hashmap_v3` adds reclaim and rehash on top.
 
 v2 ships **two find kernels and two insert protocols** side by side so
 you can mix and match for your workload:
@@ -88,7 +89,7 @@ ctrl: DeviceBuffer<u32>   length N / GROUP   (GROUP = 4)
 
 slots: DeviceBuffer<u64>   length N (power of two, multiple of GROUP)
 
-   each u64 packs (key, value) — same layout as v1:
+   each u64 packs (key, value):
 
       63                 32 31                  0
       +--------------------+--------------------+
@@ -99,9 +100,9 @@ slots: DeviceBuffer<u64>   length N (power of two, multiple of GROUP)
    forbidden user pair:     key = u32::MAX            (would collide with EMPTY_SLOT)
 ```
 
-The slot layout is unchanged from v1. The new piece is the parallel
-`ctrl` array — probing reads tags first and only touches a slot when a
-tag's fingerprint matches.
+The slot layout matches the open-addressed v1 baseline (`hashmap` crate);
+the new piece is the parallel `ctrl` array — probing reads tags first
+and only touches a slot when a tag's fingerprint matches.
 
 ## Hash Split
 
@@ -324,18 +325,18 @@ our own policy independent of rustc's.
 
 Default capacity is `1 << 14` slots.
 
-## Intentionally Out of Scope (still)
+## Intentionally Out of Scope for v2
 
-- **16-lane sub-warp tiles** — the primitives (`WarpTile<16>`,
-  masked `ballot_sync` / `shuffle_sync`) now ship in
-  `cuda_device::cooperative_groups`, but v2's warp-coop find still uses
-  a full 32-lane tile. Adopting `WarpTile<16>` is left for v3.
-- **DELETED slot reclaim on insert** — left for v3 with rehash. With
-  enough delete-insert churn the table fragments and effective capacity
-  shrinks; rehash compacts both at once.
-- **Resize / rehash** — left for v3. The grid-wide barrier this needs
-  (`cuda_device::grid::sync()` under cooperative launch) is now
-  available; v2 simply doesn't use it.
+- **16-lane sub-warp tiles** — v2's warp-coop find uses a full 32-lane
+  tile via the raw `warp::ballot` / `warp::shuffle` primitives. The
+  typed `WarpTile<16>` path (masked `ballot_sync` / `shuffle_sync`)
+  shipped in `cuda_device::cooperative_groups` after v2 was frozen and
+  is exercised by `hashmap_v3`'s `find_kernel_tile_16`.
+- **DELETED slot reclaim on insert** — v2 leaves tombstones in place;
+  with enough delete-insert churn the table fragments and effective
+  capacity shrinks. Reclaim and rehash ship in `hashmap_v3`.
+- **Resize / rehash** — v2 has no resize path. Cooperative-launch
+  grid-wide rehash ships in `hashmap_v3`.
 - **Generic `<K, V>`** — deferred for API design reasons.
 - **Float keys** — PTX has no `compare_exchange` for floats.
 - **Single-launch dedup under Protocol A** — best-effort by design;
@@ -384,15 +385,15 @@ If you're comparing to a *concurrent* CPU hashmap (`DashMap`,
 the shape of the table — GPU inserts are 1–2 orders of magnitude
 faster, find ratios are tighter on misses than hits — stays the same.
 
-## Version Progression
+## See Also
 
-| Version | Headline                                            |
-|:--------|:----------------------------------------------------|
-| v1      | Open-addressed `(key, value)` array, linear probe   |
-| **v2**  | SwissTable port (this crate)                        |
-| v3      | Sub-warp tiles, rehash, resize *(planned)*          |
+- **`hashmap_v3`** — the next iteration of this design. Same SwissTable
+  storage layout and probe shape; adds 16-lane sub-warp find tiles via
+  `WarpTile<16>`, intra-warp insert dedup via `tile.match_any`,
+  `DELETED`-slot reclaim on insert, and a single-kernel `grid.sync()`
+  rehash with auto-resize. v2 stays in tree as the frozen baseline.
 
-**v2 ships** all of the following in one crate:
+## What v2 Ships in One Crate
 
 - Split `ctrl` / `slots` arrays with hashbrown's h1/h2 hash split.
 - Triangular probing on `PROBE_TILE = 32` tag bytes per step.
@@ -403,12 +404,3 @@ faster, find ratios are tighter on misses than hits — stays the same.
   (32 lanes per key, `ballot` + `shuffle`).
 - A perf bench binary measuring all four GPU configurations against
   CPU `hashbrown::HashMap`.
-
-**v3 will add** (now unblocked — `cuda_device::cooperative_groups` and
-`grid::sync()` under cooperative launch both ship as of this writing):
-
-- 16-lane sub-warp find tiles via `WarpTile<16>` (masked
-  `ballot_sync` / `shuffle_sync`).
-- Rehash and DELETED-slot reclaim on insert.
-- Dynamic resize, gated on a grid-wide barrier between the
-  drain and refill phases.

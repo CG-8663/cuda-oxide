@@ -4,8 +4,9 @@
 
 A fixed-capacity `u32 -> u32` hashmap that lives entirely in device memory
 and supports concurrent insert and find from thousands of threads. This
-is the v1 baseline; v2 will layer on a SwissTable-style control-byte
-array, triangular probing, and a warp-cooperative probe.
+is the v1 baseline — `hashmap_v2` and `hashmap_v3` are sibling example
+crates that layer SwissTable-style control bytes, triangular probing,
+warp-cooperative probe, and cooperative-groups insert/find on top of it.
 
 The point of v1 is to prove the end-to-end pipeline — host allocation,
 kernel launch, atomic CAS protocol, correctness harness — with the
@@ -82,9 +83,10 @@ fn hash_u32(key: u32) -> u64 {
 }
 ```
 
-Cheap on GPU (one widening multiply), produces 64 bits of hash so v2
-can split into a low-bit probe position and a high-bit fingerprint
-without needing a second hash call.
+Cheap on GPU (one widening multiply), produces 64 bits of hash so the
+SwissTable variants in `hashmap_v2` / `hashmap_v3` can split into a
+low-bit probe position and a high-bit fingerprint without a second
+hash call.
 
 ## Correctness Tests (six)
 
@@ -137,25 +139,36 @@ What test 6 does **not** cover:
   than a hit probe. Worth adding as a follow-up test.
 - **Concurrent insert + find.** Insert and find run in separate
   kernel launches with stream sync between them, so there are no
-  insert-vs-find races. Mid-flight concurrency is a v2 concern (the
-  RESERVED-tag handshake exists exactly for that).
+  insert-vs-find races. Mid-flight concurrency is a SwissTable concern
+  (handled in `hashmap_v2` / `hashmap_v3` via the `RESERVED`-tag
+  handshake).
 
 ## Intentionally Out of Scope for v1
 
-- **Deletion** — v2 introduces tombstone tags.
-- **Resize / rehash** — left for v3.
+- **Deletion** — `hashmap_v2` and `hashmap_v3` introduce tombstone tags.
+- **Resize / rehash** — `hashmap_v3` adds a single-kernel `grid.sync()`
+  rehash.
 - **Generic `<K, V>`** — deferred for API design reasons (sentinel
   selection, slot-packing atomicity, hasher choice), not because of any
   cuda-oxide compiler limitation. `#[kernel]` already supports generics.
 - **Float keys** — PTX has no `compare_exchange` for floats, so they
   cannot be slot discriminants in this design.
 
-## Next Steps (v2)
+## See Also
 
-The v2 SwissTable port will land as a **separate sibling example crate**
-so this one stays a clean, minimal reference. v2 adds a parallel
-`ctrl: DeviceBuffer<u32>` of packed 4-tags-per-word control bytes,
-an `h1` / `h2` split off the same hash, triangular probing, and a
-warp-cooperative `find` that uses `ballot` as the GPU analog of
-hashbrown's SSE2 `_mm_movemask_epi8`. None of that retrofits onto
-v1; v1 stands on its own.
+The SwissTable variants live in **separate sibling example crates** so
+this one stays a clean, minimal reference:
+
+- **`hashmap_v2`** — adds a parallel `ctrl: DeviceBuffer<u32>` of
+  packed 4-tags-per-word control bytes, an `h1` / `h2` split off the
+  same hash, triangular probing, tombstone delete, and a warp-cooperative
+  `find` that uses `ballot` as the GPU analog of hashbrown's SSE2
+  `_mm_movemask_epi8`. Two insert protocols (slot-CAS-first and
+  ctrl-CAS-first with a `RESERVED` handshake) ship side by side.
+- **`hashmap_v3`** — keeps v2's storage layout and probe shape, drops
+  the second insert protocol, and adds 16-lane sub-warp find tiles
+  (`WarpTile<16>`), intra-warp insert dedup via `tile.match_any`,
+  `DELETED`-slot reclaim on insert, and a single-kernel `grid.sync()`
+  rehash with auto-resize.
+
+None of that retrofits onto v1; v1 stands on its own.

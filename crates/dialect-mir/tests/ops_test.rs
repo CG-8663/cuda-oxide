@@ -450,7 +450,7 @@ fn test_mir_misc_verify() {
         vec![],
         0,
     );
-    MirCastOp::new(cast_op).set_attr_cast_kind(&mut ctx, MirCastKindAttr::IntToInt);
+    MirCastOp::new(cast_op).set_attr_cast_kind(&ctx, MirCastKindAttr::IntToInt);
     assert!(MirCastOp::new(cast_op).verify(&ctx).is_ok(), "Valid Cast");
 
     // 3. MirCheckedAddOp

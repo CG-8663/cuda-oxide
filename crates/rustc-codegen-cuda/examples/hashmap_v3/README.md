@@ -71,9 +71,9 @@ map.insert_bulk_dedup(&keys, &values, &module, &stream)?;
 let fresh = map.try_insert_bulk(&keys, &values, &module, &stream)?;
 
 // Three find variants. All take MISS = u32::MAX for absent keys.
-let v0 = map.find_bulk(&query, &module, &stream)?;             // 1 thread / key
-let v1 = map.find_bulk_tile_32(&query, &module, &stream)?;     // 1 warp / key
-let v2 = map.find_bulk_tile_16(&query, &module, &stream)?;     // 2 keys / warp
+let by_thread  = map.find_bulk(&query, &module, &stream)?;             // 1 thread / key
+let by_warp    = map.find_bulk_tile_32(&query, &module, &stream)?;     // 1 warp / key
+let by_subwarp = map.find_bulk_tile_16(&query, &module, &stream)?;     // 2 keys / warp
 
 // Tombstone delete (FULL(h2) -> DELETED). Subsequent inserts may reclaim.
 let deleted = map.delete_bulk(&keys, &module, &stream)?;       // Vec<bool>

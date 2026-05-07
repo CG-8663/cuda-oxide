@@ -106,7 +106,8 @@ Output buffer layout for reduce/scan kernels:
   exercise the same mask machinery at `N = 32`).
 - **`CoalescedThreads`** — no kernel in this demo enters a
   divergent branch and re-converges on `coalesced_threads()`. The
-  module is exercised in-tree by `hashmap_v2`'s typed warp-find path.
+  module is exercised in-tree by `hashmap_v2` and `hashmap_v3`'s
+  typed warp-find paths.
 
 ## Hardware Requirements
 
@@ -138,9 +139,10 @@ Useful greps:
 The reduction/scan kernels lower into their underlying `warp_reduce`/
 `warp_scan` wrappers as standalone `.visible .func` definitions
 (rustc's MIR `Inline` cost threshold currently keeps them outlined for
-the larger ops). This is a known trade-off shared with the typed warp
-path in `hashmap_v2`'s `find_kernel_warp_typed`; functional
-correctness is unaffected.
+the larger ops). This is the same trade-off the typed warp paths in
+`hashmap_v2` (`find_kernel_warp_typed`) and `hashmap_v3` (the
+`tile_32` / `tile_16` find kernels) make; functional correctness is
+unaffected.
 
 ## Adding a New Check
 

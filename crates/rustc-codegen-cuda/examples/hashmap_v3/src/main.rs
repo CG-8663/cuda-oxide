@@ -33,7 +33,8 @@ fn main() {
     let values_v0: Vec<u32> = (0..M as u32).collect();
 
     // -------------------------------------------------------------------------
-    // Test 1: insert_bulk roundtrip (parity with v1).
+    // Test 1: insert_bulk roundtrip — every inserted key is findable
+    //         with the inserted value.
     // -------------------------------------------------------------------------
     println!("--- Test 1: insert_bulk roundtrip ---");
     {
@@ -57,7 +58,7 @@ fn main() {
     }
 
     // -------------------------------------------------------------------------
-    // Test 2: miss on absent keys (parity with v1).
+    // Test 2: miss on absent keys — disjoint key set must miss.
     // -------------------------------------------------------------------------
     println!("\n--- Test 2: miss on absent keys ---");
     {
@@ -86,7 +87,8 @@ fn main() {
     }
 
     // -------------------------------------------------------------------------
-    // Test 3: last-writer-wins on re-insert (parity with v1).
+    // Test 3: last-writer-wins on re-insert — second insert_bulk
+    //         overwrites every value.
     // -------------------------------------------------------------------------
     println!("\n--- Test 3: insert_bulk last-writer-wins on re-insert ---");
     {
@@ -114,7 +116,9 @@ fn main() {
     }
 
     // -------------------------------------------------------------------------
-    // Test 4: try_insert_bulk first-writer-wins (parity with v1).
+    // Test 4: try_insert_bulk first-writer-wins — pass 2 reports
+    //         every key as already-present and the table preserves
+    //         the pass-1 values.
     // -------------------------------------------------------------------------
     println!("\n--- Test 4: try_insert_bulk first-writer-wins ---");
     {
@@ -147,7 +151,7 @@ fn main() {
     }
 
     // -------------------------------------------------------------------------
-    // Test 5: load-factor stress at 75% (parity with v1 test 6).
+    // Test 5: load-factor stress (~75%) — dense insert + roundtrip.
     // -------------------------------------------------------------------------
     println!("\n--- Test 5: load-factor stress (~75%) ---");
     {
