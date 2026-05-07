@@ -1,8 +1,8 @@
 <p align="center">
-  <a href="https://github.com/NVlabs/cuda-oxide/actions/workflows/clippy.yml"><img alt="Build" src="https://img.shields.io/badge/build-workflow-blue"></a>
-  <a href="https://github.com/NVlabs/cuda-oxide/actions/workflows/unit-tests.yml"><img alt="Unit tests" src="https://img.shields.io/badge/unit%20tests-workflow-blue"></a>
-  <a href="https://github.com/NVlabs/cuda-oxide/actions/workflows/cargo-deny.yml"><img alt="cargo-deny" src="https://img.shields.io/badge/cargo--deny-workflow-blue"></a>
-  <a href="https://github.com/NVlabs/cuda-oxide/actions/workflows/codeql.yml"><img alt="CodeQL" src="https://img.shields.io/badge/codeql-workflow-blue"></a>
+  <a href="https://github.com/NVlabs/cuda-oxide/actions/workflows/clippy.yml"><img alt="clippy" src="https://github.com/NVlabs/cuda-oxide/actions/workflows/clippy.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/NVlabs/cuda-oxide/actions/workflows/unit-tests.yml"><img alt="unit-tests" src="https://github.com/NVlabs/cuda-oxide/actions/workflows/unit-tests.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/NVlabs/cuda-oxide/actions/workflows/cargo-deny.yml"><img alt="cargo-deny" src="https://github.com/NVlabs/cuda-oxide/actions/workflows/cargo-deny.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/NVlabs/cuda-oxide/actions/workflows/codeql.yml"><img alt="CodeQL" src="https://github.com/NVlabs/cuda-oxide/actions/workflows/codeql.yml/badge.svg?branch=main"></a>
   <br>
   <img src="assets/logo.png" alt="cuda-oxide logo" width="100%">
 </p>
