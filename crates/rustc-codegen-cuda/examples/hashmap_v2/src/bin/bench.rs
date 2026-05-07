@@ -259,6 +259,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("============================================================");
     println!("GPU Hashmap v2 — Performance vs CPU hashbrown");
     println!("============================================================");
+
+    let ctx = CudaContext::new(0)?;
+    let stream = ctx.default_stream();
+    let module: Arc<CudaModule> = ctx.load_module_from_file("hashmap_v2.ptx")?;
+
+    print_environment_banner(&ctx)?;
+
     println!("Bench config:");
     println!(
         "  capacity:    {CAPACITY} slots (= 1 << {})",
@@ -273,10 +280,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!();
 
-    let ctx = CudaContext::new(0)?;
-    let stream = ctx.default_stream();
-    let module: Arc<CudaModule> = ctx.load_module_from_file("hashmap_v2.ptx")?;
-
     // Single key pool large enough to cover the largest load factor + a
     // disjoint miss-set of the same size. RandomKeys with hashbrown's prime.
     let max_n = (CAPACITY as f32 * LOAD_FACTORS[2].0) as usize;
@@ -287,8 +290,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut row_a_insert = [0.0f64; 3];
     let mut row_single_lookup = [0.0f64; 3];
     let mut row_warp_lookup = [0.0f64; 3];
+    let mut row_warp_typed_lookup = [0.0f64; 3];
     let mut row_single_lookup_fail = [0.0f64; 3];
     let mut row_warp_lookup_fail = [0.0f64; 3];
+    let mut row_warp_typed_lookup_fail = [0.0f64; 3];
     let mut row_cpu_insert = [0.0f64; 3];
     let mut row_cpu_lookup = [0.0f64; 3];
     let mut row_cpu_lookup_fail = [0.0f64; 3];
@@ -377,6 +382,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(())
             })?;
 
+        // ---- GPU LOOKUP (hits) — warp-cooperative, typed CG API ---------
+        row_warp_typed_lookup[col_idx] =
+            bench_gpu_find(&map, &keys_dev, &mut out_dev, n_keys, &stream, |m, k, o| {
+                cuda_launch! {
+                    kernel: find_kernel_warp_typed,
+                    stream: stream,
+                    module: module,
+                    config: cfg_warp,
+                    args: [slice(m.ctrl), slice(m.slots), slice(*k), slice_mut(*o)]
+                }?;
+                Ok(())
+            })?;
+
         // ---- GPU LOOKUP_FAIL (misses) — single-thread -------------------
         row_single_lookup_fail[col_idx] = bench_gpu_find(
             &map,
@@ -415,6 +433,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         )?;
 
+        // ---- GPU LOOKUP_FAIL (misses) — warp-cooperative, typed CG API --
+        row_warp_typed_lookup_fail[col_idx] = bench_gpu_find(
+            &map,
+            &absent_dev,
+            &mut out_dev,
+            n_keys,
+            &stream,
+            |m, k, o| {
+                cuda_launch! {
+                    kernel: find_kernel_warp_typed,
+                    stream: stream,
+                    module: module,
+                    config: cfg_warp,
+                    args: [slice(m.ctrl), slice(m.slots), slice(*k), slice_mut(*o)]
+                }?;
+                Ok(())
+            },
+        )?;
+
         // ---- CPU INSERT — single-threaded hashbrown ---------------------
         row_cpu_insert[col_idx] = bench_cpu_insert(&keys, &values);
 
@@ -443,31 +480,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     print_section_header("Find — lookup (every query hits)");
     print_row("GPU single-thread        ", &row_single_lookup);
     print_row("GPU warp-cooperative     ", &row_warp_lookup);
+    print_row("GPU warp-typed (CG API)  ", &row_warp_typed_lookup);
     print_row("CPU hashbrown (rayon)    ", &row_cpu_lookup);
     print_ratios(
-        "GPU-single / CPU         ",
+        "GPU-single     / CPU     ",
         &row_single_lookup,
         &row_cpu_lookup,
     );
     print_ratios(
-        "GPU-warp   / CPU         ",
+        "GPU-warp       / CPU     ",
         &row_warp_lookup,
         &row_cpu_lookup,
+    );
+    print_ratios(
+        "GPU-warp-typed / CPU     ",
+        &row_warp_typed_lookup,
+        &row_cpu_lookup,
+    );
+    print_ratios(
+        "typed / hand-written     ",
+        &row_warp_typed_lookup,
+        &row_warp_lookup,
     );
 
     print_section_header("Find — lookup_fail (every query misses)");
     print_row("GPU single-thread        ", &row_single_lookup_fail);
     print_row("GPU warp-cooperative     ", &row_warp_lookup_fail);
+    print_row("GPU warp-typed (CG API)  ", &row_warp_typed_lookup_fail);
     print_row("CPU hashbrown (rayon)    ", &row_cpu_lookup_fail);
     print_ratios(
-        "GPU-single / CPU         ",
+        "GPU-single     / CPU     ",
         &row_single_lookup_fail,
         &row_cpu_lookup_fail,
     );
     print_ratios(
-        "GPU-warp   / CPU         ",
+        "GPU-warp       / CPU     ",
         &row_warp_lookup_fail,
         &row_cpu_lookup_fail,
+    );
+    print_ratios(
+        "GPU-warp-typed / CPU     ",
+        &row_warp_typed_lookup_fail,
+        &row_cpu_lookup_fail,
+    );
+    print_ratios(
+        "typed / hand-written     ",
+        &row_warp_typed_lookup_fail,
+        &row_warp_lookup_fail,
     );
 
     println!();
@@ -494,4 +553,40 @@ fn print_ratios(label: &str, gpu: &[f64; 3], cpu: &[f64; 3]) {
         ratio(gpu[1], cpu[1]),
         ratio(gpu[2], cpu[2])
     );
+}
+
+/// Print a banner line matching the smoketest's convention:
+///
+///   hashmap_v2 bench @ <git-sha> (<branch>)
+///   GPU: <name>, <cap.major>.<cap.minor>
+///   PTX arch: sm_<NNN>
+///
+/// The git data shells out to `git`. The GPU data uses the cuda-core
+/// driver wrappers so it works even without `nvidia-smi` on PATH.
+fn print_environment_banner(
+    ctx: &Arc<cuda_core::CudaContext>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let git_head = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .unwrap_or_else(|| "?".to_string());
+    let git_branch = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .unwrap_or_else(|| "?".to_string());
+
+    let gpu_name = ctx.device_name().unwrap_or_else(|_| "?".to_string());
+    let (cap_major, cap_minor) = ctx.compute_capability().unwrap_or((0, 0));
+
+    println!("hashmap_v2 bench @ {git_head} ({git_branch})");
+    println!("GPU: {gpu_name}, {cap_major}.{cap_minor}");
+    println!("PTX arch: sm_{cap_major}{cap_minor}");
+    println!();
+    Ok(())
 }

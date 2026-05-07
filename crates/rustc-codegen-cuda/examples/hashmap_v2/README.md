@@ -293,6 +293,18 @@ The single-thread `find_kernel` stays in the binary as the comparison
 baseline. Both produce identical results on every input (verified by
 Test 8); the bench binary measures the throughput crossover.
 
+`find_kernel_warp_typed` is the same algorithm rewritten on
+`cuda_device::cooperative_groups::WarpTile<32>` and ships in the bench
+as a third row. It currently runs ~12–17 % slower than the hand-written
+kernel because the four typed-API sites in the inner probe loop
+(`tile.ballot ×2`, `tile.shfl ×2`) clear rustc's MIR `Inline` cost
+threshold and end up as standalone `.visible .func` calls in the
+generated PTX — each one a single PTX instruction wrapped in
+`ld.param`/`ret`. Two-stage plan to close the gap: short term, shrink
+the wrappers below the MIR threshold so the existing pass folds them;
+long term, add a MIR-level inliner pass to mir-importer that applies
+our own policy independent of rustc's.
+
 ## Correctness Tests (twelve)
 
 | #  | Name                                 | What it verifies                                                  |
@@ -314,14 +326,16 @@ Default capacity is `1 << 14` slots.
 
 ## Intentionally Out of Scope (still)
 
-- **16-lane sub-warp tiles** — would need `ballot_sync` /
-  `shuffle_sync` with sub-warp masks, which arrives with the
-  cooperative-groups design pass.
+- **16-lane sub-warp tiles** — the primitives (`WarpTile<16>`,
+  masked `ballot_sync` / `shuffle_sync`) now ship in
+  `cuda_device::cooperative_groups`, but v2's warp-coop find still uses
+  a full 32-lane tile. Adopting `WarpTile<16>` is left for v3.
 - **DELETED slot reclaim on insert** — left for v3 with rehash. With
   enough delete-insert churn the table fragments and effective capacity
   shrinks; rehash compacts both at once.
-- **Resize / rehash** — left for v3, blocked on cooperative-groups
-  (grid-wide barrier).
+- **Resize / rehash** — left for v3. The grid-wide barrier this needs
+  (`cuda_device::grid::sync()` under cooperative launch) is now
+  available; v2 simply doesn't use it.
 - **Generic `<K, V>`** — deferred for API design reasons.
 - **Float keys** — PTX has no `compare_exchange` for floats.
 - **Single-launch dedup under Protocol A** — best-effort by design;
@@ -376,7 +390,7 @@ faster, find ratios are tighter on misses than hits — stays the same.
 |:--------|:----------------------------------------------------|
 | v1      | Open-addressed `(key, value)` array, linear probe   |
 | **v2**  | SwissTable port (this crate)                        |
-| v3      | Cooperative-groups, rehash, resize *(planned)*      |
+| v3      | Sub-warp tiles, rehash, resize *(planned)*          |
 
 **v2 ships** all of the following in one crate:
 
@@ -390,8 +404,11 @@ faster, find ratios are tighter on misses than hits — stays the same.
 - A perf bench binary measuring all four GPU configurations against
   CPU `hashbrown::HashMap`.
 
-**v3 will add** (blocked on cooperative-groups primitives in cuda-oxide):
+**v3 will add** (now unblocked — `cuda_device::cooperative_groups` and
+`grid::sync()` under cooperative launch both ship as of this writing):
 
-- 16-lane sub-warp find tiles via `ballot_sync` / `shuffle_sync`.
+- 16-lane sub-warp find tiles via `WarpTile<16>` (masked
+  `ballot_sync` / `shuffle_sync`).
 - Rehash and DELETED-slot reclaim on insert.
-- Dynamic resize.
+- Dynamic resize, gated on a grid-wide barrier between the
+  drain and refill phases.

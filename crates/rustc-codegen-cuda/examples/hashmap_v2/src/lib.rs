@@ -62,6 +62,7 @@ use std::sync::Arc;
 
 use cuda_core::{CudaModule, CudaStream, DeviceBuffer, LaunchConfig};
 use cuda_device::atomic::{AtomicOrdering, DeviceAtomicU32, DeviceAtomicU64};
+use cuda_device::cooperative_groups::{ThreadGroup, WarpCollective, this_thread_block};
 use cuda_device::{DisjointSlice, kernel, thread, warp};
 use cuda_host::cuda_launch;
 
@@ -88,6 +89,10 @@ pub const GROUP: usize = 4;
 ///
 /// `PROBE_TILE` must be a multiple of `GROUP` (one ctrl word covers
 /// `GROUP` tag bytes; we read `PROBE_TILE / GROUP` ctrl words per step).
+///
+/// (Kept at 32 for v2 even though sub-warp `WarpTile<N>` masks are now
+/// available via `cuda_device::cooperative_groups`. v3 will revisit
+/// `PROBE_TILE = 16` and the resulting two-keys-per-warp packing.)
 pub const PROBE_TILE: usize = 32;
 
 /// Tag byte = "this slot is free". All slots start as `EMPTY_TAG`. The
@@ -839,6 +844,107 @@ pub fn find_kernel_warp(ctrl: &[u32], slots: &[u64], keys: &[u32], mut out: Disj
         // Triangular advance in tile units. Both operands are
         // PROBE_TILE-aligned, so the sum stays aligned and `& mask`
         // keeps it in [0, N).
+        stride += 1;
+        probe_base = (probe_base + stride * PROBE_TILE) & mask;
+    }
+}
+
+/// `find_kernel_warp_typed` — `find_kernel_warp` rewritten on the typed
+/// cooperative-groups API.
+///
+/// Identical algorithm to `find_kernel_warp`; the only differences are:
+///
+/// - `warp::lane_id()`               -> `tile.thread_rank()`
+/// - `warp::ballot(p)`               -> `tile.ballot(p)`
+/// - `warp::shuffle(v, src)`         -> `tile.shfl(v, src)`
+///
+/// where `tile = this_thread_block().tiled_partition::<32>()`.
+///
+/// The emitted *instruction* under each typed call is byte-identical
+/// to the raw form (one `vote.sync.ballot.b32` or one
+/// `shfl.sync.idx.b32`), but at the time of writing each typed
+/// wrapper is large enough to clear rustc's MIR `Inline` cost
+/// threshold and ends up as its own `.visible .func`. The four typed
+/// sites in the inner probe loop (`tile.ballot ×2`, `tile.shfl ×2`)
+/// therefore add four `call.uni` round-trips per probe step, which
+/// the bench binary measures at ~12–17 % runtime overhead vs the
+/// raw kernel.
+#[kernel]
+pub fn find_kernel_warp_typed(
+    ctrl: &[u32],
+    slots: &[u64],
+    keys: &[u32],
+    mut out: DisjointSlice<u32>,
+) {
+    let block = this_thread_block();
+    let tile = block.tiled_partition::<32>();
+
+    let lane = tile.thread_rank();
+    let global_tid = thread::index_1d().get();
+    let warp_idx = global_tid / PROBE_TILE;
+    if warp_idx >= keys.len() {
+        return;
+    }
+
+    let key = keys[warp_idx];
+    let hash = hash_u32(key);
+    let h2 = h2_from_hash(hash);
+    let mask = slots.len() - 1;
+    let mut probe_base = (hash as usize) & mask & !(PROBE_TILE - 1);
+    let mut stride = 0usize;
+
+    loop {
+        let tag_pos = probe_base + (lane as usize);
+        let ctrl_word_idx = tag_pos / GROUP;
+        let byte_in_word = tag_pos % GROUP;
+        let word = unsafe {
+            DeviceAtomicU32::from_ptr(ctrl.as_ptr().add(ctrl_word_idx).cast_mut())
+                .load(AtomicOrdering::Acquire)
+        };
+        let tag: u8 = ((word >> (8 * byte_in_word)) & 0xFF) as u8;
+
+        let mut m_h2 = tile.ballot(tag == h2);
+        let m_empty = tile.ballot(tag == EMPTY_TAG);
+
+        while m_h2 != 0 {
+            let cand = m_h2.trailing_zeros();
+            let local_slot: u64 = if lane == cand {
+                let slot_idx = probe_base + (cand as usize);
+                unsafe {
+                    DeviceAtomicU64::from_ptr(slots.as_ptr().add(slot_idx).cast_mut())
+                        .load(AtomicOrdering::Acquire)
+                }
+            } else {
+                0
+            };
+            let lo = tile.shfl(local_slot as u32, cand);
+            let hi = tile.shfl((local_slot >> 32) as u32, cand);
+            let observed: u64 = ((hi as u64) << 32) | (lo as u64);
+
+            if unpack_key(observed) == key {
+                if lane == 0 {
+                    // SAFETY: warp_idx < keys.len() == out.len(), and
+                    // each warp has a unique warp_idx so writes by lane
+                    // 0 across warps are disjoint.
+                    unsafe {
+                        *out.get_unchecked_mut(warp_idx) = unpack_value(observed);
+                    }
+                }
+                return;
+            }
+            m_h2 &= m_h2 - 1;
+        }
+
+        if m_empty != 0 {
+            if lane == 0 {
+                // SAFETY: same uniqueness argument as above.
+                unsafe {
+                    *out.get_unchecked_mut(warp_idx) = MISS;
+                }
+            }
+            return;
+        }
+
         stride += 1;
         probe_base = (probe_base + stride * PROBE_TILE) & mask;
     }
