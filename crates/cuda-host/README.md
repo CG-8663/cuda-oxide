@@ -80,6 +80,7 @@ op.sync()?;  // or .await in async context
 | `module`       | Yes      | Loaded PTX module                                        |
 | `config`       | Yes      | `LaunchConfig` (grid/block dims)                         |
 | `cluster_dim`  | No       | `(x, y, z)` cluster dimensions (uses `launch_kernel_ex`) |
+| `cooperative`  | No       | `true` enables `Grid::sync()` (uses cooperative launch)  |
 | `args`         | Yes      | `[...]` argument list                                    |
 
 ### Argument Syntax

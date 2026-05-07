@@ -556,7 +556,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[dedup section: 1 M inputs, varying duplicate rate, key-clustered layout]");
 
     const DEDUP_INPUT: usize = 1 << 20;
-    const DEDUP_LABELS: [(f64, &str); 3] = [(0.50, "50% dup"), (0.90, "90% dup"), (0.99, "99% dup")];
+    const DEDUP_LABELS: [(f64, &str); 3] =
+        [(0.50, "50% dup"), (0.90, "90% dup"), (0.99, "99% dup")];
     let mut row_dedup_naive = [0.0f64; 3];
     let mut row_dedup_match_any = [0.0f64; 3];
 

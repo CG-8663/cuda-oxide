@@ -35,21 +35,21 @@ Pointers and slices carry an NVPTX address space:
 
 ## Operations
 
-53 operations across 11 modules:
+54 operations across 11 modules:
 
-| Module         | Ops | Description                                                                         |
-|----------------|-----|-------------------------------------------------------------------------------------|
-| `function`     | 1   | `MirFuncOp` -- function definition                                                  |
-| `control_flow` | 5   | return, goto, cond_branch, assert, unreachable                                      |
-| `memory`       | 8   | alloca, load, store, ref, assign, ptr_offset, shared_alloc, extern_shared           |
-| `constants`    | 3   | integer, float, and undef constants                                                 |
-| `arithmetic`   | 15  | add/sub/mul/div/rem, checked variants, bitwise, shifts                              |
-| `comparison`   | 6   | lt, le, gt, ge, eq, ne                                                              |
-| `aggregate`    | 8   | construct/extract/insert for structs, tuples, and arrays; field and element address |
-| `enum_ops`     | 3   | construct_enum, get_discriminant, enum_payload                                      |
-| `cast`         | 1   | type conversions (kind tracked via `MirCastKindAttr`)                               |
-| `storage`      | 2   | storage_live, storage_dead (lifetime markers)                                       |
-| `call`         | 1   | function calls                                                                      |
+| Module         | Ops | Description                                                                             |
+|----------------|-----|-----------------------------------------------------------------------------------------|
+| `function`     | 1   | `MirFuncOp` -- function definition                                                      |
+| `control_flow` | 5   | return, goto, cond_branch, assert, unreachable                                          |
+| `memory`       | 9   | alloca, load, store, ref, assign, ptr_offset, shared_alloc, global_alloc, extern_shared |
+| `constants`    | 3   | integer, float, and undef constants                                                     |
+| `arithmetic`   | 15  | add/sub/mul/div/rem, checked variants, bitwise, shifts                                  |
+| `comparison`   | 6   | lt, le, gt, ge, eq, ne                                                                  |
+| `aggregate`    | 8   | construct/extract/insert for structs, tuples, and arrays; field and element address     |
+| `enum_ops`     | 3   | construct_enum, get_discriminant, enum_payload                                          |
+| `cast`         | 1   | type conversions (kind tracked via `MirCastKindAttr`)                                   |
+| `storage`      | 2   | storage_live, storage_dead (lifetime markers)                                           |
+| `call`         | 1   | function calls                                                                          |
 
 `MirAllocaOp` implements `PromotableAllocationInterface` and `MirLoadOp` / `MirStoreOp` implement `PromotableOpInterface`, so pliron's `mem2reg` pass can promote scalar stack slots back into SSA. `MirUndefOp` is the default reaching definition the pass materialises when a load is not dominated by any store.
 

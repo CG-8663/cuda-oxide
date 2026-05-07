@@ -513,8 +513,9 @@ fn main() {
         for c in 0..CYCLES {
             map.delete_bulk(&churn_keys, &module, &stream)
                 .expect("delete");
-            let new_values: Vec<u32> =
-                (0..churn_n as u32).map(|i| (c as u32) * 1_000_000 + i).collect();
+            let new_values: Vec<u32> = (0..churn_n as u32)
+                .map(|i| (c as u32) * 1_000_000 + i)
+                .collect();
             map.insert_bulk(&churn_keys, &new_values, &module, &stream)
                 .expect("reinsert");
         }
@@ -538,9 +539,7 @@ fn main() {
             println!("  FAIL: {bad} mismatches after {CYCLES} delete-reinsert cycles");
             std::process::exit(1);
         }
-        println!(
-            "  {CYCLES} cycles of {churn_n}-key churn at 90% load, all {m} keys preserved"
-        );
+        println!("  {CYCLES} cycles of {churn_n}-key churn at 90% load, all {m} keys preserved");
     }
 
     // -------------------------------------------------------------------------
@@ -561,11 +560,7 @@ fn main() {
         let cap_after = map.capacity();
 
         let found = map.find_bulk(&keys, &module, &stream).expect("find");
-        let bad: usize = found
-            .iter()
-            .zip(&values)
-            .filter(|(f, v)| *f != *v)
-            .count();
+        let bad: usize = found.iter().zip(&values).filter(|(f, v)| *f != *v).count();
         if bad != 0 {
             println!("  FAIL: {bad} mismatches after rehash");
             std::process::exit(1);
@@ -604,11 +599,7 @@ fn main() {
         }
 
         let found = map.find_bulk(&keys, &module, &stream).expect("find");
-        let bad: usize = found
-            .iter()
-            .zip(&values)
-            .filter(|(f, v)| *f != *v)
-            .count();
+        let bad: usize = found.iter().zip(&values).filter(|(f, v)| *f != *v).count();
         if bad != 0 {
             println!("  FAIL: {bad} mismatches after auto-resize stress");
             std::process::exit(1);

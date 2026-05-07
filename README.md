@@ -193,7 +193,7 @@ compiles a Rust kernel to PTX, launches it on the GPU, and prints
 
 ## Examples
 
-**44 examples** in `crates/rustc-codegen-cuda/examples/`. Highlights:
+**46 examples** in `crates/rustc-codegen-cuda/examples/`. Highlights:
 
 | Example              | Description                                                              |
 |----------------------|--------------------------------------------------------------------------|

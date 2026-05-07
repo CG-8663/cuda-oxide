@@ -14,15 +14,16 @@ dialect-nvvm ops
 
 ## Operations by GPU Generation
 
-~100 operations across 11 modules, spanning three GPU generations:
+123 operations across 12 modules, spanning three GPU generations:
 
 ### Universal (all GPUs)
 
-| Module   | Ops | Highlights                                                                 |
-|----------|-----|----------------------------------------------------------------------------|
-| `thread` | 7   | tid.{x,y}, ctaid.{x,y}, ntid.{x,y}, barrier0                               |
-| `warp`   | 12  | Shuffle (bfly/down/up/idx for i32 and f32), lane_id, vote (all/any/ballot) |
-| `debug`  | 6   | clock/clock64, trap, breakpoint, pm_event, vprintf                         |
+| Module   | Ops | Highlights                                                                                |
+|----------|-----|-------------------------------------------------------------------------------------------|
+| `thread` | 18  | tid/ctaid/ntid/nctaid for x/y/z, env_reg{1,2}, barrier0, threadfence{,_block,_system}     |
+| `warp`   | 18  | shfl (idx/bfly/down/up, i32 and f32), lane_id, vote (all/any/ballot), match_any/match_all |
+| `grid`   | 1   | grid_sync (cooperative kernel launches only)                                              |
+| `debug`  | 6   | clock/clock64, trap, breakpoint, pm_event, vprintf                                        |
 
 ### Volta+ (sm_70)
 
@@ -36,7 +37,7 @@ dialect-nvvm ops
 |-------------|-----|---------------------------------------------------------------------------------|
 | `cluster`   | 11  | Cluster CTA IDs, cluster sync, DSMEM (mapa_shared_cluster, dsmem_read)          |
 | `mbarrier`  | 10  | Init, arrive, arrive_expect_tx, try_wait, wait_parity, fence_proxy_async        |
-| `tma`       | 15+ | 1D-5D global↔shared copies, multicast, CTA-group-2 variants, commit/wait groups |
+| `tma`       | 15  | 1D-5D global↔shared copies, multicast, CTA-group-2 variants, commit/wait groups |
 | `wgmma`     | 5   | Fence, commit, wait, smem descriptor, M64N64K16 bf16 MMA                        |
 | `stmatrix`  | 5   | m8n8 matrix stores (×2, ×4, transposed), f32→bf16 convert                       |
 
@@ -44,7 +45,7 @@ dialect-nvvm ops
 
 | Module    | Ops | Highlights                                                                                                                         |
 |-----------|-----|------------------------------------------------------------------------------------------------------------------------------------|
-| `tcgen05` | 25  | TMEM alloc/dealloc, fences, MMA (f16/bf16/tf32 warpgroup and non-warpgroup), SMEM↔TMEM copies, pure loads, CTA-pair (cg2) variants |
+| `tcgen05` | 24  | TMEM alloc/dealloc, fences, MMA (f16/bf16/tf32 warpgroup and non-warpgroup), SMEM↔TMEM copies, pure loads, CTA-pair (cg2) variants |
 | `clc`     | 6   | Cluster Launch Control: try_cancel, query_is_canceled, query first ctaid per dimension                                             |
 
 ## Attributes
@@ -78,8 +79,9 @@ src/
 ├── lib.rs          # Dialect registration
 └── ops/
     ├── mod.rs       # Op module registry + architecture table
-    ├── thread.rs    # Thread/block/grid indexing, barrier
-    ├── warp.rs      # Shuffle and vote operations
+    ├── thread.rs    # Thread/block indexing, barrier0, threadfences
+    ├── warp.rs      # Shuffle, vote, match operations
+    ├── grid.rs      # Cooperative grid_sync
     ├── atomic.rs    # Atomic ops + ordering/scope/kind attributes
     ├── debug.rs     # Clock, trap, printf
     ├── cluster.rs   # Thread block clusters, DSMEM

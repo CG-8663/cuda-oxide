@@ -7,10 +7,11 @@
        │
        │  uses
        ▼
-  cuda-device  ───────────────────────────────────┐
+  cuda-device  ─────────────────────────────────┐
   │                                             │
   │  thread     warp       barrier     cusimd   │  Universal
   │  disjoint   shared     atomic      debug    │
+  │  fence      grid       coop_grps            │
   │                                             │
   │  tma        wgmma      stmatrix    cluster  │  Hopper+
   │  tcgen05    clc                             │  Blackwell+
@@ -23,21 +24,26 @@
 
 ## Modules
 
-| Module     | Description                                                                  | GPU     |
-|------------|------------------------------------------------------------------------------|---------|
-| `thread`   | Thread/block/grid IDs, `index_1d`/`index_2d`, `sync_threads`, fences         | All     |
-| `disjoint` | `DisjointSlice<T>` -- safe parallel writes via `ThreadIndex`                 | All     |
-| `shared`   | `SharedArray<T, N>`, `DynamicSharedArray<T>` -- block-scoped shared memory   | All     |
-| `warp`     | Shuffle (xor/up/down/idx for i32 and f32), lane_id, vote (all/any/ballot)    | All     |
-| `atomic`   | Scoped GPU atomics; `core::sync::atomic` types also supported on device      | sm_70+  |
-| `debug`    | `clock`/`clock64`, `trap`, `breakpoint`, `gpu_printf!`, `gpu_assert!`        | All     |
-| `barrier`  | `Barrier`, `ManagedBarrier<State, Kind>` -- async mbarrier for TMA           | sm_90+  |
-| `cluster`  | Thread block clusters, DSMEM (`map_shared_rank`), `cluster_sync`             | sm_90+  |
-| `tma`      | `TmaDescriptor`, bulk tensor copies (1D-5D global↔shared, multicast)         | sm_90+  |
-| `wgmma`    | Warpgroup MMA fence/commit/wait, smem descriptors, bf16/f16/tf32 MMA         | sm_90   |
-| `tcgen05`  | 5th-gen tensor cores: TMEM alloc/dealloc, MMA, stmatrix, CG2 variants        | sm_100+ |
-| `cusimd`   | `CuSimd<T, N>` vector register type, `Float2`/`Float4`/`TmemRegs*` aliases   | All     |
-| `clc`      | Cluster Launch Control: cancel, query first ctaid                            | sm_100+ |
+| Module               | Description                                                                  | GPU     |
+|----------------------|------------------------------------------------------------------------------|---------|
+| `thread`             | Thread/block IDs, `index_1d`/`index_2d`, `sync_threads`                      | All     |
+| `disjoint`           | `DisjointSlice<T>` -- safe parallel writes via `ThreadIndex`                 | All     |
+| `shared`             | `SharedArray<T, N>`, `DynamicSharedArray<T>` -- block-scoped shared memory   | All     |
+| `warp`               | Shuffle (xor/up/down/idx for i32 and f32), lane_id, vote (all/any/ballot)    | All     |
+| `atomic`             | Scoped GPU atomics; `core::sync::atomic` types also supported on device      | sm_70+  |
+| `debug`              | `clock`/`clock64`, `trap`, `breakpoint`, `gpu_printf!`, `gpu_assert!`        | All     |
+| `fence`              | `threadfence_block` / `threadfence` / `threadfence_system` memory fences     | All     |
+| `grid`               | Grid-scoped queries and `sync` (cooperative kernel launches only)            | sm_70+  |
+| `cooperative_groups` | Typed group handles (`Grid`/`ThreadBlock`/`WarpTile<N>`/`CoalescedThreads`)  | All     |
+| `barrier`            | `Barrier`, `ManagedBarrier<State, Kind>` -- async mbarrier for TMA           | sm_90+  |
+| `cluster`            | Thread block clusters, DSMEM (`map_shared_rank`), `cluster_sync`             | sm_90+  |
+| `tma`                | `TmaDescriptor`, bulk tensor copies (1D-5D global↔shared, multicast)         | sm_90+  |
+| `wgmma`              | Warpgroup MMA fence/commit/wait, smem descriptors, bf16/f16/tf32 MMA         | sm_90   |
+| `tcgen05`            | 5th-gen tensor cores: TMEM alloc/dealloc, MMA, stmatrix, CG2 variants        | sm_100+ |
+| `cusimd`             | `CuSimd<T, N>` vector register type, `Float2`/`Float4`/`TmemRegs*` aliases   | All     |
+| `clc`                | Cluster Launch Control: cancel, query first ctaid                            | sm_100+ |
+
+- *cooperative_groups* also features support for warp/block reductions and scans
 
 ## Key Types
 

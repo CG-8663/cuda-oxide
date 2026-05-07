@@ -253,7 +253,11 @@ pub fn try_insert_kernel(
     }
     let fresh = insert_into_table_core(ctrl, slots, keys[i_thread], values[i_thread], false);
     if let Some(o) = out.get_mut(tid) {
-        *o = if fresh { FLAG_FRESH_OR_OK } else { FLAG_PRESENT };
+        *o = if fresh {
+            FLAG_FRESH_OR_OK
+        } else {
+            FLAG_PRESENT
+        };
     }
 }
 
@@ -285,7 +289,11 @@ pub fn insert_kernel_dedup(ctrl: &[u32], slots: &[u64], keys: &[u32], values: &[
     // forbidden from using, so they form their own dup group disjoint
     // from any active key.
     let active = global_tid < keys.len();
-    let key = if active { keys[global_tid] } else { FORBIDDEN_KEY };
+    let key = if active {
+        keys[global_tid]
+    } else {
+        FORBIDDEN_KEY
+    };
     let value = if active { values[global_tid] } else { 0 };
 
     let dup_mask = tile.match_any(key);
@@ -336,9 +344,8 @@ pub fn rehash_kernel(old_ctrl: &[u32], old_slots: &[u64], new_ctrl: &[u32], new_
     let (live, key, value) = if tid < old_slots.len() {
         let ctrl_word_idx = tid / GROUP;
         let byte_in_word = tid % GROUP;
-        let ctrl_atomic = unsafe {
-            DeviceAtomicU32::from_ptr(old_ctrl.as_ptr().add(ctrl_word_idx).cast_mut())
-        };
+        let ctrl_atomic =
+            unsafe { DeviceAtomicU32::from_ptr(old_ctrl.as_ptr().add(ctrl_word_idx).cast_mut()) };
         let ctrl_word = ctrl_atomic.load(AtomicOrdering::Acquire);
         let tag = get_tag(ctrl_word, byte_in_word);
         if tag <= 0x7F {
@@ -441,12 +448,7 @@ pub fn find_kernel(ctrl: &[u32], slots: &[u64], keys: &[u32], mut out: DisjointS
 ///
 /// Launch with `LaunchConfig::for_num_elems(keys.len() * 32)`.
 #[kernel]
-pub fn find_kernel_tile_32(
-    ctrl: &[u32],
-    slots: &[u64],
-    keys: &[u32],
-    out: DisjointSlice<u32>,
-) {
+pub fn find_kernel_tile_32(ctrl: &[u32], slots: &[u64], keys: &[u32], out: DisjointSlice<u32>) {
     find_tile_impl::<32>(ctrl, slots, keys, out);
 }
 
@@ -466,12 +468,7 @@ pub fn find_kernel_tile_32(
 ///
 /// Launch with `LaunchConfig::for_num_elems(keys.len() * 16)`.
 #[kernel]
-pub fn find_kernel_tile_16(
-    ctrl: &[u32],
-    slots: &[u64],
-    keys: &[u32],
-    out: DisjointSlice<u32>,
-) {
+pub fn find_kernel_tile_16(ctrl: &[u32], slots: &[u64], keys: &[u32], out: DisjointSlice<u32>) {
     find_tile_impl::<16>(ctrl, slots, keys, out);
 }
 
@@ -744,8 +741,7 @@ fn try_reclaim_deleted(
     let ctrl_atomic =
         unsafe { DeviceAtomicU32::from_ptr(ctrl.as_ptr().add(del_word_idx).cast_mut()) };
     let slot_idx = del_word_idx * GROUP + del_j;
-    let slot_atomic =
-        unsafe { DeviceAtomicU64::from_ptr(slots.as_ptr().add(slot_idx).cast_mut()) };
+    let slot_atomic = unsafe { DeviceAtomicU64::from_ptr(slots.as_ptr().add(slot_idx).cast_mut()) };
 
     loop {
         let cur = ctrl_atomic.load(AtomicOrdering::Acquire);

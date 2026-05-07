@@ -283,8 +283,11 @@ fn addrspace_coercion_inserts_addrspacecast_at_call_site() -> Result<(), anyhow:
         vec![],
         1,
     );
-    let callee_func =
-        mir::MirFuncOp::new(&mut ctx, callee_func_op, TypeAttr::new(callee_func_ty.into()));
+    let callee_func = mir::MirFuncOp::new(
+        &mut ctx,
+        callee_func_op,
+        TypeAttr::new(callee_func_ty.into()),
+    );
     callee_func.set_symbol_name(&mut ctx, "callee".try_into().unwrap());
     {
         let region = callee_func.get_operation().deref(&ctx).get_region(0);
@@ -317,8 +320,11 @@ fn addrspace_coercion_inserts_addrspacecast_at_call_site() -> Result<(), anyhow:
         vec![],
         1,
     );
-    let caller_func =
-        mir::MirFuncOp::new(&mut ctx, caller_func_op, TypeAttr::new(caller_func_ty.into()));
+    let caller_func = mir::MirFuncOp::new(
+        &mut ctx,
+        caller_func_op,
+        TypeAttr::new(caller_func_ty.into()),
+    );
     caller_func.set_symbol_name(&mut ctx, "caller".try_into().unwrap());
     {
         let region = caller_func.get_operation().deref(&ctx).get_region(0);

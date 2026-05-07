@@ -69,14 +69,14 @@ the GPU memory hierarchy:
 
 ### Operations
 
-`dialect-mir` defines 51 operations across 11 categories:
+`dialect-mir` defines 54 operations across 11 categories:
 
 | Category     | Examples                                                                                                                                                                                            | Count |
 | :----------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----: |
 | Function     | `mir.func`                                                                                                                                                                                          |     1 |
 | Control flow | `mir.goto`, `mir.cond_br`, `mir.return`, `mir.assert`, `mir.unreachable`                                                                                                                            |     5 |
-| Constants    | `mir.constant`, `mir.float_constant`                                                                                                                                                                |     2 |
-| Memory       | `mir.load`, `mir.store`, `mir.assign`, `mir.ref`, `mir.ptr_offset`, `mir.shared_alloc`, `mir.extern_shared`                                                                                         |     7 |
+| Constants    | `mir.constant`, `mir.float_constant`, `mir.undef`                                                                                                                                                   |     3 |
+| Memory       | `mir.alloca`, `mir.load`, `mir.store`, `mir.assign`, `mir.ref`, `mir.ptr_offset`, `mir.shared_alloc`, `mir.global_alloc`, `mir.extern_shared`                                                       |     9 |
 | Arithmetic   | `mir.add`, `mir.sub`, `mir.mul`, `mir.div`, `mir.rem`, `mir.checked_add`, `mir.checked_sub`, `mir.checked_mul`, `mir.neg`, `mir.not`, `mir.shr`, `mir.shl`, `mir.bitand`, `mir.bitor`, `mir.bitxor` |    15 |
 | Comparison   | `mir.eq`, `mir.ne`, `mir.lt`, `mir.le`, `mir.gt`, `mir.ge`                                                                                                                                          |     6 |
 | Aggregate    | `mir.extract_field`, `mir.insert_field`, `mir.construct_struct`, `mir.construct_tuple`, `mir.construct_array`, `mir.extract_array_element`, `mir.field_addr`, `mir.array_element_addr`              |     8 |
@@ -267,21 +267,22 @@ they become `call` instructions to `@llvm.nvvm.*` intrinsics.
 
 The dialect is organized into modules, each targeting a GPU feature set:
 
-| Module     | Description                               | Ops | Minimum SM | GPU Family |
-| :--------- | :---------------------------------------- | --: | :--------- | :--------- |
-| `thread`   | Thread/block/grid indexing, `barrier0`    |   7 | All        | All GPUs   |
-| `warp`     | Lane id, shuffle, vote                    |  12 | All        | All GPUs   |
-| `debug`    | Clock, trap, breakpoint, `vprintf`        |   6 | All        | All GPUs   |
-| `atomic`   | Atomic load/store/RMW/cmpxchg             |   4 | sm_70      | Volta+     |
-| `cluster`  | Thread Block Clusters + DSMEM             |  11 | sm_90      | Hopper+    |
-| `mbarrier` | Async barriers + fence proxy + nanosleep  |  10 | sm_90      | Hopper+    |
-| `tma`      | Tensor Memory Accelerator (bulk G2S/S2G)  |  15 | sm_90      | Hopper+    |
-| `wgmma`    | Warpgroup Matrix Multiply-Accumulate      |   5 | sm_90      | Hopper+    |
-| `stmatrix` | Shared memory matrix store + bf16 convert |   5 | sm_90      | Hopper+    |
-| `tcgen05`  | Tensor Core Gen 5 + TMEM                  |  24 | sm_100     | Blackwell+ |
-| `clc`      | Cluster Launch Control                    |   6 | sm_100     | Blackwell+ |
+| Module     | Description                                          | Ops | Minimum SM | GPU Family |
+| :--------- | :--------------------------------------------------- | --: | :--------- | :--------- |
+| `thread`   | Thread/block indexing, `barrier0`, threadfences      |  18 | All        | All GPUs   |
+| `warp`     | Lane id, shuffle, vote, match                        |  18 | All        | All GPUs   |
+| `grid`     | Cooperative `grid_sync`                              |   1 | sm_70      | Volta+     |
+| `debug`    | Clock, trap, breakpoint, `vprintf`                   |   6 | All        | All GPUs   |
+| `atomic`   | Atomic load/store/RMW/cmpxchg                        |   4 | sm_70      | Volta+     |
+| `cluster`  | Thread Block Clusters + DSMEM                        |  11 | sm_90      | Hopper+    |
+| `mbarrier` | Async barriers + fence proxy + nanosleep             |  10 | sm_90      | Hopper+    |
+| `tma`      | Tensor Memory Accelerator (bulk G2S/S2G)             |  15 | sm_90      | Hopper+    |
+| `wgmma`    | Warpgroup Matrix Multiply-Accumulate                 |   5 | sm_90      | Hopper+    |
+| `stmatrix` | Shared memory matrix store + bf16 convert            |   5 | sm_90      | Hopper+    |
+| `tcgen05`  | Tensor Core Gen 5 + TMEM                             |  24 | sm_100     | Blackwell+ |
+| `clc`      | Cluster Launch Control                               |   6 | sm_100     | Blackwell+ |
 
-That is 105 operations total. Most users will only encounter the first three
+That is 123 operations total. Most users will only encounter the first three
 modules (thread indexing, warp shuffles, barriers). The rest are for advanced
 GPU programming -- TMA, matrix accelerators, and Blackwell's tensor memory --
 covered in the [Advanced GPU Features](../advanced/tensor-memory-accelerator.md)

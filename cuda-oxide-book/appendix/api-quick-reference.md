@@ -377,21 +377,24 @@ debug::prof_trigger::<7>();     // Nsight profiler trigger
 
 ### cuda-device Modules
 
-| Module     | Description                                                      | Min SM   |
-|:-----------|:-----------------------------------------------------------------|:---------|
-| `thread`   | Thread/block/grid IDs, `index_1d`, `sync_threads`, fences        | All      |
-| `disjoint` | `DisjointSlice<T>` — safe parallel writes                        | All      |
-| `shared`   | `SharedArray<T, N>`, `DynamicSharedArray<T>`                     | All      |
-| `warp`     | Shuffle, vote, lane/warp ID                                      | All      |
-| `atomic`   | Scoped atomics (device/block/system)                             | sm_70+   |
-| `debug`    | `clock64`, `trap`, `breakpoint`, `gpu_printf!`                   | All      |
-| `barrier`  | `ManagedBarrier` — async mbarrier for TMA/MMA                    | sm_90+   |
-| `cluster`  | Thread block clusters, DSMEM                                     | sm_90+   |
-| `tma`      | `TmaDescriptor`, bulk tensor copies (1D–5D)                      | sm_90+   |
-| `wgmma`    | Warpgroup MMA (fence/commit/wait)                                | sm_90    |
-| `tcgen05`  | 5th-gen tensor cores, TMEM, `TmemGuard`                          | sm_100+  |
-| `cusimd`   | `CuSimd<T, N>`, `Float2`/`Float4`                                | All      |
-| `clc`      | Cluster Launch Control                                           | sm_100+  |
+| Module               | Description                                                      | Min SM   |
+|:---------------------|:-----------------------------------------------------------------|:---------|
+| `thread`             | Thread/block IDs, `index_1d`, `sync_threads`                     | All      |
+| `disjoint`           | `DisjointSlice<T>` — safe parallel writes                        | All      |
+| `shared`             | `SharedArray<T, N>`, `DynamicSharedArray<T>`                     | All      |
+| `warp`               | Shuffle, vote, match, lane/warp ID                               | All      |
+| `atomic`             | Scoped atomics (device/block/system)                             | sm_70+   |
+| `debug`              | `clock64`, `trap`, `breakpoint`, `gpu_printf!`                   | All      |
+| `fence`              | `threadfence_block` / `threadfence` / `threadfence_system`       | All      |
+| `grid`               | Grid-scoped `sync` (cooperative kernel launches)                 | sm_70+   |
+| `cooperative_groups` | Typed handles, warp/block reductions and scans                   | All      |
+| `barrier`            | `ManagedBarrier` — async mbarrier for TMA/MMA                    | sm_90+   |
+| `cluster`            | Thread block clusters, DSMEM                                     | sm_90+   |
+| `tma`                | `TmaDescriptor`, bulk tensor copies (1D–5D)                      | sm_90+   |
+| `wgmma`              | Warpgroup MMA (fence/commit/wait)                                | sm_90    |
+| `tcgen05`            | 5th-gen tensor cores, TMEM, `TmemGuard`                          | sm_100+  |
+| `cusimd`             | `CuSimd<T, N>`, `Float2`/`Float4`                                | All      |
+| `clc`                | Cluster Launch Control                                           | sm_100+  |
 
 ### Crate Map
 
