@@ -1064,6 +1064,7 @@ fn warp_in_block_linear() -> u32 {
 /// }
 /// ```
 #[inline(always)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn block_reduce<T, Op, const NUM_WARPS: usize>(
     block: &ThreadBlock,
     value: T,
@@ -1148,6 +1149,7 @@ where
 /// }
 /// ```
 #[inline(always)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn block_scan<T, Op, const NUM_WARPS: usize>(
     block: &ThreadBlock,
     value: T,

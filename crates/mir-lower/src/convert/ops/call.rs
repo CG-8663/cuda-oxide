@@ -44,8 +44,7 @@
 //!      declaration, so a tightening of the declaration automatically
 //!      flows to every call site.
 //!
-//! This single mechanism subsumes both directions of the addrspace dance
-//! described in `docs/address-space/address-space-handling.md`:
+//! This single mechanism handles both directions of the addrspace dance:
 //!
 //!   * Path 1 (e.g. `block_reduce(*mut SharedArray<T,N>)`): callee param
 //!     is `ptr addrspace(3)`, caller has `ptr addrspace(3)` → no cast.
@@ -383,10 +382,9 @@ pub fn convert(
     // `MirFuncOp` whose body hasn't been touched yet. In the second case
     // we run the same MIR-to-LLVM signature flattening that the function
     // converter will eventually apply, so the call site sees the exact
-    // same parameter types the callee will be lowered to. This is what
-    // makes both Path 1 (intra-Rust call into shared-memory-typed param)
-    // and Path 3 (device-extern call with generic ABI) from
-    // `docs/address-space/address-space-handling.md` work uniformly.
+    // same parameter types the callee will be lowered to. This makes
+    // intra-Rust calls into shared-memory-typed params and device-extern
+    // calls with the generic ABI work uniformly.
     let callee_decl_arg_types = find_callee_arg_types(ctx, op, &callee_ident).unwrap_or_default();
     let expected_param_tys = if callee_decl_arg_types.is_empty() {
         None
