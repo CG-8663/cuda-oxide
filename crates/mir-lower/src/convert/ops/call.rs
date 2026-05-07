@@ -30,25 +30,55 @@
 //!
 //! # Address Space Handling
 //!
-//! Function signatures use generic pointers (addrspace 0) for ABI compatibility.
-//! When passing pointers from specific address spaces (e.g., shared memory = addrspace 3),
-//! we insert `addrspacecast` to convert them to generic pointers at the call site.
+//! The call op's `func_type` must match the callee's declared signature
+//! exactly, including the address space of every pointer parameter. We
+//! achieve this by:
+//!
+//!   1. Looking up the callee's `llvm::FuncOp` declaration in the parent
+//!      module, before flattening the arguments.
+//!   2. Coercing each (post-flatten) argument to the corresponding declared
+//!      parameter type — when the argument is a pointer in a different
+//!      address space than the parameter, we insert `llvm.addrspacecast`
+//!      to bridge them.
+//!   3. Building the call op's `func_type` directly from the looked-up
+//!      declaration, so a tightening of the declaration automatically
+//!      flows to every call site.
+//!
+//! This single mechanism subsumes both directions of the addrspace dance
+//! described in `docs/address-space/address-space-handling.md`:
+//!
+//!   * Path 1 (e.g. `block_reduce(*mut SharedArray<T,N>)`): callee param
+//!     is `ptr addrspace(3)`, caller has `ptr addrspace(3)` → no cast.
+//!     A caller that legitimately had a generic pointer would be cast UP
+//!     to addrspace(3).
+//!   * Path 3 (e.g. `extern "C" fn cublasdx_gemm(_: *mut i8)`): callee
+//!     param is `ptr addrspace(0)`, caller has `ptr addrspace(3)` (from
+//!     `DynamicSharedArray::get`) → cast DOWN to addrspace(0).
+//!
+//! The previous implementation always cast pointer arguments to addrspace(0)
+//! regardless of the callee's declared signature. That worked for Path 3
+//! but actively broke Path 1, because the resulting call op carried a
+//! `func_type` whose pointer parameter types were `addrspace(0)` while the
+//! callee declaration carried `addrspace(3)`. The verifier rejected the
+//! mismatch.
 
-use crate::convert::types::{convert_type, is_zero_sized_type};
+use crate::convert::types::{convert_function_type, convert_type, is_zero_sized_type};
 use crate::helpers;
 use dialect_llvm::op_interfaces::CastOpInterface;
 use dialect_llvm::ops as llvm;
 use dialect_llvm::types as llvm_types;
-use dialect_mir::ops::MirCallOp;
+use dialect_mir::ops::{MirCallOp, MirFuncOp};
 use dialect_mir::rust_intrinsics;
 use dialect_mir::types::{MirDisjointSliceType, MirSliceType, MirStructType, MirTupleType};
 use pliron::builtin::attributes::IntegerAttr;
-use pliron::builtin::op_interfaces::CallOpCallable;
+use pliron::builtin::op_interfaces::{CallOpCallable, SymbolOpInterface};
+use pliron::builtin::type_interfaces::FunctionTypeInterface;
 use pliron::builtin::types::{FP32Type, FP64Type, IntegerType, Signedness};
 use pliron::context::{Context, Ptr};
 use pliron::irbuild::dialect_conversion::{DialectConversionRewriter, OperandsInfo};
 use pliron::irbuild::inserter::Inserter;
 use pliron::irbuild::rewriter::Rewriter;
+use pliron::linked_list::ContainsLinkedList;
 use pliron::location::Located;
 use pliron::op::Op;
 use pliron::operation::Operation;
@@ -346,8 +376,26 @@ pub fn convert(
         llvm_types::VoidType::get(ctx).into()
     };
 
+    // Look up the callee's declared signature in the parent module. The
+    // declaration may already have been lowered to `llvm::FuncOp` (typical
+    // for device-extern decls inserted by the importer ahead of time, and
+    // for callees whose conversion ran first), or it may still be a
+    // `MirFuncOp` whose body hasn't been touched yet. In the second case
+    // we run the same MIR-to-LLVM signature flattening that the function
+    // converter will eventually apply, so the call site sees the exact
+    // same parameter types the callee will be lowered to. This is what
+    // makes both Path 1 (intra-Rust call into shared-memory-typed param)
+    // and Path 3 (device-extern call with generic ABI) from
+    // `docs/address-space/address-space-handling.md` work uniformly.
+    let callee_decl_arg_types = find_callee_arg_types(ctx, op, &callee_ident).unwrap_or_default();
+    let expected_param_tys = if callee_decl_arg_types.is_empty() {
+        None
+    } else {
+        Some(callee_decl_arg_types.as_slice())
+    };
+
     let (flattened_args, flattened_arg_types) =
-        flatten_arguments(ctx, rewriter, &args, operands_info)?;
+        flatten_arguments(ctx, rewriter, &args, operands_info, expected_param_tys)?;
 
     let func_type = llvm_types::FuncType::get(ctx, result_type, flattened_arg_types, false);
     let llvm_call = llvm::CallOp::new(
@@ -683,19 +731,37 @@ fn cast_integer_value_to_type(
     Ok((cast_op.deref(ctx).get_result(0), Some(cast_op)))
 }
 
-/// Flatten arguments according to ABI rules.
+/// Flatten arguments according to ABI rules and coerce each one to the
+/// callee's expected parameter type.
 ///
 /// - Slice types → (ptr, len) pair
 /// - Struct types → individual field values (in MEMORY ORDER)
 /// - Other types → pass through
+///
+/// `expected_param_tys`, when present, is the LLVM-level (post-flatten)
+/// parameter signature of the callee. Each emitted (post-flatten) argument
+/// is coerced to its corresponding entry — in practice this means inserting
+/// an `addrspacecast` whenever a pointer arg's address space differs from
+/// the declared parameter's. When `expected_param_tys` is `None` (the
+/// callee declaration could not be located), each pointer falls back to
+/// being cast down to the generic address space, preserving the legacy
+/// behavior so device-extern calls (which always declare generic params)
+/// keep working.
 fn flatten_arguments(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
     args: &[Value],
     operands_info: &OperandsInfo,
+    expected_param_tys: Option<&[Ptr<TypeObj>]>,
 ) -> Result<(Vec<Value>, Vec<Ptr<TypeObj>>)> {
     let mut flattened_args = Vec::new();
     let mut flattened_arg_types = Vec::new();
+
+    // Helper: pull the next expected param type, if any.
+    let take_expected = |flattened_arg_types: &Vec<Ptr<TypeObj>>| -> Option<Ptr<TypeObj>> {
+        let idx = flattened_arg_types.len();
+        expected_param_tys.and_then(|tys| tys.get(idx).copied())
+    };
 
     for arg in args.iter() {
         let arg_ty = arg.get_type(ctx);
@@ -738,10 +804,25 @@ fn flatten_arguments(
                 rewriter.insert_operation(ctx, extract_len.get_operation());
                 let len_val = extract_len.get_operation().deref(ctx).get_result(0);
 
+                let (ptr_val, ptr_ty) = coerce_arg_to_param_ty(
+                    ctx,
+                    rewriter,
+                    ptr_val,
+                    ptr_ty.into(),
+                    take_expected(&flattened_arg_types),
+                )?;
                 flattened_args.push(ptr_val);
+                flattened_arg_types.push(ptr_ty);
+
+                let (len_val, len_ty) = coerce_arg_to_param_ty(
+                    ctx,
+                    rewriter,
+                    len_val,
+                    len_ty.into(),
+                    take_expected(&flattened_arg_types),
+                )?;
                 flattened_args.push(len_val);
-                flattened_arg_types.push(ptr_ty.into());
-                flattened_arg_types.push(len_ty.into());
+                flattened_arg_types.push(len_ty);
             }
             FlattenKind::Struct {
                 field_types,
@@ -758,14 +839,27 @@ fn flatten_arguments(
                     let extract_op = llvm::ExtractValueOp::new(ctx, *arg, vec![llvm_idx])?;
                     rewriter.insert_operation(ctx, extract_op.get_operation());
                     let field_val = extract_op.get_operation().deref(ctx).get_result(0);
+
+                    let (field_val, field_ty) = coerce_arg_to_param_ty(
+                        ctx,
+                        rewriter,
+                        field_val,
+                        llvm_field_ty,
+                        take_expected(&flattened_arg_types),
+                    )?;
                     flattened_args.push(field_val);
-                    flattened_arg_types.push(llvm_field_ty);
+                    flattened_arg_types.push(field_ty);
                     llvm_idx += 1;
                 }
             }
             FlattenKind::None => {
-                let (final_arg, final_ty) =
-                    cast_pointer_to_generic_if_needed(ctx, rewriter, *arg, arg_ty)?;
+                let (final_arg, final_ty) = coerce_arg_to_param_ty(
+                    ctx,
+                    rewriter,
+                    *arg,
+                    arg_ty,
+                    take_expected(&flattened_arg_types),
+                )?;
                 flattened_args.push(final_arg);
                 flattened_arg_types.push(final_ty);
             }
@@ -775,27 +869,50 @@ fn flatten_arguments(
     Ok((flattened_args, flattened_arg_types))
 }
 
-/// Cast a pointer to generic address space if it's in a specific address space.
+/// Coerce a single (post-flatten) argument so that it satisfies the callee's
+/// declared parameter type.
 ///
-/// Function signatures use generic pointers (addrspace 0) for ABI compatibility.
-/// When the argument is a pointer in a non-generic address space (e.g., shared=3),
-/// we insert an `addrspacecast` instruction to convert it.
+/// When `expected_ty` is supplied, this is the principled coercion used for
+/// every kind of call: pointer arguments whose address space differs from
+/// the declared parameter's are bridged with an `llvm.addrspacecast` to
+/// the declared address space (in either direction — generic ↔ shared,
+/// shared ↔ global, etc.). Non-pointer mismatches are left for the verifier
+/// to surface as a real type error.
 ///
-/// Returns the (possibly casted) value and its type.
-fn cast_pointer_to_generic_if_needed(
+/// When `expected_ty` is `None` (callee declaration not located), we fall
+/// back to the legacy "always generic" policy. That fallback exists because
+/// historically every call site cast pointer args down to addrspace(0) on
+/// the assumption that all callees declared their parameters as generic.
+/// Device-extern functions (`#[device] extern "C"`) still rely on that
+/// assumption and benefit from the fallback when their declaration hasn't
+/// landed in the module yet during conversion.
+fn coerce_arg_to_param_ty(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
     arg: Value,
     arg_ty: Ptr<TypeObj>,
+    expected_ty: Option<Ptr<TypeObj>>,
 ) -> Result<(Value, Ptr<TypeObj>)> {
-    let maybe_addrspace = {
-        let arg_ty_ref = arg_ty.deref(ctx);
-        arg_ty_ref
-            .downcast_ref::<llvm_types::PointerType>()
-            .map(|ptr_ty| ptr_ty.address_space())
-    };
+    if let Some(expected_ty) = expected_ty {
+        if arg_ty == expected_ty {
+            return Ok((arg, arg_ty));
+        }
+        let arg_addrspace = pointer_addrspace(ctx, arg_ty);
+        let expected_addrspace = pointer_addrspace(ctx, expected_ty);
+        if let (Some(src_as), Some(dst_as)) = (arg_addrspace, expected_addrspace)
+            && src_as != dst_as
+        {
+            let cast_op = llvm::AddrSpaceCastOp::new(ctx, arg, dst_as);
+            rewriter.insert_operation(ctx, cast_op.get_operation());
+            let casted_val = cast_op.get_operation().deref(ctx).get_result(0);
+            return Ok((casted_val, expected_ty));
+        }
+        return Ok((arg, arg_ty));
+    }
 
-    if let Some(addrspace) = maybe_addrspace
+    // Legacy fallback: cast any non-generic pointer down to addrspace(0).
+    let arg_addrspace = pointer_addrspace(ctx, arg_ty);
+    if let Some(addrspace) = arg_addrspace
         && addrspace != ADDRSPACE_GENERIC
     {
         let cast_op = llvm::AddrSpaceCastOp::new(ctx, arg, ADDRSPACE_GENERIC);
@@ -806,6 +923,82 @@ fn cast_pointer_to_generic_if_needed(
     }
 
     Ok((arg, arg_ty))
+}
+
+/// Return the address space of `ty` if it is an LLVM pointer type.
+fn pointer_addrspace(ctx: &Context, ty: Ptr<TypeObj>) -> Option<u32> {
+    ty.deref(ctx)
+        .downcast_ref::<llvm_types::PointerType>()
+        .map(|ptr_ty| ptr_ty.address_space())
+}
+
+/// Look up the LLVM-level parameter signature of `callee_ident` by walking
+/// from `op` up to the parent module and scanning its top-level function
+/// declarations.
+///
+/// Two callee shapes are recognised:
+///
+///   * `llvm::FuncOp` — already lowered. We return its `arg_types()` directly.
+///     This covers device-extern declarations (inserted by the importer
+///     ahead of conversion) and any callee whose conversion happened to run
+///     before the current call.
+///
+///   * `MirFuncOp` — still in MIR form. We run `convert_function_type` to
+///     project its declared MIR signature into the same LLVM-level
+///     (slice/struct-flattened) parameter list that the function lowerer
+///     will eventually emit. This guarantees the call site sees the exact
+///     same parameter types the callee will end up with — including the
+///     address space of every pointer parameter.
+///
+/// Returns `None` when neither form is present (e.g. the callee lives in a
+/// different module). The caller then falls back to its legacy coercion.
+fn find_callee_arg_types(
+    ctx: &mut Context,
+    op: Ptr<Operation>,
+    callee_ident: &pliron::identifier::Identifier,
+) -> Option<Vec<Ptr<TypeObj>>> {
+    let block = op.deref(ctx).get_parent_block()?;
+    let func_op = block.deref(ctx).get_parent_op(ctx)?;
+    let module_op = func_op.deref(ctx).get_parent_op(ctx)?;
+
+    let region = module_op.deref(ctx).get_region(0);
+    let module_block = region.deref(ctx).iter(ctx).next()?;
+
+    // First pass: walk the module's top-level ops once and extract whichever
+    // declaration shape (LLVM or MIR) carries the matching symbol name.
+    // `Ptr<Operation>` is `Copy`, so we can collect candidates without
+    // borrowing the context past this loop.
+    let mut llvm_decl_op: Option<Ptr<Operation>> = None;
+    let mut mir_decl_op: Option<Ptr<Operation>> = None;
+    for existing_op in module_block.deref(ctx).iter(ctx) {
+        if let Some(existing_func) = Operation::get_op::<llvm::FuncOp>(existing_op, ctx)
+            && &existing_func.get_symbol_name(ctx) == callee_ident
+        {
+            llvm_decl_op = Some(existing_op);
+            break;
+        }
+        if let Some(existing_func) = MirFuncOp::wrap(ctx, existing_op)
+            && &existing_func.get_symbol_name(ctx) == callee_ident
+        {
+            mir_decl_op = Some(existing_op);
+            // Keep scanning — an `llvm::FuncOp` would still take precedence.
+        }
+    }
+
+    if let Some(existing_op) = llvm_decl_op {
+        let func = Operation::get_op::<llvm::FuncOp>(existing_op, ctx)?;
+        let func_ty = func.get_type(ctx);
+        return Some(func_ty.deref(ctx).arg_types().clone());
+    }
+
+    if let Some(existing_op) = mir_decl_op {
+        let func = MirFuncOp::wrap(ctx, existing_op)?;
+        let mir_func_ty = func.get_type(ctx);
+        let llvm_func_ty = convert_function_type(ctx, mir_func_ty).ok()?;
+        return Some(llvm_func_ty.deref(ctx).arg_types().clone());
+    }
+
+    None
 }
 
 /// Resolve a device-extern symbol name by stripping the internal prefix.

@@ -535,10 +535,16 @@ impl CodegenBackend for CudaCodegenBackend {
                         Some(result)
                     }
                     Err(e) => {
-                        eprintln!("[rustc_codegen_cuda] Device codegen failed: {}", e);
-                        // For now, continue with host codegen even if device fails
-                        // This allows incremental development
-                        None
+                        // Hard-fail: a swallowed device codegen error produces
+                        // a host binary with stale or missing PTX, which then
+                        // silently mis-runs on the GPU. The wrapper script
+                        // (cargo-oxide) reports "✓ Build succeeded" in that
+                        // case because the host LLVM backend below succeeds.
+                        // Surface the failure as a rustc fatal so cargo exits
+                        // non-zero and the wrapper's success print never fires.
+                        // See `.cursor/rules/compiler-gaps-are-bugs.mdc`.
+                        tcx.dcx()
+                            .fatal(format!("[rustc_codegen_cuda] Device codegen failed: {}", e));
                     }
                 }
             } else {

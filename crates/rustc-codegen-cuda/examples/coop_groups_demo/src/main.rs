@@ -3,15 +3,30 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Cooperative-groups primitives smoke test.
+//! Cooperative-groups smoke test.
 //!
-//! Each kernel exercises one new compiler intrinsic so the generated PTX
-//! can be inspected in `coop_groups_demo.ptx`. The host harness verifies
-//! end-to-end correctness on a real GPU.
+//! 21 device-verified checks for `cuda_device::cooperative_groups`,
+//! grouped into three layers:
+//!
+//! 1. Raw intrinsics (`active_mask`, `match_any_sync`, `match_all_sync`,
+//!    `grid::sync`).
+//! 2. Typed cooperative-groups handles (`WarpTile<32>`, `WarpTile<16>`,
+//!    `this_grid()`).
+//! 3. Reductions and scans (`warp_reduce`, `warp_scan`, `block_reduce`,
+//!    `block_scan` × `Sum`/`Min`/`Max`/`BitAnd`/`BitOr`/`BitXor` ×
+//!    `u32`/`i32`/`f32`).
+//!
+//! See `README.md` in this crate for the full check list and the
+//! op/type matrix. The generated `coop_groups_demo.ptx` is also handy
+//! for inspecting how each kernel actually lowers.
 
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
-use cuda_device::cooperative_groups::{ThreadGroup, WarpCollective, this_grid, this_thread_block};
-use cuda_device::{DisjointSlice, grid, kernel, thread, warp};
+use cuda_device::cooperative_groups::{
+    ThreadGroup, WarpCollective, block_reduce, block_scan,
+    ops::{BitAnd, BitOr, BitXor, Max, Min, Sum},
+    this_grid, this_thread_block, warp_reduce, warp_scan,
+};
+use cuda_device::{DisjointSlice, SharedArray, grid, kernel, thread, warp};
 use cuda_host::cuda_launch;
 
 // =============================================================================
@@ -172,6 +187,369 @@ pub fn test_typed_grid_rank(mut out: DisjointSlice<u32>) {
     let rank = g.thread_rank();
     if let Some(slot) = out.get_mut(gid) {
         *slot = rank;
+    }
+}
+
+// =============================================================================
+// Reductions and scans
+// =============================================================================
+//
+// Tests use this layout:
+//
+//   warp_reduce_<T>: 1 row per warp,   6 cells (u32) or 3 cells (i32, f32).
+//   warp_scan_<T>:   1 row per thread, 6 cells (u32) or 3 cells (i32, f32).
+//   block_reduce_<T>: 1 row per block, 6 cells (u32) or 3 cells (i32, f32).
+//   block_scan_<T>:  1 row per thread, 6 cells (u32) or 3 cells (i32, f32).
+//
+// Block kernels launch with block_dim = 96 (NUM_WARPS = 3) so:
+//   - BitAnd input `!(1<<lane)`   → AND across 3 of each bit clears all bits.
+//   - BitOr  input `1<<lane`      → OR  across 3 of each bit sets   all bits.
+//   - BitXor input `1<<lane`      → XOR across 3 of each bit (odd) sets all
+//                                    bits — non-degenerate (a 32-warp block
+//                                    would have an even count and degenerate
+//                                    to identity, masking bugs).
+
+// ----- warp_reduce -----
+
+/// `warp_reduce` over `WarpTile<32>` for every supported `u32` op.
+/// One row per warp; cells = `[Sum, Min, Max, BitAnd, BitOr, BitXor]`.
+#[kernel]
+pub fn test_warp_reduce_u32(mut out: DisjointSlice<u32>) {
+    let warp = this_thread_block().tiled_partition::<32>();
+    let lane = warp.thread_rank();
+    let warp_idx = thread::index_1d().get() / 32;
+
+    let v_lane = lane;
+    let v_one = 1u32 << lane;
+    let v_inv = !v_one;
+
+    let r_sum = warp_reduce::<u32, Sum, _>(&warp, v_lane);
+    let r_min = warp_reduce::<u32, Min, _>(&warp, v_lane);
+    let r_max = warp_reduce::<u32, Max, _>(&warp, v_lane);
+    let r_and = warp_reduce::<u32, BitAnd, _>(&warp, v_inv);
+    let r_or = warp_reduce::<u32, BitOr, _>(&warp, v_one);
+    let r_xor = warp_reduce::<u32, BitXor, _>(&warp, v_one);
+
+    if lane == 0 {
+        let base = warp_idx * 6;
+        unsafe {
+            *out.get_unchecked_mut(base) = r_sum;
+            *out.get_unchecked_mut(base + 1) = r_min;
+            *out.get_unchecked_mut(base + 2) = r_max;
+            *out.get_unchecked_mut(base + 3) = r_and;
+            *out.get_unchecked_mut(base + 4) = r_or;
+            *out.get_unchecked_mut(base + 5) = r_xor;
+        }
+    }
+}
+
+/// `warp_reduce` over `WarpTile<32>` for every supported `i32` op.
+/// One row per warp; cells = `[Sum, Min, Max]`.
+#[kernel]
+pub fn test_warp_reduce_i32(mut out: DisjointSlice<i32>) {
+    let warp = this_thread_block().tiled_partition::<32>();
+    let lane = warp.thread_rank();
+    let warp_idx = thread::index_1d().get() / 32;
+
+    // value = lane - 16: range [-16, 15] gives meaningful Min < 0 < Max.
+    let v = (lane as i32) - 16;
+
+    let r_sum = warp_reduce::<i32, Sum, _>(&warp, v);
+    let r_min = warp_reduce::<i32, Min, _>(&warp, v);
+    let r_max = warp_reduce::<i32, Max, _>(&warp, v);
+
+    if lane == 0 {
+        let base = warp_idx * 3;
+        unsafe {
+            *out.get_unchecked_mut(base) = r_sum;
+            *out.get_unchecked_mut(base + 1) = r_min;
+            *out.get_unchecked_mut(base + 2) = r_max;
+        }
+    }
+}
+
+/// `warp_reduce` over `WarpTile<32>` for every supported `f32` op.
+/// One row per warp; cells = `[Sum, Min, Max]`.
+#[kernel]
+pub fn test_warp_reduce_f32(mut out: DisjointSlice<f32>) {
+    let warp = this_thread_block().tiled_partition::<32>();
+    let lane = warp.thread_rank();
+    let warp_idx = thread::index_1d().get() / 32;
+
+    let v = lane as f32;
+
+    let r_sum = warp_reduce::<f32, Sum, _>(&warp, v);
+    let r_min = warp_reduce::<f32, Min, _>(&warp, v);
+    let r_max = warp_reduce::<f32, Max, _>(&warp, v);
+
+    if lane == 0 {
+        let base = warp_idx * 3;
+        unsafe {
+            *out.get_unchecked_mut(base) = r_sum;
+            *out.get_unchecked_mut(base + 1) = r_min;
+            *out.get_unchecked_mut(base + 2) = r_max;
+        }
+    }
+}
+
+// ----- warp_scan -----
+
+/// `warp_scan` (inclusive) over `WarpTile<32>` for every supported `u32` op.
+/// One row per thread; cells = `[Sum, Min, Max, BitAnd, BitOr, BitXor]`.
+#[kernel]
+pub fn test_warp_scan_u32(mut out: DisjointSlice<u32>) {
+    let warp = this_thread_block().tiled_partition::<32>();
+    let lane = warp.thread_rank();
+    let gid = thread::index_1d().get();
+
+    let v_lane = lane;
+    let v_one = 1u32 << lane;
+    let v_inv = !v_one;
+
+    let r_sum = warp_scan::<u32, Sum, _>(&warp, v_lane);
+    let r_min = warp_scan::<u32, Min, _>(&warp, v_lane);
+    let r_max = warp_scan::<u32, Max, _>(&warp, v_lane);
+    let r_and = warp_scan::<u32, BitAnd, _>(&warp, v_inv);
+    let r_or = warp_scan::<u32, BitOr, _>(&warp, v_one);
+    let r_xor = warp_scan::<u32, BitXor, _>(&warp, v_one);
+
+    let base = gid * 6;
+    unsafe {
+        *out.get_unchecked_mut(base) = r_sum;
+        *out.get_unchecked_mut(base + 1) = r_min;
+        *out.get_unchecked_mut(base + 2) = r_max;
+        *out.get_unchecked_mut(base + 3) = r_and;
+        *out.get_unchecked_mut(base + 4) = r_or;
+        *out.get_unchecked_mut(base + 5) = r_xor;
+    }
+}
+
+/// `warp_scan` (inclusive) over `WarpTile<32>` for every supported `i32` op.
+/// One row per thread; cells = `[Sum, Min, Max]`.
+#[kernel]
+pub fn test_warp_scan_i32(mut out: DisjointSlice<i32>) {
+    let warp = this_thread_block().tiled_partition::<32>();
+    let lane = warp.thread_rank();
+    let gid = thread::index_1d().get();
+
+    let v = (lane as i32) - 16;
+
+    let r_sum = warp_scan::<i32, Sum, _>(&warp, v);
+    let r_min = warp_scan::<i32, Min, _>(&warp, v);
+    let r_max = warp_scan::<i32, Max, _>(&warp, v);
+
+    let base = gid * 3;
+    unsafe {
+        *out.get_unchecked_mut(base) = r_sum;
+        *out.get_unchecked_mut(base + 1) = r_min;
+        *out.get_unchecked_mut(base + 2) = r_max;
+    }
+}
+
+/// `warp_scan` (inclusive) over `WarpTile<32>` for every supported `f32` op.
+/// One row per thread; cells = `[Sum, Min, Max]`.
+#[kernel]
+pub fn test_warp_scan_f32(mut out: DisjointSlice<f32>) {
+    let warp = this_thread_block().tiled_partition::<32>();
+    let lane = warp.thread_rank();
+    let gid = thread::index_1d().get();
+
+    let v = lane as f32;
+
+    let r_sum = warp_scan::<f32, Sum, _>(&warp, v);
+    let r_min = warp_scan::<f32, Min, _>(&warp, v);
+    let r_max = warp_scan::<f32, Max, _>(&warp, v);
+
+    let base = gid * 3;
+    unsafe {
+        *out.get_unchecked_mut(base) = r_sum;
+        *out.get_unchecked_mut(base + 1) = r_min;
+        *out.get_unchecked_mut(base + 2) = r_max;
+    }
+}
+
+// ----- block_reduce -----
+//
+// Block dim 96 → NUM_WARPS = 3. SMEM declared once per kernel and reused
+// across ops; an explicit `block.sync()` between calls satisfies the
+// reuse contract documented on `block_reduce`.
+
+/// `block_reduce` for every supported `u32` op.
+#[kernel]
+pub fn test_block_reduce_u32(mut out: DisjointSlice<u32>) {
+    static mut SMEM: SharedArray<u32, 3> = SharedArray::UNINIT;
+    let block = this_thread_block();
+    let tid = thread::threadIdx_x();
+    let block_id = thread::blockIdx_x() as usize;
+
+    let v = tid;
+    let v_one = 1u32 << (tid & 31);
+    let v_inv = !v_one;
+
+    let r_sum = block_reduce::<u32, Sum, _>(&block, v, &raw mut SMEM);
+    block.sync();
+    let r_min = block_reduce::<u32, Min, _>(&block, v, &raw mut SMEM);
+    block.sync();
+    let r_max = block_reduce::<u32, Max, _>(&block, v, &raw mut SMEM);
+    block.sync();
+    let r_and = block_reduce::<u32, BitAnd, _>(&block, v_inv, &raw mut SMEM);
+    block.sync();
+    let r_or = block_reduce::<u32, BitOr, _>(&block, v_one, &raw mut SMEM);
+    block.sync();
+    let r_xor = block_reduce::<u32, BitXor, _>(&block, v_one, &raw mut SMEM);
+
+    if tid == 0 {
+        let base = block_id * 6;
+        unsafe {
+            *out.get_unchecked_mut(base) = r_sum;
+            *out.get_unchecked_mut(base + 1) = r_min;
+            *out.get_unchecked_mut(base + 2) = r_max;
+            *out.get_unchecked_mut(base + 3) = r_and;
+            *out.get_unchecked_mut(base + 4) = r_or;
+            *out.get_unchecked_mut(base + 5) = r_xor;
+        }
+    }
+}
+
+/// `block_reduce` for every supported `i32` op.
+#[kernel]
+pub fn test_block_reduce_i32(mut out: DisjointSlice<i32>) {
+    static mut SMEM: SharedArray<i32, 3> = SharedArray::UNINIT;
+    let block = this_thread_block();
+    let tid = thread::threadIdx_x();
+    let block_id = thread::blockIdx_x() as usize;
+
+    // value = tid - 48: range [-48, 47] over a 96-thread block.
+    let v = (tid as i32) - 48;
+
+    let r_sum = block_reduce::<i32, Sum, _>(&block, v, &raw mut SMEM);
+    block.sync();
+    let r_min = block_reduce::<i32, Min, _>(&block, v, &raw mut SMEM);
+    block.sync();
+    let r_max = block_reduce::<i32, Max, _>(&block, v, &raw mut SMEM);
+
+    if tid == 0 {
+        let base = block_id * 3;
+        unsafe {
+            *out.get_unchecked_mut(base) = r_sum;
+            *out.get_unchecked_mut(base + 1) = r_min;
+            *out.get_unchecked_mut(base + 2) = r_max;
+        }
+    }
+}
+
+/// `block_reduce` for every supported `f32` op.
+#[kernel]
+pub fn test_block_reduce_f32(mut out: DisjointSlice<f32>) {
+    static mut SMEM: SharedArray<f32, 3> = SharedArray::UNINIT;
+    let block = this_thread_block();
+    let tid = thread::threadIdx_x();
+    let block_id = thread::blockIdx_x() as usize;
+
+    let v = tid as f32;
+
+    let r_sum = block_reduce::<f32, Sum, _>(&block, v, &raw mut SMEM);
+    block.sync();
+    let r_min = block_reduce::<f32, Min, _>(&block, v, &raw mut SMEM);
+    block.sync();
+    let r_max = block_reduce::<f32, Max, _>(&block, v, &raw mut SMEM);
+
+    if tid == 0 {
+        let base = block_id * 3;
+        unsafe {
+            *out.get_unchecked_mut(base) = r_sum;
+            *out.get_unchecked_mut(base + 1) = r_min;
+            *out.get_unchecked_mut(base + 2) = r_max;
+        }
+    }
+}
+
+// ----- block_scan -----
+
+/// `block_scan` (inclusive) for every supported `u32` op.
+/// One row per thread; cells = `[Sum, Min, Max, BitAnd, BitOr, BitXor]`.
+#[kernel]
+pub fn test_block_scan_u32(mut out: DisjointSlice<u32>) {
+    static mut SMEM: SharedArray<u32, 3> = SharedArray::UNINIT;
+    let block = this_thread_block();
+    let tid = thread::threadIdx_x();
+    let block_id = thread::blockIdx_x();
+    let global_tid = block_id * thread::blockDim_x() + tid;
+
+    let v = tid;
+    let v_one = 1u32 << (tid & 31);
+    let v_inv = !v_one;
+
+    let r_sum = block_scan::<u32, Sum, _>(&block, v, &raw mut SMEM);
+    block.sync();
+    let r_min = block_scan::<u32, Min, _>(&block, v, &raw mut SMEM);
+    block.sync();
+    let r_max = block_scan::<u32, Max, _>(&block, v, &raw mut SMEM);
+    block.sync();
+    let r_and = block_scan::<u32, BitAnd, _>(&block, v_inv, &raw mut SMEM);
+    block.sync();
+    let r_or = block_scan::<u32, BitOr, _>(&block, v_one, &raw mut SMEM);
+    block.sync();
+    let r_xor = block_scan::<u32, BitXor, _>(&block, v_one, &raw mut SMEM);
+
+    let base = (global_tid as usize) * 6;
+    unsafe {
+        *out.get_unchecked_mut(base) = r_sum;
+        *out.get_unchecked_mut(base + 1) = r_min;
+        *out.get_unchecked_mut(base + 2) = r_max;
+        *out.get_unchecked_mut(base + 3) = r_and;
+        *out.get_unchecked_mut(base + 4) = r_or;
+        *out.get_unchecked_mut(base + 5) = r_xor;
+    }
+}
+
+/// `block_scan` (inclusive) for every supported `i32` op.
+#[kernel]
+pub fn test_block_scan_i32(mut out: DisjointSlice<i32>) {
+    static mut SMEM: SharedArray<i32, 3> = SharedArray::UNINIT;
+    let block = this_thread_block();
+    let tid = thread::threadIdx_x();
+    let block_id = thread::blockIdx_x();
+    let global_tid = block_id * thread::blockDim_x() + tid;
+
+    let v = (tid as i32) - 48;
+
+    let r_sum = block_scan::<i32, Sum, _>(&block, v, &raw mut SMEM);
+    block.sync();
+    let r_min = block_scan::<i32, Min, _>(&block, v, &raw mut SMEM);
+    block.sync();
+    let r_max = block_scan::<i32, Max, _>(&block, v, &raw mut SMEM);
+
+    let base = (global_tid as usize) * 3;
+    unsafe {
+        *out.get_unchecked_mut(base) = r_sum;
+        *out.get_unchecked_mut(base + 1) = r_min;
+        *out.get_unchecked_mut(base + 2) = r_max;
+    }
+}
+
+/// `block_scan` (inclusive) for every supported `f32` op.
+#[kernel]
+pub fn test_block_scan_f32(mut out: DisjointSlice<f32>) {
+    static mut SMEM: SharedArray<f32, 3> = SharedArray::UNINIT;
+    let block = this_thread_block();
+    let tid = thread::threadIdx_x();
+    let block_id = thread::blockIdx_x();
+    let global_tid = block_id * thread::blockDim_x() + tid;
+
+    let v = tid as f32;
+
+    let r_sum = block_scan::<f32, Sum, _>(&block, v, &raw mut SMEM);
+    block.sync();
+    let r_min = block_scan::<f32, Min, _>(&block, v, &raw mut SMEM);
+    block.sync();
+    let r_max = block_scan::<f32, Max, _>(&block, v, &raw mut SMEM);
+
+    let base = (global_tid as usize) * 3;
+    unsafe {
+        *out.get_unchecked_mut(base) = r_sum;
+        *out.get_unchecked_mut(base + 1) = r_min;
+        *out.get_unchecked_mut(base + 2) = r_max;
     }
 }
 
@@ -418,5 +796,543 @@ fn main() {
         std::process::exit(1);
     }
 
-    println!("\n=== All cooperative-groups checks passed ===");
+    // =========================================================================
+    // Reductions and scans
+    // =========================================================================
+
+    // Warp tests reuse `cfg` (block_dim 32, 8 blocks → 8 warps total).
+
+    let warp_count = N / 32;
+
+    // --- warp_reduce<u32> ---
+    println!("\n--- warp_reduce::<u32, _>, all 6 ops ---");
+    let mut out = DeviceBuffer::<u32>::zeroed(&stream, warp_count * 6).unwrap();
+    cuda_launch! {
+        kernel: test_warp_reduce_u32, stream: stream, module: module,
+        config: cfg, args: [slice_mut(out)]
+    }
+    .expect("test_warp_reduce_u32 launch failed");
+    let host = out.to_host_vec(&stream).unwrap();
+    let expected = [
+        496u32,     // Sum: 0+1+...+31
+        0,          // Min
+        31,         // Max
+        0,          // BitAnd: !(all bits) = 0
+        0xFFFFFFFF, // BitOr:  all bits set
+        0xFFFFFFFF, // BitXor: 32 distinct bits XORed
+    ];
+    let mut ok = true;
+    for w in 0..warp_count {
+        for (j, &want) in expected.iter().enumerate() {
+            if host[w * 6 + j] != want {
+                println!(
+                    "  warp {} op {}: expected 0x{:08x}, got 0x{:08x}",
+                    w,
+                    j,
+                    want,
+                    host[w * 6 + j]
+                );
+                ok = false;
+            }
+        }
+    }
+    println!(
+        "  all 8 warps × [Sum,Min,Max,BitAnd,BitOr,BitXor] match: {}",
+        if ok { "yes" } else { "NO" }
+    );
+    if !ok {
+        std::process::exit(1);
+    }
+
+    // --- warp_reduce<i32> ---
+    println!("\n--- warp_reduce::<i32, _>, [Sum, Min, Max] ---");
+    let mut out = DeviceBuffer::<i32>::zeroed(&stream, warp_count * 3).unwrap();
+    cuda_launch! {
+        kernel: test_warp_reduce_i32, stream: stream, module: module,
+        config: cfg, args: [slice_mut(out)]
+    }
+    .expect("test_warp_reduce_i32 launch failed");
+    let host = out.to_host_vec(&stream).unwrap();
+    let expected_i = [-16i32, -16, 15];
+    let mut ok = true;
+    for w in 0..warp_count {
+        for (j, &want) in expected_i.iter().enumerate() {
+            if host[w * 3 + j] != want {
+                println!(
+                    "  warp {} op {}: expected {}, got {}",
+                    w,
+                    j,
+                    want,
+                    host[w * 3 + j]
+                );
+                ok = false;
+            }
+        }
+    }
+    println!(
+        "  all 8 warps × [Sum,Min,Max] match: {}",
+        if ok { "yes" } else { "NO" }
+    );
+    if !ok {
+        std::process::exit(1);
+    }
+
+    // --- warp_reduce<f32> ---
+    println!("\n--- warp_reduce::<f32, _>, [Sum, Min, Max] ---");
+    let mut out = DeviceBuffer::<f32>::zeroed(&stream, warp_count * 3).unwrap();
+    cuda_launch! {
+        kernel: test_warp_reduce_f32, stream: stream, module: module,
+        config: cfg, args: [slice_mut(out)]
+    }
+    .expect("test_warp_reduce_f32 launch failed");
+    let host = out.to_host_vec(&stream).unwrap();
+    let expected_f = [496.0f32, 0.0, 31.0];
+    let mut ok = true;
+    for w in 0..warp_count {
+        for (j, &want) in expected_f.iter().enumerate() {
+            if (host[w * 3 + j] - want).abs() > 1e-4 {
+                println!(
+                    "  warp {} op {}: expected {}, got {}",
+                    w,
+                    j,
+                    want,
+                    host[w * 3 + j]
+                );
+                ok = false;
+            }
+        }
+    }
+    println!(
+        "  all 8 warps × [Sum,Min,Max] match: {}",
+        if ok { "yes" } else { "NO" }
+    );
+    if !ok {
+        std::process::exit(1);
+    }
+
+    // --- warp_scan<u32> ---
+    println!("\n--- warp_scan::<u32, _> (inclusive), all 6 ops ---");
+    let mut out = DeviceBuffer::<u32>::zeroed(&stream, N * 6).unwrap();
+    cuda_launch! {
+        kernel: test_warp_scan_u32, stream: stream, module: module,
+        config: cfg, args: [slice_mut(out)]
+    }
+    .expect("test_warp_scan_u32 launch failed");
+    let host = out.to_host_vec(&stream).unwrap();
+    // For each lane k in 0..32, expected per-op inclusive scan.
+    let scan_u32 = |k: u32| -> [u32; 6] {
+        let mask: u64 = (1u64 << (k + 1)) - 1;
+        let mask_u32 = mask as u32;
+        [
+            (k * (k + 1)) / 2, // Sum
+            0,                 // Min: lane 0 contributes 0
+            k,                 // Max
+            !mask_u32,         // BitAnd of !(1<<i) for i in 0..=k
+            mask_u32,          // BitOr of (1<<i) for i in 0..=k
+            mask_u32,          // BitXor of (1<<i) — distinct bits, == OR
+        ]
+    };
+    let mut ok = true;
+    for tid in 0..N {
+        let lane = (tid as u32) & 31;
+        let want = scan_u32(lane);
+        for (j, &w) in want.iter().enumerate() {
+            if host[tid * 6 + j] != w {
+                println!(
+                    "  tid {} (lane {}) op {}: expected 0x{:08x}, got 0x{:08x}",
+                    tid,
+                    lane,
+                    j,
+                    w,
+                    host[tid * 6 + j]
+                );
+                ok = false;
+            }
+        }
+    }
+    println!(
+        "  all {} threads × [Sum,Min,Max,BitAnd,BitOr,BitXor] match: {}",
+        N,
+        if ok { "yes" } else { "NO" }
+    );
+    if !ok {
+        std::process::exit(1);
+    }
+
+    // --- warp_scan<i32> ---
+    println!("\n--- warp_scan::<i32, _> (inclusive), [Sum, Min, Max] ---");
+    let mut out = DeviceBuffer::<i32>::zeroed(&stream, N * 3).unwrap();
+    cuda_launch! {
+        kernel: test_warp_scan_i32, stream: stream, module: module,
+        config: cfg, args: [slice_mut(out)]
+    }
+    .expect("test_warp_scan_i32 launch failed");
+    let host = out.to_host_vec(&stream).unwrap();
+    let scan_i32 = |k: i32| -> [i32; 3] {
+        // value at lane i is (i - 16); inclusive scan to lane k.
+        let sum_0_to_k = k * (k + 1) / 2;
+        let scan_sum = sum_0_to_k - 16 * (k + 1);
+        [scan_sum, -16, k - 16]
+    };
+    let mut ok = true;
+    for tid in 0..N {
+        let lane = ((tid as u32) & 31) as i32;
+        let want = scan_i32(lane);
+        for (j, &w) in want.iter().enumerate() {
+            if host[tid * 3 + j] != w {
+                println!(
+                    "  tid {} (lane {}) op {}: expected {}, got {}",
+                    tid,
+                    lane,
+                    j,
+                    w,
+                    host[tid * 3 + j]
+                );
+                ok = false;
+            }
+        }
+    }
+    println!(
+        "  all {} threads × [Sum,Min,Max] match: {}",
+        N,
+        if ok { "yes" } else { "NO" }
+    );
+    if !ok {
+        std::process::exit(1);
+    }
+
+    // --- warp_scan<f32> ---
+    println!("\n--- warp_scan::<f32, _> (inclusive), [Sum, Min, Max] ---");
+    let mut out = DeviceBuffer::<f32>::zeroed(&stream, N * 3).unwrap();
+    cuda_launch! {
+        kernel: test_warp_scan_f32, stream: stream, module: module,
+        config: cfg, args: [slice_mut(out)]
+    }
+    .expect("test_warp_scan_f32 launch failed");
+    let host = out.to_host_vec(&stream).unwrap();
+    let scan_f32 = |k: u32| -> [f32; 3] {
+        let sum = (k * (k + 1) / 2) as f32;
+        [sum, 0.0, k as f32]
+    };
+    let mut ok = true;
+    for tid in 0..N {
+        let lane = (tid as u32) & 31;
+        let want = scan_f32(lane);
+        for (j, &w) in want.iter().enumerate() {
+            if (host[tid * 3 + j] - w).abs() > 1e-3 {
+                println!(
+                    "  tid {} (lane {}) op {}: expected {}, got {}",
+                    tid,
+                    lane,
+                    j,
+                    w,
+                    host[tid * 3 + j]
+                );
+                ok = false;
+            }
+        }
+    }
+    println!(
+        "  all {} threads × [Sum,Min,Max] match: {}",
+        N,
+        if ok { "yes" } else { "NO" }
+    );
+    if !ok {
+        std::process::exit(1);
+    }
+
+    // --- block tests: block_dim = 96 (NUM_WARPS = 3) ---
+    const BLOCK_SIZE: usize = 96;
+    const NUM_BLOCKS: usize = 4;
+    const TOTAL_THREADS: usize = BLOCK_SIZE * NUM_BLOCKS;
+    let block_cfg = LaunchConfig {
+        block_dim: (BLOCK_SIZE as u32, 1, 1),
+        grid_dim: (NUM_BLOCKS as u32, 1, 1),
+        shared_mem_bytes: 0,
+    };
+
+    // Helper: per-tid running scan over BLOCK_SIZE values.
+    fn block_scan_u32_expected() -> Vec<[u32; 6]> {
+        let mut acc = [0u32, u32::MAX, 0u32, u32::MAX, 0u32, 0u32];
+        let mut out = Vec::with_capacity(BLOCK_SIZE);
+        for tid in 0..BLOCK_SIZE {
+            let v = tid as u32;
+            let v_one = 1u32 << ((tid as u32) & 31);
+            let v_inv = !v_one;
+            acc[0] = acc[0].wrapping_add(v);
+            acc[1] = acc[1].min(v);
+            acc[2] = acc[2].max(v);
+            acc[3] &= v_inv;
+            acc[4] |= v_one;
+            acc[5] ^= v_one;
+            out.push(acc);
+        }
+        out
+    }
+    fn block_scan_i32_expected() -> Vec<[i32; 3]> {
+        let mut acc = [0i32, i32::MAX, i32::MIN];
+        let mut out = Vec::with_capacity(BLOCK_SIZE);
+        for tid in 0..BLOCK_SIZE {
+            let v = (tid as i32) - 48;
+            acc[0] = acc[0].wrapping_add(v);
+            acc[1] = acc[1].min(v);
+            acc[2] = acc[2].max(v);
+            out.push(acc);
+        }
+        out
+    }
+    fn block_scan_f32_expected() -> Vec<[f32; 3]> {
+        let mut acc = [0.0f32, f32::INFINITY, f32::NEG_INFINITY];
+        let mut out = Vec::with_capacity(BLOCK_SIZE);
+        for tid in 0..BLOCK_SIZE {
+            let v = tid as f32;
+            acc[0] += v;
+            acc[1] = acc[1].min(v);
+            acc[2] = acc[2].max(v);
+            out.push(acc);
+        }
+        out
+    }
+
+    let scan_u32_expected = block_scan_u32_expected();
+    let scan_i32_expected = block_scan_i32_expected();
+    let scan_f32_expected = block_scan_f32_expected();
+    // Block reduce expected = scan at last tid.
+    let red_u32_expected = scan_u32_expected[BLOCK_SIZE - 1];
+    let red_i32_expected = scan_i32_expected[BLOCK_SIZE - 1];
+    let red_f32_expected = scan_f32_expected[BLOCK_SIZE - 1];
+
+    // --- block_reduce<u32> ---
+    println!(
+        "\n--- block_reduce::<u32, _> (block_dim={}, {} warps), all 6 ops ---",
+        BLOCK_SIZE,
+        BLOCK_SIZE / 32
+    );
+    let mut out = DeviceBuffer::<u32>::zeroed(&stream, NUM_BLOCKS * 6).unwrap();
+    cuda_launch! {
+        kernel: test_block_reduce_u32, stream: stream, module: module,
+        config: block_cfg, args: [slice_mut(out)]
+    }
+    .expect("test_block_reduce_u32 launch failed");
+    let host = out.to_host_vec(&stream).unwrap();
+    let mut ok = true;
+    for b in 0..NUM_BLOCKS {
+        for (j, &want) in red_u32_expected.iter().enumerate() {
+            if host[b * 6 + j] != want {
+                println!(
+                    "  block {} op {}: expected 0x{:08x}, got 0x{:08x}",
+                    b,
+                    j,
+                    want,
+                    host[b * 6 + j]
+                );
+                ok = false;
+            }
+        }
+    }
+    println!(
+        "  all {} blocks × [Sum,Min,Max,BitAnd,BitOr,BitXor] match: {}",
+        NUM_BLOCKS,
+        if ok { "yes" } else { "NO" }
+    );
+    if !ok {
+        std::process::exit(1);
+    }
+
+    // --- block_reduce<i32> ---
+    println!(
+        "\n--- block_reduce::<i32, _> (block_dim={}), [Sum, Min, Max] ---",
+        BLOCK_SIZE
+    );
+    let mut out = DeviceBuffer::<i32>::zeroed(&stream, NUM_BLOCKS * 3).unwrap();
+    cuda_launch! {
+        kernel: test_block_reduce_i32, stream: stream, module: module,
+        config: block_cfg, args: [slice_mut(out)]
+    }
+    .expect("test_block_reduce_i32 launch failed");
+    let host = out.to_host_vec(&stream).unwrap();
+    let mut ok = true;
+    for b in 0..NUM_BLOCKS {
+        for (j, &want) in red_i32_expected.iter().enumerate() {
+            if host[b * 3 + j] != want {
+                println!(
+                    "  block {} op {}: expected {}, got {}",
+                    b,
+                    j,
+                    want,
+                    host[b * 3 + j]
+                );
+                ok = false;
+            }
+        }
+    }
+    println!(
+        "  all {} blocks × [Sum,Min,Max] match: {}",
+        NUM_BLOCKS,
+        if ok { "yes" } else { "NO" }
+    );
+    if !ok {
+        std::process::exit(1);
+    }
+
+    // --- block_reduce<f32> ---
+    println!(
+        "\n--- block_reduce::<f32, _> (block_dim={}), [Sum, Min, Max] ---",
+        BLOCK_SIZE
+    );
+    let mut out = DeviceBuffer::<f32>::zeroed(&stream, NUM_BLOCKS * 3).unwrap();
+    cuda_launch! {
+        kernel: test_block_reduce_f32, stream: stream, module: module,
+        config: block_cfg, args: [slice_mut(out)]
+    }
+    .expect("test_block_reduce_f32 launch failed");
+    let host = out.to_host_vec(&stream).unwrap();
+    let mut ok = true;
+    for b in 0..NUM_BLOCKS {
+        for (j, &want) in red_f32_expected.iter().enumerate() {
+            if (host[b * 3 + j] - want).abs() > 1e-2 {
+                println!(
+                    "  block {} op {}: expected {}, got {}",
+                    b,
+                    j,
+                    want,
+                    host[b * 3 + j]
+                );
+                ok = false;
+            }
+        }
+    }
+    println!(
+        "  all {} blocks × [Sum,Min,Max] match: {}",
+        NUM_BLOCKS,
+        if ok { "yes" } else { "NO" }
+    );
+    if !ok {
+        std::process::exit(1);
+    }
+
+    // --- block_scan<u32> ---
+    println!(
+        "\n--- block_scan::<u32, _> (block_dim={}, inclusive), all 6 ops ---",
+        BLOCK_SIZE
+    );
+    let mut out = DeviceBuffer::<u32>::zeroed(&stream, TOTAL_THREADS * 6).unwrap();
+    cuda_launch! {
+        kernel: test_block_scan_u32, stream: stream, module: module,
+        config: block_cfg, args: [slice_mut(out)]
+    }
+    .expect("test_block_scan_u32 launch failed");
+    let host = out.to_host_vec(&stream).unwrap();
+    let mut ok = true;
+    for b in 0..NUM_BLOCKS {
+        for tid in 0..BLOCK_SIZE {
+            let global_tid = b * BLOCK_SIZE + tid;
+            let want = scan_u32_expected[tid];
+            for (j, &w) in want.iter().enumerate() {
+                if host[global_tid * 6 + j] != w {
+                    println!(
+                        "  block {} tid {} op {}: expected 0x{:08x}, got 0x{:08x}",
+                        b,
+                        tid,
+                        j,
+                        w,
+                        host[global_tid * 6 + j]
+                    );
+                    ok = false;
+                }
+            }
+        }
+    }
+    println!(
+        "  all {} threads × [Sum,Min,Max,BitAnd,BitOr,BitXor] match: {}",
+        TOTAL_THREADS,
+        if ok { "yes" } else { "NO" }
+    );
+    if !ok {
+        std::process::exit(1);
+    }
+
+    // --- block_scan<i32> ---
+    println!(
+        "\n--- block_scan::<i32, _> (block_dim={}), [Sum, Min, Max] ---",
+        BLOCK_SIZE
+    );
+    let mut out = DeviceBuffer::<i32>::zeroed(&stream, TOTAL_THREADS * 3).unwrap();
+    cuda_launch! {
+        kernel: test_block_scan_i32, stream: stream, module: module,
+        config: block_cfg, args: [slice_mut(out)]
+    }
+    .expect("test_block_scan_i32 launch failed");
+    let host = out.to_host_vec(&stream).unwrap();
+    let mut ok = true;
+    for b in 0..NUM_BLOCKS {
+        for tid in 0..BLOCK_SIZE {
+            let global_tid = b * BLOCK_SIZE + tid;
+            let want = scan_i32_expected[tid];
+            for (j, &w) in want.iter().enumerate() {
+                if host[global_tid * 3 + j] != w {
+                    println!(
+                        "  block {} tid {} op {}: expected {}, got {}",
+                        b,
+                        tid,
+                        j,
+                        w,
+                        host[global_tid * 3 + j]
+                    );
+                    ok = false;
+                }
+            }
+        }
+    }
+    println!(
+        "  all {} threads × [Sum,Min,Max] match: {}",
+        TOTAL_THREADS,
+        if ok { "yes" } else { "NO" }
+    );
+    if !ok {
+        std::process::exit(1);
+    }
+
+    // --- block_scan<f32> ---
+    println!(
+        "\n--- block_scan::<f32, _> (block_dim={}), [Sum, Min, Max] ---",
+        BLOCK_SIZE
+    );
+    let mut out = DeviceBuffer::<f32>::zeroed(&stream, TOTAL_THREADS * 3).unwrap();
+    cuda_launch! {
+        kernel: test_block_scan_f32, stream: stream, module: module,
+        config: block_cfg, args: [slice_mut(out)]
+    }
+    .expect("test_block_scan_f32 launch failed");
+    let host = out.to_host_vec(&stream).unwrap();
+    let mut ok = true;
+    for b in 0..NUM_BLOCKS {
+        for tid in 0..BLOCK_SIZE {
+            let global_tid = b * BLOCK_SIZE + tid;
+            let want = scan_f32_expected[tid];
+            for (j, &w) in want.iter().enumerate() {
+                if (host[global_tid * 3 + j] - w).abs() > 1e-2 {
+                    println!(
+                        "  block {} tid {} op {}: expected {}, got {}",
+                        b,
+                        tid,
+                        j,
+                        w,
+                        host[global_tid * 3 + j]
+                    );
+                    ok = false;
+                }
+            }
+        }
+    }
+    println!(
+        "  all {} threads × [Sum,Min,Max] match: {}",
+        TOTAL_THREADS,
+        if ok { "yes" } else { "NO" }
+    );
+    if !ok {
+        std::process::exit(1);
+    }
+
+    println!("\n=== All cooperative-groups checks PASSED ===");
 }

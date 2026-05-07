@@ -34,13 +34,24 @@
 //! # The hierarchy
 //!
 //! ```text
-//! Grid             this_grid()                grid::sync()        cooperative launch only
+//! Grid             this_grid()                grid::sync()             cooperative launch only
 //! Cluster          this_cluster()             cluster::cluster_sync()  sm_90+
 //! ThreadBlock      this_thread_block()        thread::sync_threads()
-//!   WarpTile<32>     block.tiled_partition()  ballot/shfl/match    full warp
-//!   WarpTile<N<32>>  block.tiled_partition()  warp::sync_mask     sub-warp tile
-//!   CoalescedThreads coalesced_threads()      warp::sync_mask     runtime active mask
+//!   WarpTile<32>     block.tiled_partition()  ballot/shfl/match        full warp
+//!   WarpTile<N<32>>  block.tiled_partition()  warp::sync_mask          sub-warp tile
+//!   CoalescedThreads coalesced_threads()      warp::sync_mask          runtime active mask
 //! ```
+//!
+//! # Reductions and scans
+//!
+//! On top of the typed handles this module also ships the four
+//! collective primitives `warp_reduce`, `warp_scan`, `block_reduce`,
+//! and `block_scan`, generic over a [`ReduceOp`](ops::ReduceOp) trait
+//! with concrete impls for `Sum`/`Min`/`Max` (`u32`/`i32`/`f32`) and
+//! `BitAnd`/`BitOr`/`BitXor` (`u32` only). Block-scoped variants
+//! take a `*mut SharedArray<T, NUM_WARPS>` for scratch and obey the
+//! standard "block-sync between back-to-back uses of the same scratch"
+//! contract documented on each function.
 //!
 //! # Example: warp-wide ballot from `find_kernel_warp`
 //!
@@ -65,7 +76,7 @@
 //! let m_h2 = tile.ballot(tag == h2);  // mask is 0xFFFF or 0xFFFF0000
 //! ```
 
-use crate::{cluster, grid, thread, warp};
+use crate::{cluster, grid, shared::SharedArray, thread, warp};
 
 // =============================================================================
 // Traits
@@ -154,8 +165,9 @@ pub trait WarpCollective: ThreadGroup {
     /// Bitmask of lanes in this group whose `value` equals mine.
     ///
     /// PTX `match.any.sync.b32` (sm_70+). Bits are absolute warp-lane
-    /// positions (so the result is meaningful when AND-ed with the
-    /// group's participation mask).
+    /// positions; the implementation already AND-s the raw hardware
+    /// result with the group's participation mask, so the returned
+    /// bits are guaranteed to be a subset of `mask()`.
     fn match_any(&self, value: u32) -> u32;
 
     /// 64-bit value variant of [`match_any`](Self::match_any).
@@ -592,14 +604,23 @@ impl WarpCollective for CoalescedThreads {
         warp::any_sync(self.mask, predicate)
     }
 
+    // `shfl` translates the group-relative `src_rank` to an absolute
+    // warp lane (the lane whose own `thread_rank` inside the coalesced
+    // group equals `src_rank`) by popping the `src_rank` lowest set
+    // bits of the participation mask. When `src_rank` is a runtime
+    // value the loop survives as a small `popc`/branch sequence; when
+    // it folds to a constant the loop unrolls.
+    //
+    // `shfl_xor`/`shfl_down`/`shfl_up` forward `lane_mask`/`delta`
+    // straight to the hardware, which interprets them in **absolute
+    // warp-lane** terms — not relative to the coalesced group. For a
+    // sparse mask "shift my rank by k" has no clean cross-lane
+    // analogue, so callers wanting rank-relative semantics on
+    // `CoalescedThreads` should use `shfl` with an explicit target
+    // rank instead.
+
     #[inline(always)]
     fn shfl(&self, var: u32, src_rank: u32) -> u32 {
-        // Map this group's tile-relative `src_rank` to an absolute warp
-        // lane: pick the lane whose own thread_rank within this group
-        // equals src_rank. Implementation detail: scan by repeatedly
-        // popping the lowest set bit `src_rank` times. Compiles to a
-        // small straight-line sequence of `popc`/`bfind`-like ops via
-        // LLVM's NVPTX folding.
         let mut m = self.mask;
         let mut k = src_rank;
         while k > 0 {
@@ -671,4 +692,514 @@ impl WarpCollective for CoalescedThreads {
     fn match_all_i64(&self, value: u64) -> u32 {
         warp::match_all_i64_sync(self.mask, value)
     }
+}
+
+// =============================================================================
+// Reductions and scans
+// =============================================================================
+
+/// Combiner operations for [`warp_reduce`], [`warp_scan`], [`block_reduce`],
+/// and [`block_scan`].
+///
+/// Each combiner is a unit struct (`Sum`, `Min`, ...) that implements
+/// [`ReduceOp<T>`] for one or more value types `T`. The unit lives in this
+/// submodule so the names don't pollute the parent `cooperative_groups`
+/// namespace; users typically write
+/// `use cuda_device::cooperative_groups::ops::Sum;` at the call site.
+///
+/// Every `(combine, identity)` pair is a commutative associative monoid,
+/// so the result is independent of the shuffle topology used to compute it.
+pub mod ops {
+    /// Binary reduction operation over values of type `T`.
+    ///
+    /// For determinism across the butterfly / Kogge-Stone topologies used
+    /// by the reduce and scan primitives, `(combine, identity)` must form
+    /// a commutative monoid. All operations in this module satisfy that.
+    pub trait ReduceOp<T> {
+        /// Identity element: `combine(identity(), x) == x` for all `x`.
+        fn identity() -> T;
+        /// Binary combiner. Must be associative and commutative.
+        fn combine(a: T, b: T) -> T;
+    }
+
+    /// Sum: wrapping integer addition; IEEE-754 add for floats.
+    #[derive(Copy, Clone, Debug)]
+    pub struct Sum;
+
+    /// Minimum (non-NaN-aware for floats — see the `f32` impl).
+    #[derive(Copy, Clone, Debug)]
+    pub struct Min;
+
+    /// Maximum (non-NaN-aware for floats — see the `f32` impl).
+    #[derive(Copy, Clone, Debug)]
+    pub struct Max;
+
+    /// Bitwise AND (`u32` only — meaningless for signed/float).
+    #[derive(Copy, Clone, Debug)]
+    pub struct BitAnd;
+
+    /// Bitwise OR (`u32` only).
+    #[derive(Copy, Clone, Debug)]
+    pub struct BitOr;
+
+    /// Bitwise XOR (`u32` only).
+    #[derive(Copy, Clone, Debug)]
+    pub struct BitXor;
+
+    // --- u32 ---
+    impl ReduceOp<u32> for Sum {
+        #[inline(always)]
+        fn identity() -> u32 {
+            0
+        }
+        #[inline(always)]
+        fn combine(a: u32, b: u32) -> u32 {
+            a.wrapping_add(b)
+        }
+    }
+    impl ReduceOp<u32> for Min {
+        #[inline(always)]
+        fn identity() -> u32 {
+            u32::MAX
+        }
+        #[inline(always)]
+        fn combine(a: u32, b: u32) -> u32 {
+            if a < b { a } else { b }
+        }
+    }
+    impl ReduceOp<u32> for Max {
+        #[inline(always)]
+        fn identity() -> u32 {
+            0
+        }
+        #[inline(always)]
+        fn combine(a: u32, b: u32) -> u32 {
+            if a > b { a } else { b }
+        }
+    }
+    impl ReduceOp<u32> for BitAnd {
+        #[inline(always)]
+        fn identity() -> u32 {
+            u32::MAX
+        }
+        #[inline(always)]
+        fn combine(a: u32, b: u32) -> u32 {
+            a & b
+        }
+    }
+    impl ReduceOp<u32> for BitOr {
+        #[inline(always)]
+        fn identity() -> u32 {
+            0
+        }
+        #[inline(always)]
+        fn combine(a: u32, b: u32) -> u32 {
+            a | b
+        }
+    }
+    impl ReduceOp<u32> for BitXor {
+        #[inline(always)]
+        fn identity() -> u32 {
+            0
+        }
+        #[inline(always)]
+        fn combine(a: u32, b: u32) -> u32 {
+            a ^ b
+        }
+    }
+
+    // --- i32 ---
+    impl ReduceOp<i32> for Sum {
+        #[inline(always)]
+        fn identity() -> i32 {
+            0
+        }
+        #[inline(always)]
+        fn combine(a: i32, b: i32) -> i32 {
+            a.wrapping_add(b)
+        }
+    }
+    impl ReduceOp<i32> for Min {
+        #[inline(always)]
+        fn identity() -> i32 {
+            i32::MAX
+        }
+        #[inline(always)]
+        fn combine(a: i32, b: i32) -> i32 {
+            if a < b { a } else { b }
+        }
+    }
+    impl ReduceOp<i32> for Max {
+        #[inline(always)]
+        fn identity() -> i32 {
+            i32::MIN
+        }
+        #[inline(always)]
+        fn combine(a: i32, b: i32) -> i32 {
+            if a > b { a } else { b }
+        }
+    }
+
+    // --- f32 ---
+    impl ReduceOp<f32> for Sum {
+        #[inline(always)]
+        fn identity() -> f32 {
+            0.0
+        }
+        #[inline(always)]
+        fn combine(a: f32, b: f32) -> f32 {
+            a + b
+        }
+    }
+    impl ReduceOp<f32> for Min {
+        #[inline(always)]
+        fn identity() -> f32 {
+            f32::INFINITY
+        }
+        // Direct comparison; NaN handling: `NaN < b` is false so a NaN in
+        // `a` is dropped, but a NaN in `b` propagates. Inputs are expected
+        // to be non-NaN; mixed-NaN reductions are a caller bug.
+        #[inline(always)]
+        fn combine(a: f32, b: f32) -> f32 {
+            if a < b { a } else { b }
+        }
+    }
+    impl ReduceOp<f32> for Max {
+        #[inline(always)]
+        fn identity() -> f32 {
+            f32::NEG_INFINITY
+        }
+        #[inline(always)]
+        fn combine(a: f32, b: f32) -> f32 {
+            if a > b { a } else { b }
+        }
+    }
+}
+
+/// Scalars that ride a `WarpCollective` shuffle.
+///
+/// Reductions and scans need to shuffle the value being combined, but the
+/// underlying PTX `shfl.sync.{bfly,up,down,idx}` only ships in `b32` and
+/// `f32` flavors. This trait routes each supported `T` (`u32`, `i32`,
+/// `f32`) to the right one and bitcasts where required (`i32`).
+pub trait WarpShuffle: Copy + Sized {
+    /// Butterfly exchange under the group's mask. See
+    /// [`WarpCollective::shfl_xor`].
+    fn shfl_xor_via<G: WarpCollective>(group: &G, value: Self, lane_mask: u32) -> Self;
+
+    /// Read from `(my_rank - delta)` within the group. See
+    /// [`WarpCollective::shfl_up`].
+    fn shfl_up_via<G: WarpCollective>(group: &G, value: Self, delta: u32) -> Self;
+}
+
+impl WarpShuffle for u32 {
+    #[inline(always)]
+    fn shfl_xor_via<G: WarpCollective>(group: &G, value: Self, lane_mask: u32) -> Self {
+        group.shfl_xor(value, lane_mask)
+    }
+    #[inline(always)]
+    fn shfl_up_via<G: WarpCollective>(group: &G, value: Self, delta: u32) -> Self {
+        group.shfl_up(value, delta)
+    }
+}
+
+impl WarpShuffle for i32 {
+    // `as u32` / `as i32` are bit-preserving in two's-complement; the b32
+    // shuffle sees the same 32 bits, so the round-trip is lossless.
+    #[inline(always)]
+    fn shfl_xor_via<G: WarpCollective>(group: &G, value: Self, lane_mask: u32) -> Self {
+        group.shfl_xor(value as u32, lane_mask) as i32
+    }
+    #[inline(always)]
+    fn shfl_up_via<G: WarpCollective>(group: &G, value: Self, delta: u32) -> Self {
+        group.shfl_up(value as u32, delta) as i32
+    }
+}
+
+impl WarpShuffle for f32 {
+    #[inline(always)]
+    fn shfl_xor_via<G: WarpCollective>(group: &G, value: Self, lane_mask: u32) -> Self {
+        group.shfl_xor_f32(value, lane_mask)
+    }
+    #[inline(always)]
+    fn shfl_up_via<G: WarpCollective>(group: &G, value: Self, delta: u32) -> Self {
+        group.shfl_up_f32(value, delta)
+    }
+}
+
+/// Reduce one value per lane down to a single value across a `WarpTile<N>`.
+///
+/// Implements the standard butterfly reduction via `shfl.sync.bfly` —
+/// `log2(N)` exchanges, each XOR-ing the lane id by `delta` and combining.
+/// **Every lane in the tile receives the reduced value** (not just lane 0):
+/// the butterfly converges all lanes onto the same answer, which is the
+/// usual ergonomic shape and matches CUB's `WarpReduce`.
+///
+/// `N` is the tile size (1, 2, 4, 8, 16, or 32) — already validated by
+/// [`ThreadBlock::tiled_partition`] at construction time.
+///
+/// # Convergence
+///
+/// All lanes named in the tile's participation mask must reach this call.
+/// For sub-warp tiles the per-tile mask isolates each tile's reduction
+/// (lanes outside the mask resolve `shfl.sync` to "own value"), so two
+/// tiles inside the same warp may interleave their butterflies without
+/// interference.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use cuda_device::cooperative_groups::{this_thread_block, warp_reduce, ops::Sum};
+///
+/// let warp = this_thread_block().tiled_partition::<32>();
+/// let total: u32 = warp_reduce::<u32, Sum, _>(&warp, my_value);
+/// // every lane now holds the warp-wide sum
+/// ```
+#[inline(always)]
+pub fn warp_reduce<T, Op, const N: u32>(tile: &WarpTile<N>, value: T) -> T
+where
+    T: WarpShuffle,
+    Op: ops::ReduceOp<T>,
+{
+    let mut acc = value;
+    let mut delta: u32 = N >> 1;
+    while delta > 0 {
+        let other = T::shfl_xor_via(tile, acc, delta);
+        acc = Op::combine(acc, other);
+        delta >>= 1;
+    }
+    acc
+}
+
+/// Inclusive scan across a `WarpTile<N>`. Each lane receives the reduction
+/// of values from tile-rank `0..=my_rank`.
+///
+/// Implemented as a `log2(N)`-step Kogge-Stone scan: at step `delta` each
+/// lane reads the value from rank `(my_rank - delta)` via `shfl.sync.up`,
+/// then combines if `my_rank >= delta`. The tile's participation mask
+/// keeps cross-tile pulls quiet (out-of-mask source ⇒ "own value"), so
+/// for `N < 32` two tiles in the same warp scan independently.
+///
+/// `N` is the tile size (1, 2, 4, 8, 16, or 32).
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let warp = this_thread_block().tiled_partition::<32>();
+/// let prefix: u32 = warp_scan::<u32, Sum, _>(&warp, 1u32);
+/// // lane k now holds k + 1 (inclusive prefix of all-ones)
+/// ```
+#[inline(always)]
+pub fn warp_scan<T, Op, const N: u32>(tile: &WarpTile<N>, value: T) -> T
+where
+    T: WarpShuffle,
+    Op: ops::ReduceOp<T>,
+{
+    let mut acc = value;
+    let rank = tile.thread_rank();
+    let mut delta: u32 = 1;
+    while delta < N {
+        let other = T::shfl_up_via(tile, acc, delta);
+        if rank >= delta {
+            acc = Op::combine(acc, other);
+        }
+        delta <<= 1;
+    }
+    acc
+}
+
+/// Linear warp index inside the current block. Works for any block dim
+/// shape; `warp::warp_id` only handles the 1D case.
+#[inline(always)]
+fn warp_in_block_linear() -> u32 {
+    thread_in_block_linear() / 32
+}
+
+/// Reduce one value per thread down to a single value across a thread block.
+///
+/// Three-phase shape (the same shape CUB and cuCollections use):
+///
+/// 1. Each warp warp-reduces its 32 lanes' values via [`warp_reduce`].
+/// 2. Lane 0 of each warp writes its warp's total to `smem[warp_id]`,
+///    then `block.sync()`.
+/// 3. The first warp loads the per-warp totals (filling unused slots with
+///    `Op::identity()`), warp-reduces them, and lane 0 writes the
+///    block-wide result back to `smem[0]`. After a second `block.sync()`
+///    every thread reads `smem[0]`.
+///
+/// `NUM_WARPS` must equal `BLOCK_SIZE / 32`. It's a `usize` const-generic
+/// so it lines up with the [`SharedArray`] length parameter; the
+/// compile-time check rejects values outside `1..=32` (i.e. block sizes
+/// outside `32..=1024`).
+///
+/// # Smem reuse
+///
+/// `smem` is left in an arbitrary state on return. Callers that reuse
+/// the same `SharedArray` for a second reduction or scan in the same
+/// kernel **must** place a `block.sync()` between calls — otherwise
+/// late readers from the first call may race the writes of the second.
+///
+/// # Why a raw pointer?
+///
+/// We take `*mut SharedArray<T, NUM_WARPS>` rather than `&mut` so that
+/// callers can pass `&raw mut SMEM` directly without an `unsafe` block
+/// at the call site (Rust 2024 forbids `&mut` references to a
+/// `static mut`, but `&raw mut` is safe). The unsafety — that nothing
+/// else aliases the static for the duration of the call — is local to
+/// this function body, where the helpers and barriers below preserve it.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use cuda_device::cooperative_groups::{block_reduce, ops::Sum, this_thread_block};
+/// use cuda_device::SharedArray;
+///
+/// #[kernel]
+/// pub fn my_kernel(...) {
+///     // 8 = 256 / 32 warps per 256-thread block
+///     static mut SMEM: SharedArray<u32, 8> = SharedArray::UNINIT;
+///     let block = this_thread_block();
+///     let total = block_reduce::<u32, Sum, _>(&block, my_value, &raw mut SMEM);
+///     // every thread now holds the block-wide total
+/// }
+/// ```
+#[inline(always)]
+pub fn block_reduce<T, Op, const NUM_WARPS: usize>(
+    block: &ThreadBlock,
+    value: T,
+    smem: *mut SharedArray<T, NUM_WARPS>,
+) -> T
+where
+    T: WarpShuffle,
+    Op: ops::ReduceOp<T>,
+{
+    const {
+        assert!(
+            NUM_WARPS > 0 && NUM_WARPS <= 32,
+            "block_reduce requires 1..=32 warps (block size 32..=1024)",
+        );
+    }
+
+    // SAFETY: The caller (a kernel) hands us a raw pointer to a `static mut
+    // SharedArray<T, NUM_WARPS>`. Within this function:
+    //   - all writes occur at distinct (warp_id, lane==0) or (lane==0) sites,
+    //   - all reads are separated from prior writes by `block.sync()`.
+    // No other reference to the static exists for the duration of the call.
+    let smem: &mut SharedArray<T, NUM_WARPS> = unsafe { &mut *smem };
+
+    let warp = block.tiled_partition::<32>();
+    let lane = warp.thread_rank();
+    let warp_id = warp_in_block_linear();
+
+    let warp_total = warp_reduce::<T, Op, 32>(&warp, value);
+
+    if lane == 0 {
+        smem[warp_id as usize] = warp_total;
+    }
+    block.sync();
+
+    if warp_id == 0 {
+        let v: T = if (lane as usize) < NUM_WARPS {
+            smem[lane as usize]
+        } else {
+            <Op as ops::ReduceOp<T>>::identity()
+        };
+        let block_total = warp_reduce::<T, Op, 32>(&warp, v);
+        if lane == 0 {
+            smem[0] = block_total;
+        }
+    }
+    block.sync();
+
+    smem[0]
+}
+
+/// Inclusive scan across a thread block. Thread `i` (in linear order
+/// `(z * blockDim.y + y) * blockDim.x + x`) receives the reduction of
+/// values from threads `0..=i`.
+///
+/// Three-phase shape:
+///
+/// 1. Each warp does an inclusive [`warp_scan`].
+/// 2. Lane 31 of each warp writes its warp total (= last value of its
+///    inclusive scan) to `smem[warp_id]`, then `block.sync()`.
+/// 3. Warp 0 inclusive-scans the warp totals, then converts to an
+///    exclusive prefix and writes back to `smem[0..NUM_WARPS]`. After
+///    `block.sync()` every thread reads its own warp's exclusive prefix
+///    and combines it with its intra-warp inclusive value.
+///
+/// `NUM_WARPS` must equal `BLOCK_SIZE / 32`. Same `SharedArray` reuse
+/// contract as [`block_reduce`] — caller must `block.sync()` before
+/// reusing the same smem. Same raw-pointer rationale as well: pass
+/// `&raw mut SMEM` from the call site (no `unsafe` block needed).
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use cuda_device::cooperative_groups::{block_scan, ops::Sum, this_thread_block};
+/// use cuda_device::SharedArray;
+///
+/// #[kernel]
+/// pub fn my_kernel(...) {
+///     static mut SMEM: SharedArray<u32, 8> = SharedArray::UNINIT;
+///     let block = this_thread_block();
+///     let prefix = block_scan::<u32, Sum, _>(&block, 1u32, &raw mut SMEM);
+///     // thread i now holds i + 1 (inclusive scan of all-ones)
+/// }
+/// ```
+#[inline(always)]
+pub fn block_scan<T, Op, const NUM_WARPS: usize>(
+    block: &ThreadBlock,
+    value: T,
+    smem: *mut SharedArray<T, NUM_WARPS>,
+) -> T
+where
+    T: WarpShuffle,
+    Op: ops::ReduceOp<T>,
+{
+    const {
+        assert!(
+            NUM_WARPS > 0 && NUM_WARPS <= 32,
+            "block_scan requires 1..=32 warps (block size 32..=1024)",
+        );
+    }
+
+    // SAFETY: see `block_reduce`.
+    let smem: &mut SharedArray<T, NUM_WARPS> = unsafe { &mut *smem };
+
+    let warp = block.tiled_partition::<32>();
+    let lane = warp.thread_rank();
+    let warp_id = warp_in_block_linear();
+
+    let warp_inclusive = warp_scan::<T, Op, 32>(&warp, value);
+
+    if lane == 31 {
+        smem[warp_id as usize] = warp_inclusive;
+    }
+    block.sync();
+
+    if warp_id == 0 {
+        let v: T = if (lane as usize) < NUM_WARPS {
+            smem[lane as usize]
+        } else {
+            <Op as ops::ReduceOp<T>>::identity()
+        };
+        let inclusive = warp_scan::<T, Op, 32>(&warp, v);
+        // Inclusive -> exclusive: shift right by one lane and force
+        // identity at lane 0. shfl_up at lane 0 returns own value, so
+        // explicit branch is needed.
+        let shifted = T::shfl_up_via(&warp, inclusive, 1);
+        let exclusive = if lane == 0 {
+            <Op as ops::ReduceOp<T>>::identity()
+        } else {
+            shifted
+        };
+        if (lane as usize) < NUM_WARPS {
+            smem[lane as usize] = exclusive;
+        }
+    }
+    block.sync();
+
+    let prefix: T = smem[warp_id as usize];
+    Op::combine(prefix, warp_inclusive)
 }

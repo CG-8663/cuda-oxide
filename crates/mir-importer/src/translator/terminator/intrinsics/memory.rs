@@ -421,34 +421,34 @@ pub fn emit_shared_array_index(
         );
     }
 
-    // Get the SharedArray value (arg 0) - this should be a pointer from mir.shared_alloc
-    let (shared_array_val, mut last_op) = match &args[0] {
-        mir::Operand::Copy(place) | mir::Operand::Move(place) => {
-            rvalue::translate_place(ctx, body, place, value_map, block_ptr, prev_op, loc.clone())?
-        }
-        _ => {
-            return input_err!(
-                loc.clone(),
-                TranslationErr::unsupported("Constant SharedArray not supported".to_string(),)
-            );
-        }
-    };
-
-    // Get the index value (arg 1)
-    let (index_val, last_op_after_index) = match &args[1] {
-        mir::Operand::Copy(place) | mir::Operand::Move(place) => {
-            rvalue::translate_place(ctx, body, place, value_map, block_ptr, last_op, loc.clone())?
-        }
-        _ => {
-            return input_err!(
-                loc.clone(),
-                TranslationErr::unsupported(
-                    "Constant index in SharedArray::index not yet supported".to_string(),
-                )
-            );
-        }
-    };
-    last_op = last_op_after_index;
+    // Translate both arguments through the uniform operand helper. It handles
+    // `Copy`/`Move`/`Constant` for us, so a literal `smem[0]` (where the index
+    // is `Operand::Constant`) and a direct `&raw mut SMEM` reference (where
+    // arg 0 is a constant pointer to a `SharedArray<T, N>` static) both work.
+    // Earlier this function had two manual `Copy | Move => ...; _ => bail`
+    // matches that rejected constant operands. See
+    // `.cursor/rules/compiler-gaps-are-bugs.mdc` for why we add the missing
+    // arm via the framework helper rather than asking callers to introduce a
+    // `let tmp = 0; smem[tmp]` shim.
+    let (shared_array_val, last_op) = rvalue::translate_operand(
+        ctx,
+        body,
+        &args[0],
+        value_map,
+        block_ptr,
+        prev_op,
+        loc.clone(),
+    )?;
+    let (index_val, last_op_after_index) = rvalue::translate_operand(
+        ctx,
+        body,
+        &args[1],
+        value_map,
+        block_ptr,
+        last_op,
+        loc.clone(),
+    )?;
+    let mut last_op = last_op_after_index;
 
     // The shared_array_val is a pointer to the shared memory array.
     // We need to compute ptr + index to get a pointer to the element.

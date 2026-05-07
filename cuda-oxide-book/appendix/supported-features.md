@@ -129,6 +129,18 @@ data is drawn from the compiler/runtime sources and the test suite.
 | Warp Vote Operations | **Full** | `all(pred)`, `any(pred)`, `ballot(pred)` → bitmask. |
 | Lane/Warp ID | **Full** | `lane_id()` (0–31), `warp_id()`. Direct register reads. |
 
+## Runtime Library: Cooperative Groups
+
+| Feature | Status | Description |
+|:--------|:-------|:------------|
+| Typed Group Handles | **Full** | `Grid`, `Cluster`, `ThreadBlock`, `WarpTile<N>` (N ∈ {1,2,4,8,16,32}), `CoalescedThreads`. |
+| Group Universal API | **Full** | `size()`, `thread_rank()`, `sync()` on every group handle. |
+| Warp Tile Partitioning | **Full** | `ThreadBlock::tiled_partition::<N>()` carves a sub-warp `WarpTile<N>`. `coalesced_threads()` materialises the active-lane group. |
+| Warp Collectives | **Full** | `ballot`, `all`, `any`, `shfl`, `shfl_xor`, `shfl_down`, `shfl_up` (`i32` and `f32`); `match_any` / `match_all` (`i32` and `i64`); `active_mask`. |
+| Warp Reductions / Scans | **Full** | `warp_reduce`, `warp_scan` (inclusive). `Sum`/`Min`/`Max` for `u32`/`i32`/`f32`; `BitAnd`/`BitOr`/`BitXor` for `u32`. |
+| Block Reductions / Scans | **Full** | `block_reduce`, `block_scan` (inclusive). Const-generic over `NUM_WARPS`; same op/type matrix as warp variants; uses `__shared__` scratch. |
+| Cooperative Kernel Launch | **Full** | `cuda_launch! { cooperative: true, ... }` enables `Grid::sync()` for grid-wide barriers. |
+
 ## Runtime Library: Debug
 
 | Feature | Status | Description |
@@ -160,7 +172,6 @@ data is drawn from the compiler/runtime sources and the test suite.
 | Feature | Status | Notes |
 |:--------|:-------|:------|
 | Inline Assembly (`asm!` macro) | **Planned** | Workaround: use built-in intrinsics or add new intrinsics to `cuda-device`. |
-| Cooperative Groups (full API) | **Planned** | Workaround: use existing primitives (`sync_threads`, warp shuffle, `cluster_sync`). |
 | FP8 / MX Data Types | **Planned** | Roadmap item for Blackwell. No architectural limitation. |
 | Dynamic Dispatch (`dyn Trait`) | **N/A** | Use generics with static dispatch. Haven't found a real need for this. |
 | Heap Allocation (`Box`, `Vec`) | **N/A** | CUDA has a device-side heap (`malloc`/`free` in kernels), and the compiler allows the `alloc` crate through -- but no device-side `#[global_allocator]` is wired up today. Even if it were, device `malloc` is extremely slow (serialized, fragmented, uncoalesced). Use slices and `SharedArray`. |
