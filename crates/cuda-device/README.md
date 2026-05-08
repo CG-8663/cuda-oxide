@@ -49,7 +49,7 @@
 
 ### `ThreadIndex` and `DisjointSlice<T>`
 
-`ThreadIndex` can only be constructed by `index_1d()` / `index_2d()`, guaranteeing each thread gets a unique value. `DisjointSlice<T>` accepts only `ThreadIndex` for mutable access, preventing data races by construction.
+`ThreadIndex` can only be constructed by `index_1d()` / `index_2d()`. `index_1d()` is unconditionally unique per thread; `index_2d(row_stride)` is **currently unsound** -- uniqueness only holds when every call in the kernel passes the same `row_stride`, and nothing yet enforces that at the type level. Until the principled fix lands (stride lifted into the witness type, witness made non-transferable across threads), pin `row_stride` to one binding per kernel and pass that binding everywhere. `DisjointSlice<T>` accepts only `ThreadIndex` for mutable access, preventing data races by construction (subject to the `index_2d` caveat above).
 
 ```rust
 #[kernel]

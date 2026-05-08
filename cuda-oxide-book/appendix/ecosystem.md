@@ -9,14 +9,15 @@ relate to one another.
 
 ## Where cuda-oxide fits
 
-| Project          | Approach                  | Target           | Scope                                   |
-|:-----------------|:--------------------------|:-----------------|:----------------------------------------|
-| **cuda-oxide**   | `rustc` codegen backend   | NVIDIA PTX/SASS  | CUDA programming model in safe Rust     |
-| **Rust-GPU**     | `rustc` → SPIR-V          | Vulkan/Metal/DX  | Graphics shaders and compute via SPIR-V |
-| **rust-cuda**    | `rustc` → NVVM IR         | NVIDIA PTX       | Rust language model on NVIDIA GPUs      |
-| **std::offload** | `rustc` + LLVM offload    | NVIDIA/AMD/Intel | Implicit offload of CPU code            |
-| **cudarc**       | Safe CUDA driver bindings | NVIDIA           | Host-side bindings to the CUDA driver   |
-| **wgpu**         | WebGPU API + WGSL/Naga    | Cross-platform   | Portable compute via shader languages   |
+| Project          | Approach                          | Target              | Scope                                          |
+|:-----------------|:----------------------------------|:--------------------|:-----------------------------------------------|
+| **cuda-oxide**   | `rustc` codegen backend           | NVIDIA PTX/SASS     | CUDA programming model in safe Rust            |
+| **Rust-GPU**     | `rustc` → SPIR-V                  | Vulkan/Metal/DX     | Graphics shaders and compute via SPIR-V        |
+| **rust-cuda**    | `rustc` → NVVM IR                 | NVIDIA PTX          | Rust language model on NVIDIA GPUs             |
+| **CubeCL**       | Embedded DSL + JIT runtime        | CUDA/ROCm/WGPU      | Cross-vendor compute kernels from a Rust DSL   |
+| **std::offload** | `rustc` + LLVM offload            | NVIDIA/AMD/Intel    | Implicit offload of CPU code                   |
+| **cudarc**       | Safe CUDA driver bindings         | NVIDIA              | Host-side bindings to the CUDA driver          |
+| **wgpu**         | WebGPU API + WGSL/Naga            | Cross-platform      | Portable compute via shader languages          |
 
 The "Scope" column captures the **design center** each project optimizes for,
 not a feature ceiling. Several of these projects overlap at the edges, and a
@@ -49,6 +50,21 @@ projects mature, and we expect to keep doing so.
   reaches Vulkan, Metal, and DirectX. Compute shaders are supported, but
   the design center is graphics; if you need cross-vendor portability or
   shader interop, Rust-GPU is the right tool.
+- **CubeCL** is an embedded DSL: you annotate a Rust function with
+  `#[cube]`, and a CubeCL runtime JIT-compiles it to CUDA, ROCm/HIP, or
+  WGSL on demand. It is not a `rustc` backend — the `#[cube]` proc-macro
+  rewrites the function body into a CubeCL IR that the runtime then
+  lowers to whichever backend the host GPU exposes. The design center is
+  *cross-vendor portability* (a single kernel runs on NVIDIA, AMD, and
+  WGPU), not full Rust language coverage; in exchange CubeCL gives up
+  the ability to use arbitrary Rust constructs inside a kernel and works
+  with a deliberately restricted DSL surface. CubeCL is the compute
+  backend behind the [Burn](https://github.com/tracel-ai/burn) ML
+  framework, which is its main showcase application. cuda-oxide and
+  CubeCL are largely complementary: CubeCL when you need one kernel to
+  run across GPU vendors via a controlled DSL; cuda-oxide when you need
+  to write idiomatic safe Rust against the full CUDA programming model
+  on NVIDIA hardware.
 - **std::offload** is a Rust language feature (currently nightly) that uses
   LLVM's offload runtime to move CPU loops to accelerators implicitly.
   Different programming model: the user writes CPU-style code and the

@@ -4,8 +4,9 @@ This appendix presents the cuda-oxide feature matrix: every compiler capability,
 runtime API, and hardware feature along with its current support status. The
 data is drawn from the compiler/runtime sources and the test suite.
 
-**Legend:** **Full** = tested and working, **Planned** = on the roadmap,
-**N/A** = not applicable or no identified need.
+**Legend:** **Full** = tested and working, **Partial** = ships and works but
+has a known gap (called out in the row description), **Planned** = on the
+roadmap, **N/A** = not applicable or no identified need.
 
 ---
 
@@ -115,7 +116,7 @@ data is drawn from the compiler/runtime sources and the test suite.
 
 | Feature | Status | Description |
 |:--------|:-------|:------------|
-| Thread/Block/Grid Intrinsics | **Full** | `threadIdx`, `blockIdx`, `blockDim`, `index_1d()`, `index_2d(row_stride)` (returns `Option<ThreadIndex>`). Lowered to NVVM sreg reads. |
+| Thread/Block/Grid Intrinsics | **Partial** | `threadIdx`, `blockIdx`, `blockDim`, `index_1d()` are sound. `index_2d(row_stride)` returns `Option<ThreadIndex>` but is **currently unsound** -- it does not enforce kernel-wide stride consistency. Pass the same `row_stride` value at every call site until the principled fix lands. See [The Safety Model](../gpu-safety/the-safety-model.md#index-2d-stride-is-currently-unsound). |
 | Block Synchronization | **Full** | `sync_threads()` — thread block barrier. |
 | Async Barriers (mbarrier) | **Full** | Hardware async barriers for Hopper+: init, arrive, test_wait, try_wait, inval. |
 | Cluster Synchronization | **Full** | `cluster_sync()` for all blocks in a cluster. sm_90+. |

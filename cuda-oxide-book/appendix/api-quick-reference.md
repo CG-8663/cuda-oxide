@@ -67,18 +67,27 @@ let bid_x = thread::blockIdx_x();       // u32
 let bdim_x = thread::blockDim_x();      // u32
 ```
 
-| Function                       | Returns               | Description                    |
-|:-------------------------------|:----------------------|:-------------------------------|
-| `thread::index_1d()`           | `ThreadIndex`         | Unique linear index (1D grids) |
-| `thread::index_2d(row_stride)` | `Option<ThreadIndex>` | Unique linear index (2D grids) |
-| `thread::index_2d_row()`       | `usize`               | 2D row index                   |
-| `thread::index_2d_col()`       | `usize`               | 2D column index                |
-| `thread::threadIdx_{x,y}()`    | `u32`                 | Thread index within block      |
-| `thread::blockIdx_{x,y}()`     | `u32`                 | Block index within grid        |
-| `thread::blockDim_{x,y}()`     | `u32`                 | Block dimensions               |
+| Function                       | Returns               | Description                                       |
+|:-------------------------------|:----------------------|:--------------------------------------------------|
+| `thread::index_1d()`           | `ThreadIndex`         | Unique linear index (1D grids)                    |
+| `thread::index_2d(row_stride)` | `Option<ThreadIndex>` | Linear index (2D grids) -- **unsound**, see below |
+| `thread::index_2d_row()`       | `usize`               | 2D row index                                      |
+| `thread::index_2d_col()`       | `usize`               | 2D column index                                   |
+| `thread::threadIdx_{x,y}()`    | `u32`                 | Thread index within block                         |
+| `thread::blockIdx_{x,y}()`     | `u32`                 | Block index within grid                           |
+| `thread::blockDim_{x,y}()`     | `u32`                 | Block dimensions                                  |
 
 `thread::index_2d` returns `None` when the computed column exceeds
 `row_stride` — use it to skip the right-edge tail in non-aligned 2D kernels.
+
+:::{warning}
+`index_2d(row_stride)` is **currently unsound**: it does not enforce
+that every thread in the kernel passes the same `row_stride`, so two
+threads can mint colliding `ThreadIndex` values. Until the principled
+fix lands, bind the stride to a single `let` and pass that binding to
+every `index_2d` call in the kernel. Full discussion in
+[The Safety Model](../gpu-safety/the-safety-model.md#index-2d-stride-is-currently-unsound).
+:::
 
 ---
 

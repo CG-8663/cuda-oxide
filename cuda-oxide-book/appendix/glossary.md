@@ -145,11 +145,15 @@ sm_100+) uses single-thread issue with dedicated Tensor Memory (TMEM).
 ## `ThreadIndex`
 
 An opaque newtype that can only be constructed by `thread::index_1d()` or
-`thread::index_2d(row_stride)`. `index_1d` always returns a `ThreadIndex`;
-`index_2d` returns `Option<ThreadIndex>`, yielding `None` when the thread's
-column index exceeds the stride — enforcing the uniqueness invariant.
-Guarantees that each thread holds a unique value, enabling `DisjointSlice`
-to enforce data-race freedom at the type level.
+`thread::index_2d(row_stride)`. `index_1d` always returns a `ThreadIndex`
+and is unconditionally unique per thread (`threadIdx.x < blockDim.x` is
+hardware-enforced). `index_2d` returns `Option<ThreadIndex>` -- the
+`Some` branch is unique only **within a single, fixed `row_stride`**.
+Mixing strides inside a kernel can mint colliding `ThreadIndex` values
+in safe code; until the principled fix lands, pin `row_stride` to one
+value per kernel. See
+[The Safety Model](../gpu-safety/the-safety-model.md#index-2d-stride-is-currently-unsound)
+for the full discussion.
 
 ## TMA (Tensor Memory Accelerator)
 

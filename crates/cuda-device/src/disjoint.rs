@@ -12,14 +12,18 @@
 //!
 //! Safety is enforced through the type system and bounds checking:
 //!
-//! 1. **ThreadIndex**: Can only be constructed by `index_1d` / `index_2d`, which
-//!    derive the index from hardware built-in variables (`threadIdx`, `blockIdx`,
-//!    `blockDim`) -- read-only special registers assigned by the runtime at kernel
-//!    launch. The formula combines these into a unique scalar index per thread.
-//!    `index_2d` returns `Option<ThreadIndex>`, enforcing `col < stride`.
+//! 1. **ThreadIndex**: Can only be constructed by `index_1d` / `index_2d`,
+//!    which derive the index from hardware built-in variables (`threadIdx`,
+//!    `blockIdx`, `blockDim`) -- read-only special registers assigned by
+//!    the runtime at kernel launch. The formula combines these into a
+//!    scalar index per thread. **Caveat:** `index_2d` is sound only when
+//!    every call in the kernel passes the same `row_stride`; mixing
+//!    strides can mint colliding `ThreadIndex` values. See the docs on
+//!    `thread::index_2d` for the full story and the planned fix.
 //!
 //! 2. **`get_mut()`**: Bounds-checked access via `ThreadIndex`. Returns
-//!    `Option<&mut T>` — `None` for out-of-bounds threads. Sound by default.
+//!    `Option<&mut T>` — `None` for out-of-bounds threads. Sound by
+//!    default, modulo the `index_2d` caveat above.
 //!
 //! 3. **`get_unchecked_mut()`**: Unsafe escape hatch for performance-critical
 //!    paths where bounds have been validated by other means.
@@ -35,15 +39,17 @@ use core::marker::PhantomData;
 /// # Safety Invariants
 ///
 /// The type system enforces these invariants:
-/// 1. Default access via `get_mut(ThreadIndex)` is bounds-checked and sound
-/// 2. `ThreadIndex` can only be created by `index_1d` / `index_2d`, which derive
-///    the index from hardware built-in variables -- read-only special registers
-///    assigned by the runtime at launch
-/// 3. Each thread's `ThreadIndex` is unique (the hardware guarantees distinct
-///    coordinates per thread; the formula preserves that uniqueness)
+/// 1. Default access via `get_mut(ThreadIndex)` is bounds-checked and sound.
+/// 2. `ThreadIndex` can only be created by `index_1d` / `index_2d`, which
+///    derive the index from hardware built-in variables -- read-only
+///    special registers assigned by the runtime at launch.
+/// 3. Each thread's `ThreadIndex` is unique. For `index_1d` this is
+///    unconditional; for `index_2d(row_stride)` it holds only within a
+///    single, fixed `row_stride` -- a known soundness gap, see
+///    `thread::index_2d`.
 ///
-/// These guarantees ensure that each thread accesses a unique element,
-/// making parallel writes safe without synchronization.
+/// Subject to the `index_2d` caveat in (3), each thread accesses a
+/// unique element, making parallel writes safe without synchronization.
 ///
 /// # Memory Layout
 ///
@@ -140,16 +146,21 @@ impl<'a, T> DisjointSlice<'a, T> {
     ///
     /// 1. **Bounds checked**: Returns `None` for out-of-bounds indices.
     ///
-    /// 2. **Unique access**: `ThreadIndex` can only be constructed by `index_1d()`
-    ///    or `index_2d()`, which derive the index from hardware built-in variables
-    ///    (`threadIdx`, `blockIdx`, `blockDim`) -- read-only special registers
-    ///    assigned by the runtime at kernel launch. The formula combines these
-    ///    into a single scalar index while preserving the per-thread uniqueness
-    ///    that the hardware guarantees.
+    /// 2. **Unique access (with one current caveat)**: `ThreadIndex` can
+    ///    only be constructed by `index_1d()` or `index_2d()`, which
+    ///    derive the index from hardware built-in variables (`threadIdx`,
+    ///    `blockIdx`, `blockDim`) -- read-only special registers assigned
+    ///    by the runtime at kernel launch. `index_1d` produces unique
+    ///    values unconditionally. `index_2d(row_stride)` is unique only
+    ///    *within a single, fixed `row_stride`* -- mixing strides inside
+    ///    one kernel can yield colliding `ThreadIndex` values today (see
+    ///    `thread::index_2d` for details). Until the principled fix
+    ///    lands, callers using `index_2d` must pin `row_stride` to one
+    ///    binding per kernel.
     ///
-    /// 3. **No data races**: Since each thread has a unique `ThreadIndex`, and
-    ///    threads cannot share `ThreadIndex` values, each thread accesses a
-    ///    different memory location.
+    /// 3. **No data races**: Given the constraint above, each thread's
+    ///    `ThreadIndex` is unique, and threads cannot share `ThreadIndex`
+    ///    values, so each thread accesses a different memory location.
     ///
     /// # Example
     ///

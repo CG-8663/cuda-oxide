@@ -96,7 +96,7 @@ pub struct Context {
     regions: SlotMap<Ptr<Region>, Region>,
     dialects: HashMap<DialectName, Dialect>,
     type_store: TypeStore,     // uniqued (deduplicated) types
-    attr_store: AttrStore,     // uniqued attributes
+    // Attributes are not stored centrally -- see "Types and attributes" below.
 }
 ```
 
@@ -168,10 +168,33 @@ pub struct MirEnumType {
 **Attributes** attach compile-time metadata to operations -- constant values,
 flags, predicate kinds, cast kinds, and so on.
 
-Both types and attributes are **uniqued** (deduplicated) in the Context. If you
-create two `MirTupleType { types: vec![i32, f32] }` instances, pliron stores
-only one copy and hands back the same pointer. This makes type equality a pointer
-comparison instead of a deep structural compare.
+Types and attributes are stored differently:
+
+- **Types are uniqued** (deduplicated). If you create two
+  `MirTupleType { types: vec![i32, f32] }` instances, pliron stores only
+  one copy and hands back the same pointer. Type equality becomes a
+  pointer comparison instead of a deep structural compare.
+- **Attributes are not uniqued by default.** Each operation carries its
+  own attribute values inline. This matches how MLIR's "properties" work
+  -- MLIR originally uniqued attributes too, found that mutation and
+  per-op state were awkward, and introduced properties as the unstored,
+  per-op alternative. Pliron skipped that detour and started with the
+  property-shaped design.
+
+If you do want to dedup an attribute (for example, a 4 KB constant lookup
+table that many ops reference), opt into uniquing per-attribute via the
+`uniqued_any` utility. The pattern is to wrap the heavy payload in a
+`UniquedKey<T>` and store the key inside the attribute:
+
+```rust
+struct SomeData { /* large or expensive-to-compare payload */ }
+
+#[pliron_attr(name = "...", dialect = "...")]
+pub struct SomeDataAttr(pub UniquedKey<SomeData>);
+```
+
+Now `SomeDataAttr` is a small handle that compares by key; the underlying
+`SomeData` lives once in the uniquing table.
 
 ### Ptr\<T\> -- safe arena references
 
@@ -248,52 +271,77 @@ with arena indices and `HashSet<UseNode>`. Same semantics, fewer late-night
 debugging sessions.
 ```
 
-## Dynamic type casting
+## Op interfaces
 
-Pliron stores operations as `dyn Any` internally. This is necessary because each
-dialect defines its own operation types -- the framework cannot know at compile
-time what types will exist.
+Most things you want to do across an entire IR -- verify it, print it,
+lower it to another dialect -- naturally express as "every op that
+implements interface `X` knows how to do `X`". Pliron makes that pattern
+first-class through **op interfaces**: small Rust traits, marked with
+`#[op_interface]`, that any op (or type, or attribute) can implement.
 
-Rust's `dyn Any` supports downcasting to concrete types via `downcast_ref::<T>()`.
-But there is a gap: you cannot downcast `dyn Any` to a *trait object*
-(`dyn SomeTrait`). Rust's type system simply does not support that -- there is
-no way to go from `TypeId` to a vtable pointer without compiler support.
-
-Pliron solves this with a registration-based casting system:
+You define an interface like a normal Rust trait, with the `#[op_interface]`
+attribute on top:
 
 ```rust
-// At dialect registration time, register the cast:
-type_to_trait!(MirFuncOp, dyn Verify);
-type_to_trait!(MirFuncOp, dyn SymbolOpInterface);
+use pliron::derive::op_interface;
 
-// At runtime, look up the cast:
-let verifiable: &dyn Verify = any_to_trait::<dyn Verify>(&*op)?;
-verifiable.verify(ctx)?;
+#[op_interface]
+pub trait MirToLlvmConversion {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()>;
+}
 ```
 
-Behind the scenes, a global map (`TRAIT_CASTERS_MAP`) stores pairs of
-`(TypeId, TraitId) -> fn(&dyn Any) -> &dyn Trait`. The `type_to_trait!` macro
-inserts an entry; `any_to_trait()` performs the lookup.
+Each op implements the interface with `#[op_interface_impl]`:
 
-This powers pliron's verification and interface system. When you run
-`verify_op(ctx, op_ptr)`, pliron:
+```rust
+use pliron::derive::op_interface_impl;
 
-1. Reads the operation's concrete `TypeId`.
-2. Looks up whether it implements `dyn Verify`.
-3. If so, calls `verify()` through the retrieved trait object.
+#[op_interface_impl]
+impl MirToLlvmConversion for MirAddOp {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        // ...lower MirAddOp into one or more dialect-llvm ops...
+    }
+}
+```
 
-The alternative would be making the entire framework generic over all possible
-operation types, which would either require an enum with hundreds of variants or
-propagate type parameters through every function signature in the codebase. The
-dynamic casting approach keeps the framework extensible without generics
-pollution -- adding a new dialect is just adding a new crate, not modifying a
-central enum.
+The framework then dispatches against the interface, not against a
+specific concrete op type. A pass that lowers MIR to LLVM looks
+roughly like:
+
+```rust
+// Inside DialectConversion::rewrite, for each op encountered:
+if let Some(converter) = op_cast::<dyn MirToLlvmConversion>(op) {
+    converter.convert(ctx, rewriter, operands_info)?;
+}
+```
+
+If you add a new MIR op tomorrow and write its `#[op_interface_impl]`,
+the lowering pass picks it up automatically -- no central match
+statement to update, no enum to grow. The same pattern is used for
+verification (`#[op_interface] trait Verify`), printing, and any other
+cross-cutting behavior.
+
+The same `#[op_interface]` / `#[op_interface_impl]` mechanism applies to
+types and attributes too: a type can implement `dyn MemorySemantics`, a
+constant attribute can implement `dyn TypedAttr`, and so on.
 
 ```{note}
-This is a runtime cost (one `HashMap` lookup per cast), but it only happens
-during verification and pass dispatch -- not in the hot path of IR construction.
-The ergonomic benefit of fully decoupled dialects is well worth one hash lookup
-per operation.
+Under the hood, `op_cast` is a small runtime lookup (one hash table
+probe) that maps the op's concrete type to the interface implementation
+the macros registered. It only fires during pass dispatch, not in the
+hot path of IR construction. The benefit is that adding a dialect is
+adding a crate -- never modifying a central enum or generics-tangled
+function signature.
 ```
 
 ## How cuda-oxide uses pliron

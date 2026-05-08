@@ -86,76 +86,86 @@ guarantees the indices are disjoint. The type system ties the two together.
 `ThreadIndex` is only as trustworthy as the functions that create it. Here
 are the constructors cuda-oxide provides:
 
-| Function           | Formula                                 | Return Type          | Uniqueness Guarantee                                                        |
-|:-------------------|:----------------------------------------|:---------------------|:----------------------------------------------------------------------------|
-| `index_1d()`       | `blockIdx.x * blockDim.x + threadIdx.x` | `ThreadIndex`        | Unconditional -- `threadIdx.x < blockDim.x` is hardware-enforced            |
-| `index_2d(stride)` | `row * stride + col`                    | `Option<ThreadIndex>`| Unconditional -- returns `None` when `col >= stride`, enforcing injectivity |
-| `index_2d_row()`   | `blockIdx.y * blockDim.y + threadIdx.y` | `usize`              | Component accessor, not a `ThreadIndex` constructor                         |
-| `index_2d_col()`   | `blockIdx.x * blockDim.x + threadIdx.x` | `usize`              | Component accessor, not a `ThreadIndex` constructor                         |
+| Function           | Formula                                 | Return Type           | Uniqueness Guarantee                                             |
+|:-------------------|:----------------------------------------|:----------------------|:-----------------------------------------------------------------|
+| `index_1d()`       | `blockIdx.x * blockDim.x + threadIdx.x` | `ThreadIndex`         | Unconditional -- `threadIdx.x < blockDim.x` is hardware-enforced |
+| `index_2d(stride)` | `row * stride + col`                    | `Option<ThreadIndex>` | **Conditional and currently unsound** -- see the next section    |
+| `index_2d_row()`   | `blockIdx.y * blockDim.y + threadIdx.y` | `usize`               | Component accessor, not a `ThreadIndex` constructor              |
+| `index_2d_col()`   | `blockIdx.x * blockDim.x + threadIdx.x` | `usize`               | Component accessor, not a `ThreadIndex` constructor              |
 
 Notice that `index_2d_row()` and `index_2d_col()` return plain `usize` --
 they give you the row and column for arithmetic, but they cannot be used to
 index into a `DisjointSlice`. Only the linearized result, after a uniqueness
 check, earns the `ThreadIndex` type.
 
-### Why `index_2d` returns `Option`
+<a id="index-2d-stride-is-currently-unsound"></a>
 
-This one deserves a closer look, because it is the subtlest part of the
-safety model.
+### `index_2d(stride)` is currently unsound
 
-The formula `row * stride + col` is only *injective* (one-to-one)
-when `col < stride`. In a 2D grid, `col` is derived from `blockIdx.x`
-and `threadIdx.x` -- it can exceed the matrix column count when the grid
-dimensions overshoot (which they almost always do, since block dimensions
-must be multiples of the warp size). If the function returned a bare
-`ThreadIndex` for those threads, two distinct threads could compute the
-same linear index. That would mean two `&mut T` references to the same
-element. That is undefined behavior.
+:::{warning}
+**`index_2d(stride)` does not actually guarantee a unique `ThreadIndex`
+per thread today.** The signature suggests it does; the implementation
+does not enforce it. This is a known gap in the 0.x release. The function
+remains *safe* (no `unsafe fn` migration) for the moment because the
+principled fix is being prototyped on a branch and we want to land a
+single coherent API change rather than churn the surface twice.
+:::
 
-`index_2d` eliminates this by checking `col < row_stride` internally:
+The formula `row * stride + col` is only *injective* (one-to-one) within a
+single, fixed `stride`. The `col < row_stride` check inside `index_2d`
+keeps a single call to `index_2d(N)` from colliding *with itself*. What it
+does **not** check is that every thread in the kernel passed the **same**
+`row_stride`.
+
+Concretely, this safe-Rust kernel races today:
 
 ```rust
-pub fn index_2d(row_stride: usize) -> Option<ThreadIndex> {
-    let row = (blockIdx_y() * blockDim_y() + threadIdx_y()) as usize;
-    let col = (blockIdx_x() * blockDim_x() + threadIdx_x()) as usize;
-    if col < row_stride {
-        Some(ThreadIndex(row * row_stride + col))
-    } else {
-        None
+#[kernel]
+pub fn racy(mut out: DisjointSlice<u32>) {
+    // Half the threads use stride = 100, the other half use stride = 200.
+    let stride = if thread::threadIdx_x() < thread::blockDim_x() / 2 { 100 } else { 200 };
+    if let Some(idx) = thread::index_2d(stride) {
+        if let Some(slot) = out.get_mut(idx) {
+            *slot = 1;
+        }
     }
 }
 ```
 
-Threads that fail the check get `None`. They simply do not participate in
-the write -- no aliasing, no race. Even if you pass a "wrong" stride
-(say, `index_2d(1)`), the worst that happens is that most threads get
-`None` and only the `col == 0` threads write. You get fewer writers than
-you intended, but never undefined behavior.
+A thread at `(row=1, col=0)` with `stride=200` and a thread at
+`(row=2, col=0)` with `stride=100` both compute the linear index `200`,
+both pass `get_mut`, both get `&mut out[200]`. Two `&mut T` to the same
+slot. Undefined behavior, no `unsafe` anywhere in sight.
 
-:::{tip}
-The informal proof: suppose two threads with `(row_a, col_a)` and
-`(row_b, col_b)`, both satisfying `col < stride`, produce the same index:
+The problem is structural: stride is a runtime parameter that the type
+system cannot tie to the produced `ThreadIndex`, so `DisjointSlice` has no
+way to refuse a `ThreadIndex` minted with the "wrong" stride. The
+principled fix is to lift stride into a type parameter
+(`index_2d::<S>() -> ThreadIndex<S>`,
+`DisjointSlice<T, S>::get_mut(ThreadIndex<S>)`), so mixing strides becomes
+a compile error rather than a silent race. That fix also exposes a second
+issue -- the witness needs to be **non-transferable** between threads
+(`!Send` + a kernel-scoped lifetime) so it cannot be laundered through
+shared memory -- which is why we want to land both pieces together.
 
-```text
-row_a * stride + col_a == row_b * stride + col_b
-=> (row_a - row_b) * stride == col_b - col_a
-```
-
-The right side is in `(-stride, stride)` because both cols are in
-`[0, stride)`. The left side is a multiple of `stride`. The only value in
-both sets is zero -- so `row_a == row_b` and `col_a == col_b`. But distinct
-hardware threads have distinct `(row, col)` pairs.
-:::
+Until that lands, treat `index_2d` the way you would an `unsafe fn` in
+your own head: pick one stride per kernel, pass the same value at every
+call site, and document it. If you use `index_2d(N)` more than once
+inside the same kernel, factor `N` into a `let` binding so future-you
+cannot accidentally pass two different values.
 
 ### The GEMM pattern
 
-For 2D kernels, the typical pattern looks like this:
+For 2D kernels, the typical pattern looks like this. Bind `n` to a single
+`let` so every `index_2d` call in the kernel uses the same stride -- this
+sidesteps the soundness gap described above:
 
 ```rust
+let n = n as usize;             // ONE binding, ONE stride value
 let row = thread::index_2d_row();
 let col = thread::index_2d_col();
 
-if let Some(c_idx) = thread::index_2d(n as usize) {
+if let Some(c_idx) = thread::index_2d(n) {
     // col < n is guaranteed by Some -- no manual check needed
     if row < m as usize {
         // ... compute dot product ...
@@ -431,7 +441,10 @@ The rules:
 
 - Use `DisjointSlice` for all mutable outputs.
 - Use `&[T]` for all read-only inputs.
-- Use `index_1d()` for 1D grids, `index_2d(stride)` for 2D grids.
+- Use `index_1d()` for 1D grids. For 2D grids, `index_2d(stride)` is
+  available but [currently unsound](#index-2d-stride-is-currently-unsound)
+  unless every call in the kernel uses the same `stride` -- pick one
+  value, bind it to a `let`, and reuse that binding.
 - Always bounds-check via `get_mut()` (returns `Option`).
 
 If your kernel compiles without `unsafe`, it is race-free by construction.
@@ -476,14 +489,19 @@ the code until the argument is obvious, or use a safe API instead.
 
 ## Summary
 
-| Property                                                  | Status                                                          |
-|:----------------------------------------------------------|:----------------------------------------------------------------|
-| Borrow checker on device code                             | Enforced (real `rustc` frontend)                                |
-| Safe parallel writes (`DisjointSlice` + `ThreadIndex`)    | Enforced for both 1D and 2D grids (`index_2d` returns `Option`) |
-| Explicit `unsafe` for shared memory, intrinsics           | Enforced (Rust language rules)                                  |
-| Convergent attribute on sync primitives                   | Enforced (IR-level `convergent` marking)                        |
-| Thread convergence for warp ops                           | NOT enforced (runtime obligation)                               |
-| Memory space awareness (shared vs global)                 | NOT enforced (future work)                                      |
+| Property                                             | Status                                   |
+|:-----------------------------------------------------|:---------------------------------------- |
+| Borrow checker on device code                        | Enforced (real `rustc` frontend)         |
+| Safe 1D parallel writes (`DisjointSlice + index_1d`) | Enforced                                 |
+| Safe 2D parallel writes (`DisjointSlice + index_2d`) | NOT enforced -- see note below           |
+| Explicit `unsafe` for shared memory, intrinsics      | Enforced (Rust language rules)           |
+| Convergent attribute on sync primitives              | Enforced (IR-level `convergent` marking) |
+| Thread convergence for warp ops                      | NOT enforced (runtime obligation)        |
+| Memory space awareness (shared vs global)            | NOT enforced (future work)               |
+
+The 2D row is not enforced because `index_2d`'s stride is not part of the
+witness type today -- mixing strides inside one kernel can mint colliding
+`ThreadIndex` values. Full discussion in [`index_2d(stride)` is currently unsound](#index-2d-stride-is-currently-unsound).
 
 The safety model is designed to make the common case safe by default while
 providing explicit escape hatches for everything else. Write your kernel,

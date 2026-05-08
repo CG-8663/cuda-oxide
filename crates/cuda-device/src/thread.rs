@@ -14,18 +14,29 @@
 //! # Safety Model
 //!
 //! The safety of parallel writes to `DisjointSlice` relies on each thread accessing
-//! a unique memory location. This is guaranteed by:
+//! a unique memory location. This is guaranteed (or, in one case, *not yet*
+//! guaranteed) as follows:
 //!
-//! 1. **ThreadIndex** can only be constructed by trusted functions (`index_1d`, `index_2d`)
-//! 2. These functions derive the index from hardware built-in variables (`threadIdx`,
-//!    `blockIdx`, `blockDim`) -- read-only special registers assigned by the runtime
-//!    at kernel launch. The formula `outer * stride + inner` combines these into a
-//!    unique scalar index per thread.
-//! 3. `index_1d`: `inner < stride` is hardware-guaranteed (`threadIdx.x < blockDim.x`)
-//! 4. `index_2d`: `inner < stride` is enforced by returning `Option<ThreadIndex>` —
-//!    threads where `col >= row_stride` get `None` and cannot access the slice
-//!
-//! See: "A Note on the Algebra of CuTe Layouts" for formal treatment of layout composition.
+//! 1. **ThreadIndex** can only be constructed by trusted functions (`index_1d`,
+//!    `index_2d`).
+//! 2. These functions derive the index from hardware built-in variables
+//!    (`threadIdx`, `blockIdx`, `blockDim`) -- read-only special registers
+//!    assigned by the runtime at kernel launch. The formula
+//!    `outer * stride + inner` combines these into a scalar index per thread.
+//! 3. `index_1d`: unique per thread, unconditionally
+//!    (`threadIdx.x < blockDim.x` is hardware-enforced).
+//! 4. `index_2d(row_stride)`: **currently unsound.** The `col < row_stride`
+//!    check inside `index_2d` only proves uniqueness *within a single, fixed
+//!    `row_stride`*. Nothing today ties the `row_stride` argument into the
+//!    `ThreadIndex` type, so two threads in the same kernel that pass
+//!    different `row_stride` values can produce colliding `ThreadIndex`
+//!    values in entirely safe code. Treat `index_2d` as if it were
+//!    `unsafe fn` until the principled fix lands: pin `row_stride` to one
+//!    binding per kernel and pass that binding to every `index_2d` call.
+//!    The fix in flight encodes stride into the witness type
+//!    (`index_2d::<S>() -> ThreadIndex<S>`) and makes the witness
+//!    non-transferable across threads; both pieces will land together to
+//!    keep the API churn to a single change.
 
 // =============================================================================
 // ThreadIndex - Type-Safe Thread-Unique Index
@@ -33,14 +44,21 @@
 
 /// A thread-unique index derived from hardware built-in variables (special registers).
 ///
-/// This type guarantees that the contained index is unique per thread, making it safe
-/// to use for parallel writes to `DisjointSlice`.
+/// `ThreadIndex` cannot be constructed directly. The intended invariant is
+/// that the contained `usize` is unique per thread, making it safe to use
+/// for parallel writes to `DisjointSlice`. That invariant holds
+/// unconditionally for `index_1d`. For `index_2d`, see the unsoundness
+/// note on that function -- the witness type does not yet carry the
+/// stride, so `index_2d`'s uniqueness is conditional on every call site
+/// in the kernel passing the same `row_stride`.
 ///
 /// # Construction
 ///
-/// `ThreadIndex` cannot be constructed directly. Use one of the trusted functions:
-/// - [`index_1d()`] - For 1D grids
-/// - [`index_2d()`] - For 2D grids (e.g., GEMM)
+/// `ThreadIndex` cannot be constructed directly. Use one of the trusted
+/// functions:
+/// - [`index_1d()`] - For 1D grids (sound)
+/// - [`index_2d()`] - For 2D grids (e.g., GEMM); **currently unsound**,
+///   see its docs
 ///
 /// # Example
 ///
@@ -129,38 +147,65 @@ pub fn index_1d() -> ThreadIndex {
 /// - `row = blockIdx.y * blockDim.y + threadIdx.y`
 /// - `col = blockIdx.x * blockDim.x + threadIdx.x`
 ///
-/// # Uniqueness Guarantee
+/// # ⚠️ Currently unsound -- read this before using
 ///
-/// The index is derived from hardware built-in variables (`threadIdx`, `blockIdx`,
-/// `blockDim`) -- read-only special registers assigned by the runtime at launch.
-/// The formula `row * stride + col` is injective (unique per thread) when
-/// `col < stride`. This function enforces that invariant by returning `None` for
-/// threads where `col >= row_stride`, so every `ThreadIndex` it produces is
-/// guaranteed unique -- no caller obligation required.
+/// Despite the `Option<ThreadIndex>` signature, this function does **not**
+/// guarantee a unique `ThreadIndex` per thread today. The internal
+/// `col < row_stride` check only proves uniqueness within a single, fixed
+/// `row_stride`. Nothing ties the `row_stride` argument into the
+/// `ThreadIndex` type, so two threads in the same kernel that pass
+/// **different** `row_stride` values can produce the same linear index
+/// and alias the same element of a `DisjointSlice` -- a data race in
+/// otherwise safe code.
 ///
-/// **Proof sketch:** Two threads with distinct `(row_a, col_a)` and `(row_b, col_b)`
-/// where both `col_a < stride` and `col_b < stride`:
+/// Concrete failure: a thread at `(row=1, col=0)` with `row_stride=200`
+/// and a thread at `(row=2, col=0)` with `row_stride=100` both compute
+/// the linear index `200`.
+///
+/// We have not migrated this to `unsafe fn` because the principled fix
+/// changes the API surface: stride moves into a type parameter
+/// (`index_2d::<S>() -> ThreadIndex<S>`), and the witness becomes
+/// non-transferable across threads (`!Send` + a kernel-scoped lifetime)
+/// so it cannot be laundered through shared memory either. Both pieces
+/// will land together. Until then, treat `index_2d` the way you would an
+/// `unsafe fn`: pin `row_stride` to one binding per kernel and pass that
+/// binding to every call site.
+///
+/// # Uniqueness Guarantee (within a single `row_stride`)
+///
+/// Conditional on every thread in the kernel passing the same
+/// `row_stride`: the formula `row * stride + col` is injective when
+/// `col < stride`. The internal check returns `None` for threads where
+/// `col >= row_stride`, so the surviving `ThreadIndex` values are unique.
+///
+/// **Proof sketch (within one stride):** Two threads with distinct
+/// `(row_a, col_a)` and `(row_b, col_b)` where both `col_a < stride` and
+/// `col_b < stride`:
 ///
 /// ```text
 ///   row_a * stride + col_a == row_b * stride + col_b
 ///   => (row_a - row_b) * stride == col_b - col_a
 /// ```
 ///
-/// Since `col_a, col_b ∈ [0, stride)`, the RHS is in `(-stride, stride)`.
-/// The LHS is a multiple of `stride`, so the only solution is `row_a == row_b`
-/// AND `col_a == col_b`. But distinct hardware threads have distinct `(row, col)`.
+/// `col_a, col_b ∈ [0, stride)`, so the RHS is in `(-stride, stride)`.
+/// The LHS is a multiple of `stride`, so the only solution is
+/// `row_a == row_b` AND `col_a == col_b`. Distinct hardware threads have
+/// distinct `(row, col)`.
 ///
 /// # Parameters
 ///
-/// - `row_stride`: The stride for row-major layout (typically the number of columns N)
+/// - `row_stride`: The stride for row-major layout (typically the number
+///   of columns `N`). Must be the same value at every call site in the
+///   kernel; see the unsoundness note above.
 ///
 /// # Example
 ///
 /// ```rust
 /// // GEMM: C[row, col] = ...
+/// let n = n as usize;            // ONE binding, ONE stride value
 /// let row = index_2d_row();
 /// let col = index_2d_col();
-/// if let Some(c_idx) = index_2d(n as usize) {
+/// if let Some(c_idx) = index_2d(n) {
 ///     // col < n is guaranteed by Some
 ///     if row < m {
 ///         if let Some(c_elem) = c.get_mut(c_idx) {
