@@ -29,12 +29,88 @@ use crate::context::CudaContext;
 use crate::error::DriverError;
 use crate::stream::CudaStream;
 
+/// Marker trait for values that can be safely copied between host and device
+/// memory as raw bytes.
+///
+/// Types implementing `DeviceCopy` must not contain Rust-owned allocations,
+/// references, or other values whose validity depends on host-side ownership or
+/// drop semantics. This is the device-memory equivalent of a plain-old-data
+/// contract.
+///
+/// # Safety
+///
+/// Implementors must be safe to duplicate with a byte-for-byte copy. Values
+/// copied back from device memory must have a bit pattern that is valid for
+/// `Self`, and the all-zero bit pattern must also be valid because
+/// [`DeviceBuffer::zeroed`] initializes memory with zero bytes.
+pub unsafe trait DeviceCopy: Copy {}
+
+macro_rules! impl_device_copy {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            unsafe impl DeviceCopy for $ty {}
+        )+
+    };
+}
+
+impl_device_copy!(
+    (),
+    i8,
+    i16,
+    i32,
+    i64,
+    i128,
+    isize,
+    u8,
+    u16,
+    u32,
+    u64,
+    u128,
+    usize,
+    f16,
+    f32,
+    f64
+);
+
+unsafe impl<T: DeviceCopy, const N: usize> DeviceCopy for [T; N] {}
+unsafe impl<T: ?Sized> DeviceCopy for *const T {}
+unsafe impl<T: ?Sized> DeviceCopy for *mut T {}
+
+macro_rules! impl_device_copy_tuple {
+    ($($name:ident),+ $(,)?) => {
+        unsafe impl<$($name: DeviceCopy),+> DeviceCopy for ($($name,)+) {}
+    };
+}
+
+impl_device_copy_tuple!(A);
+impl_device_copy_tuple!(A, B);
+impl_device_copy_tuple!(A, B, C);
+impl_device_copy_tuple!(A, B, C, D);
+impl_device_copy_tuple!(A, B, C, D, E);
+impl_device_copy_tuple!(A, B, C, D, E, F);
+impl_device_copy_tuple!(A, B, C, D, E, F, G);
+impl_device_copy_tuple!(A, B, C, D, E, F, G, H);
+
+unsafe impl DeviceCopy for half::bf16 {}
+unsafe impl DeviceCopy for half::f16 {}
+
 /// Owning handle to a contiguous device allocation of `T` elements.
 ///
 /// Holds a raw device pointer, element count, and a reference-counted
 /// context that keeps the CUDA context alive. Dropping the buffer calls
 /// `cuMemFree` (synchronous); for async-sensitive workloads, use
 /// `cuda_async::DeviceBox` which frees via a deallocator stream.
+///
+/// Device buffers may only transfer plain device-copyable values. Owning host
+/// types such as [`String`] are rejected because copying their bytes to and
+/// from device memory would not preserve Rust ownership invariants.
+///
+/// ```compile_fail
+/// # use cuda_core::{CudaStream, DeviceBuffer};
+/// # fn rejects_non_device_copy(stream: &CudaStream) {
+/// let _ = DeviceBuffer::<String>::zeroed(stream, 1);
+/// # }
+/// ```
 pub struct DeviceBuffer<T> {
     ptr: CUdeviceptr,
     len: usize,
@@ -115,7 +191,9 @@ impl<T> DeviceBuffer<T> {
         std::mem::forget(self);
         parts
     }
+}
 
+impl<T: DeviceCopy> DeviceBuffer<T> {
     /// Allocates device memory and copies `data` from the host, enqueued on
     /// `stream`.
     ///
