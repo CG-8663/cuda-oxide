@@ -346,18 +346,11 @@ function signature.
 
 ## How cuda-oxide uses pliron
 
-cuda-oxide defines three dialects, each as its own crate:
-
-```rust
-pub fn register_dialects(ctx: &mut Context) {
-    dialect_mir::register(ctx);
-    dialect_nvvm::register(ctx);
-    pliron::builtin::register(ctx);
-}
-
-// Later, when lowering to LLVM:
-dialect_llvm::register(ctx);
-```
+cuda-oxide defines three dialects, each as its own crate. The compiler
+pipeline registers them on the `Context` for you (and pliron's `builtin`
+dialect is auto-registered as of pliron 0.14), so kernel authors and
+pass authors never have to think about dialect setup -- depending on
+the crate is the only thing you do.
 
 ### dialect-mir -- Rust semantics
 
