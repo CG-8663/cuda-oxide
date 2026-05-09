@@ -39,6 +39,8 @@
 pub mod context;
 /// Owning device memory buffer with host-device transfer helpers.
 pub mod device_buffer;
+/// Embedded device artifact discovery and CUDA module loading.
+pub mod embedded;
 /// CUDA driver error types and result conversion.
 pub mod error;
 /// CUDA event management (timing, synchronization).
@@ -60,6 +62,7 @@ pub use context::CudaContext;
 /// Raw CUDA driver bindings re-exported for direct access when needed.
 pub use cuda_bindings as sys;
 pub use device_buffer::DeviceBuffer;
+pub use embedded::{EmbeddedModule, EmbeddedModuleError};
 pub use error::{DriverError, IntoResult};
 pub use event::CudaEvent;
 pub use launch::LaunchConfig;

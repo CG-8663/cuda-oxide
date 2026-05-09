@@ -20,6 +20,7 @@
 
 use crate::context::CudaContext;
 use crate::error::{DriverError, IntoResult};
+use std::borrow::Cow;
 use std::ffi::CString;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
@@ -85,6 +86,30 @@ impl CudaContext {
         }))
     }
 
+    /// Loads a CUDA module from an in-memory image.
+    ///
+    /// `image` may be PTX source bytes, a cubin, or a fatbin. PTX text is
+    /// null-terminated before it is passed to the CUDA driver; binary module
+    /// images tolerate the trailing byte because their own headers describe
+    /// their size.
+    pub fn load_module_from_image(
+        self: &Arc<Self>,
+        image: &[u8],
+    ) -> Result<Arc<CudaModule>, DriverError> {
+        self.bind_to_thread()?;
+        let image = null_terminated_image(image);
+        let cu_module = unsafe {
+            let mut cu_module = MaybeUninit::uninit();
+            cuda_bindings::cuModuleLoadData(cu_module.as_mut_ptr(), image.as_ptr() as *const _)
+                .result()?;
+            cu_module.assume_init()
+        };
+        Ok(Arc::new(CudaModule {
+            cu_module,
+            ctx: self.clone(),
+        }))
+    }
+
     /// Loads a module from a cubin or PTX file on disk.
     ///
     /// `filename` is the filesystem path. The driver selects the loader based
@@ -108,6 +133,17 @@ impl CudaContext {
             cu_module,
             ctx: self.clone(),
         }))
+    }
+}
+
+fn null_terminated_image(image: &[u8]) -> Cow<'_, [u8]> {
+    if image.last() == Some(&0) {
+        Cow::Borrowed(image)
+    } else {
+        let mut owned = Vec::with_capacity(image.len() + 1);
+        owned.extend_from_slice(image);
+        owned.push(0);
+        Cow::Owned(owned)
     }
 }
 
