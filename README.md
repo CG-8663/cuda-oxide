@@ -176,6 +176,25 @@ sudo apt install clang-21   # or libclang-common-21-dev
 `cargo oxide doctor` catches this up front; the symptom otherwise is a cryptic
 `'stddef.h' file not found` during the host build.
 
+#### Docker
+
+A development image is available in [`docker/`](docker/). It uses Ubuntu 24.04,
+CUDA Toolkit 13.0, LLVM 21, Clang 21, and the pinned Rust nightly. This is useful
+when you want a reproducible environment matching the documented setup.
+
+```bash
+docker build -f docker/Dockerfile -t cuda-oxide-dev .
+docker run --rm -it --gpus all -v "$PWD":/workspace/cuda-oxide \
+  -w /workspace/cuda-oxide cuda-oxide-dev
+```
+
+Inside the container, run:
+
+```bash
+cargo oxide doctor
+cargo oxide run vecadd
+```
+
 ### Verifying Installation
 
 ```bash
