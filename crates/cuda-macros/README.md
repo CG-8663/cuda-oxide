@@ -1,6 +1,9 @@
 # cuda-macros
 
-Procedural macros for writing CUDA kernels in Rust. Provides `#[kernel]`, `#[device]`, `#[launch_bounds]`, `#[cluster_launch]`, `gpu_printf!`, `cuda_launch!`, and `cuda_launch_async!` -- the primary user-facing compilation and launch API for cuda-oxide.
+Procedural macros for writing CUDA kernels in Rust. Provides `#[cuda_module]`
+for typed embedded-module loading, `#[kernel]` for GPU entry points,
+`#[device]`, `#[launch_bounds]`, `#[cluster_launch]`, `gpu_printf!`, and the
+lower-level `cuda_launch!` / `cuda_launch_async!` migration macros.
 
 ## Attributes
 
@@ -34,7 +37,7 @@ pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
 // Mode 1: call-site instantiation (PTX name from type_name)
 #[kernel]
 pub fn scale<T: Copy + Mul<Output = T>>(factor: T, input: &[T], mut out: DisjointSlice<T>) { ... }
-// Launch: cuda_launch! { kernel: scale::<f32>, ... }
+// Launch: module.scale::<f32>(&stream, config, factor, &input, &mut out)?
 
 // Mode 2: explicit instantiation list
 #[kernel(f32, i32)]
@@ -63,7 +66,7 @@ extern "C" {
 |----------------------|----------------------|----------------------|
 | Entry point          | Yes (PTX `.entry`)   | No (PTX `.func`)     |
 | Can return values    | No (must be `()`)    | Yes                  |
-| Callable from host   | Via `cuda_launch!`   | No                   |
+| Callable from host   | Via `#[cuda_module]` | No                   |
 | Callable from device | Yes                  | Yes                  |
 
 ### `#[launch_bounds(max_threads, min_blocks)]`
@@ -92,7 +95,43 @@ pub fn cluster_kernel(out: DisjointSlice<u32>) { ... }
 
 Semantic markers for the codegen backend (pass-through -- no code transformation).
 
-## `cuda_launch!` -- Synchronous Kernel Launch
+## `#[cuda_module]` -- Typed Embedded Module Loading
+
+Wrap an inline module containing `#[kernel]` functions to generate a typed
+loader and per-kernel launch methods:
+
+```rust
+#[cuda_module]
+mod kernels {
+    use super::*;
+
+    #[kernel]
+    pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) { ... }
+}
+
+let module = kernels::load(&ctx)?;
+module.vecadd(&stream, LaunchConfig::for_num_elems(N as u32), &a_dev, &b_dev, &mut c_dev)?;
+```
+
+When `cuda-host` is built with its `async` feature, async code can load the
+same embedded module from a `cuda-async` device context:
+
+```rust
+let module = kernels::load_async(0)?;
+module.vecadd_async(LaunchConfig::for_num_elems(N as u32), &a_dev, &b_dev, &mut c_dev)?.sync()?;
+```
+
+Borrowed async methods return `AsyncKernelLaunch<'_>` and tie the lazy operation
+to referenced buffers and borrowed scalar arguments. Owned async methods take
+device buffers by value and return them after completion:
+
+```rust
+let (a_dev, b_dev, c_dev) = module
+    .vecadd_async_owned(LaunchConfig::for_num_elems(N as u32), a_dev, b_dev, c_dev)?
+    .await?;
+```
+
+## `cuda_launch!` -- Lower-Level Synchronous Kernel Launch
 
 ```rust
 cuda_launch! {
@@ -125,7 +164,7 @@ cuda_launch! {
 
 For generics, the macro forces monomorphization with a volatile pointer trick so the kernel appears in the codegen unit even without a host-side call.
 
-## `cuda_launch_async!` -- Async Kernel Launch
+## `cuda_launch_async!` -- Lower-Level Async Kernel Launch
 
 Returns an `AsyncKernelLaunch` implementing `DeviceOperation` for `cuda-async` scheduling. Same argument forms as `cuda_launch!` but no `stream:` or `cluster_dim:` fields.
 

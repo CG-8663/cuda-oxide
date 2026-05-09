@@ -7,7 +7,7 @@ Async execution layer for CUDA device operations, built on top of `cuda-core`.
 The crate is organized around a single idea: GPU work is described lazily, scheduled late, and composed freely before any hardware instruction is issued.
 
 ```text
-  cuda_launch_async! { ... }
+  module.kernel_async(...)
          |
          v
   AsyncKernelLaunch          <-- lazy description, no GPU work yet
@@ -56,25 +56,46 @@ Thread-local per-device state: CUDA context, scheduling policy, deallocator stre
 
 ## Usage
 
+Borrow buffers when the launch completes in the current scope:
+
 ```rust
 use cuda_async::device_context::init_device_contexts;
 use cuda_async::device_operation::DeviceOperation;
-use cuda_host::cuda_launch_async;
+use cuda_host::cuda_module;
 use cuda_core::LaunchConfig;
 
-// 1. Initialize (once per thread)
+// 1. Enable cuda-host's "async" feature, then initialize once per thread.
 init_device_contexts(0, 1)?;
-let module = cuda_async::device_context::load_module_from_file("kernel.ptx", 0)?;
+let module = kernels::load_async(0)?;
 
 // 2. Build a lazy operation
-let op = cuda_launch_async! {
-    kernel: vecadd,
-    module: module,
-    config: LaunchConfig::for_num_elems(1024),
-    args: [slice(a_dev), slice(b_dev), slice_mut(c_dev)]
-};
+let op = module.vecadd_async(
+    LaunchConfig::for_num_elems(1024),
+    &a_dev,
+    &b_dev,
+    &mut c_dev,
+)?;
 
 // 3. Execute
 op.sync()?;       // blocking
 // or: op.await?  // async
 ```
+
+Move buffers into the launch when it needs to be spawned or stored as a
+`'static` future:
+
+```rust
+use std::future::IntoFuture;
+
+let op = module.vecadd_async_owned(
+    LaunchConfig::for_num_elems(1024),
+    a_dev,
+    b_dev,
+    c_dev,
+)?;
+
+let (a_dev, b_dev, c_dev) = tokio::spawn(op.into_future()).await??;
+```
+
+The owned form keeps device buffers alive until the CUDA stream reaches the
+kernel completion callback, then returns those buffers as the operation output.

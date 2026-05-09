@@ -149,7 +149,7 @@ One helper hides three different on-disk shapes the build can leave behind:
 
 So you keep one line in your `main` regardless of whether you write pure arithmetic or call into device math. The loader needs the CUDA Toolkit on the host; `cargo oxide doctor` checks that up front.
 
-The async equivalent is `cuda_async::device_context::load_kernel_module_async("my_first_kernel", 0)` -- same fall-through, just routed through the per-device async context map.
+The async equivalent is `cuda_host::load_kernel_module_async("my_first_kernel", 0)` -- same fall-through, just routed through the per-device async context map.
 
 ### `cuda_launch!`
 
@@ -210,8 +210,8 @@ Here's the generated async vecadd template (with minor formatting edits for read
 
 ```rust
 use cuda_device::{kernel, thread, DisjointSlice};
-use cuda_host::cuda_launch_async;
-use cuda_async::device_context::{init_device_contexts, load_kernel_module_async};
+use cuda_host::{cuda_launch_async, load_kernel_module_async};
+use cuda_async::device_context::init_device_contexts;
 use cuda_async::device_operation::DeviceOperation;
 use cuda_core::LaunchConfig;
 

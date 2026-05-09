@@ -978,7 +978,7 @@ edition = "2024"
 
 [dependencies]
 cuda-device = {{ git = "{GIT_REPO}" }}
-cuda-host = {{ git = "{GIT_REPO}" }}
+cuda-host = {{ git = "{GIT_REPO}", features = ["async"] }}
 cuda-core = {{ git = "{GIT_REPO}" }}
 cuda-async = {{ git = "{GIT_REPO}" }}
 cuda-bindings = {{ git = "{GIT_REPO}" }}
@@ -1005,8 +1005,8 @@ cuda-core = {{ git = "{GIT_REPO}" }}
     let main_rs = if async_mode {
         format!(
             r#"use cuda_device::{{kernel, thread, DisjointSlice}};
-use cuda_host::cuda_launch_async;
-use cuda_async::device_context::{{init_device_contexts, load_kernel_module_async}};
+use cuda_host::{{cuda_launch_async, load_kernel_module_async}};
+use cuda_async::device_context::init_device_contexts;
 use cuda_async::device_operation::DeviceOperation;
 use cuda_core::LaunchConfig;
 
