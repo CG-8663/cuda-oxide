@@ -1,4 +1,5 @@
 target/
+.smoketest-logs/
 *.ptx
 *.ltoir
 .ltoir_arch
