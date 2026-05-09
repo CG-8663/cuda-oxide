@@ -11,6 +11,7 @@ members = [
     "crates/mir-importer",
     "crates/mir-lower",
     "crates/cargo-oxide",
+    "crates/oxide-artifacts",
     # FFI bindings
     "crates/cuda-bindings",
     "crates/cuda-core",
@@ -55,6 +56,7 @@ libnvvm-sys = { path = "crates/libnvvm-sys" }
 nvjitlink-sys = { path = "crates/nvjitlink-sys" }
 reserved-oxide-symbols = { path = "crates/reserved-oxide-symbols" }
 fuzzer = { path = "crates/fuzzer" }
+oxide-artifacts = { path = "crates/oxide-artifacts" }
 
 # Common dependencies
 futures = "0.3"

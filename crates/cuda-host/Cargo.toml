@@ -14,3 +14,8 @@ cuda-core = { workspace = true }
 libnvvm-sys = { workspace = true }
 nvjitlink-sys = { workspace = true }
 thiserror = { workspace = true }
+cuda-async = { workspace = true, optional = true }
+
+[features]
+default = []
+async = ["dep:cuda-async", "cuda-macros/async"]
