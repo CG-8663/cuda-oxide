@@ -25,6 +25,11 @@ set -e
 
 ARCH="${1:-sm_120}"
 CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+NVCC_CCBIN="${NVCC_CCBIN:-${CUDAHOSTCXX:-}}"
+NVCC_FLAGS=()
+if [[ -n "$NVCC_CCBIN" ]]; then
+    NVCC_FLAGS+=("-ccbin=$NVCC_CCBIN")
+fi
 
 # Paths
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -38,6 +43,9 @@ MERGED_CUBIN="$EXAMPLE_DIR/merged.cubin"
 
 echo "=== Phase 2: C++ calling Rust device functions via LTOIR ==="
 echo "Arch: $ARCH"
+if [[ -n "$NVCC_CCBIN" ]]; then
+    echo "nvcc host compiler: $NVCC_CCBIN"
+fi
 echo ""
 
 # ---- Step 0: Check prerequisites ----
@@ -64,7 +72,8 @@ echo ""
 # ---- Step 3: Compile C++ caller kernel → LTOIR ----
 echo "--- Compiling C++ caller kernel → LTOIR (nvcc) ---"
 COMPUTE="compute_${ARCH#sm_}"
-nvcc -dc \
+nvcc "${NVCC_FLAGS[@]}" \
+     -dc \
      --keep \
      -gencode "arch=${COMPUTE},code=lto_${ARCH#sm_}" \
      "$SCRIPT_DIR/caller_kernel.cu" \
@@ -83,7 +92,7 @@ echo ""
 
 # ---- Step 5: Build test runner ----
 echo "--- Building C++ test runner ---"
-nvcc -o "$SCRIPT_DIR/test_runner" "$SCRIPT_DIR/test_runner.cu" -lcuda
+nvcc "${NVCC_FLAGS[@]}" -o "$SCRIPT_DIR/test_runner" "$SCRIPT_DIR/test_runner.cu" -lcuda
 echo "  ✓ test_runner built"
 echo ""
 

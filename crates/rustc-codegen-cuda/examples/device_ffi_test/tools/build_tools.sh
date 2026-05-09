@@ -11,9 +11,17 @@
 set -e
 
 CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+NVCC_CCBIN="${NVCC_CCBIN:-${CUDAHOSTCXX:-}}"
+NVCC_FLAGS=()
+if [[ -n "$NVCC_CCBIN" ]]; then
+    NVCC_FLAGS+=("-ccbin=$NVCC_CCBIN")
+fi
 
 echo "=== Building Device FFI Tools ==="
 echo "CUDA_HOME: $CUDA_HOME"
+if [[ -n "$NVCC_CCBIN" ]]; then
+    echo "nvcc host compiler: $NVCC_CCBIN"
+fi
 echo ""
 
 # Build compile_ltoir (libNVVM)
@@ -34,7 +42,7 @@ echo "  ✓ link_ltoir"
 
 # Build launch_cubin (CUDA Driver API)
 echo "Building launch_cubin..."
-nvcc -o launch_cubin launch_cubin.cu -lcuda
+nvcc "${NVCC_FLAGS[@]}" -o launch_cubin launch_cubin.cu -lcuda
 echo "  ✓ launch_cubin"
 
 echo ""
