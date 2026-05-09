@@ -320,7 +320,7 @@ mod collector;
 mod device_codegen;
 
 use rustc_codegen_ssa::traits::CodegenBackend;
-use rustc_codegen_ssa::{CompiledModules, CrateInfo};
+use rustc_codegen_ssa::{CompiledModule, CompiledModules, CrateInfo, ModuleKind};
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_metadata::EncodedMetadata;
 use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
@@ -329,7 +329,9 @@ use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_session::Session;
 use rustc_session::config::OutputFilenames;
 use std::any::Any;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The CUDA codegen backend.
 ///
@@ -350,6 +352,13 @@ pub struct CudaCodegenBackend {
     /// The underlying LLVM backend for host code generation
     llvm_backend: Box<dyn CodegenBackend>,
 }
+
+struct CudaOngoingCodegen {
+    host: Box<dyn Any>,
+    artifact_objects: Vec<PathBuf>,
+}
+
+static ARTIFACT_OBJECT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Configuration for the CUDA codegen backend.
 ///
@@ -464,6 +473,7 @@ impl CodegenBackend for CudaCodegenBackend {
             let device_fn_count =
                 collector::count_device_fns_in_cgus(tcx, mono_partitions.codegen_units);
             let has_device_code = kernel_count > 0 || device_fn_count > 0;
+            let mut artifact_objects = Vec::new();
 
             // Only log for crates that have device code (reduces noise from dependency crates)
             if self.config.verbose && has_device_code {
@@ -532,6 +542,35 @@ impl CodegenBackend for CudaCodegenBackend {
                                 result.target
                             );
                         }
+                        if let Some(ptx_content) = result.ptx_content.as_deref() {
+                            match write_ptx_artifact_object(
+                                &device_config.output_dir,
+                                &device_config.output_name,
+                                tcx.sess.target.llvm_target.as_ref(),
+                                &result,
+                                ptx_content,
+                                device_functions,
+                            ) {
+                                Ok(path) => {
+                                    if self.config.verbose {
+                                        eprintln!(
+                                            "[rustc_codegen_cuda] Embedded artifact object complete: {}",
+                                            path.display()
+                                        );
+                                    }
+                                    artifact_objects.push(path);
+                                }
+                                Err(e) => {
+                                    tcx.dcx().fatal(format!(
+                                        "[rustc_codegen_cuda] Failed to embed PTX artifact: {e}"
+                                    ));
+                                }
+                            }
+                        } else if self.config.verbose {
+                            eprintln!(
+                                "[rustc_codegen_cuda] Skipping embedded PTX artifact: no PTX output"
+                            );
+                        }
                         Some(result)
                     }
                     Err(e) => {
@@ -556,8 +595,10 @@ impl CodegenBackend for CudaCodegenBackend {
             let host_result = self.llvm_backend.codegen_crate(tcx, crate_info);
 
             // Return the LLVM backend's result
-            // TODO (npasham): Embed PTX into binary via custom section or bundled resource
-            host_result
+            Box::new(CudaOngoingCodegen {
+                host: host_result,
+                artifact_objects,
+            })
         })
     }
 
@@ -567,8 +608,24 @@ impl CodegenBackend for CudaCodegenBackend {
         sess: &Session,
         outputs: &OutputFilenames,
     ) -> (CompiledModules, FxIndexMap<WorkProductId, WorkProduct>) {
-        self.llvm_backend
-            .join_codegen(ongoing_codegen, sess, outputs)
+        let ongoing = *ongoing_codegen
+            .downcast::<CudaOngoingCodegen>()
+            .expect("rustc_codegen_cuda received unexpected ongoing codegen state");
+        let (mut compiled_modules, work_products) =
+            self.llvm_backend.join_codegen(ongoing.host, sess, outputs);
+        for (index, object) in ongoing.artifact_objects.into_iter().enumerate() {
+            compiled_modules.modules.push(CompiledModule {
+                name: format!("oxide_artifact_embed_{index}"),
+                kind: ModuleKind::Regular,
+                object: Some(object),
+                dwarf_object: None,
+                bytecode: None,
+                assembly: None,
+                llvm_ir: None,
+                links_from_incr_cache: Vec::new(),
+            });
+        }
+        (compiled_modules, work_products)
     }
 
     fn link(
@@ -582,6 +639,59 @@ impl CodegenBackend for CudaCodegenBackend {
         self.llvm_backend
             .link(sess, compiled_modules, crate_info, metadata, outputs);
     }
+}
+
+fn write_ptx_artifact_object(
+    output_dir: &Path,
+    output_name: &str,
+    host_target: &str,
+    result: &device_codegen::DeviceCodegenResult,
+    ptx_content: &str,
+    functions: &[collector::CollectedFunction<'_>],
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let ptx_name = format!("{output_name}.ptx");
+    let mut spec = oxide_artifacts::ArtifactBundleSpec::new(output_name, &result.target)
+        .with_payload(oxide_artifacts::ArtifactPayloadSpec::new(
+            oxide_artifacts::ArtifactPayloadKind::Ptx,
+            &ptx_name,
+            ptx_content.as_bytes(),
+        ));
+    for function in functions {
+        let kind = if function.is_kernel {
+            oxide_artifacts::ArtifactEntryKind::Kernel
+        } else {
+            oxide_artifacts::ArtifactEntryKind::DeviceFunction
+        };
+        spec = spec.with_entry(oxide_artifacts::ArtifactEntrySpec::new(
+            &function.export_name,
+            kind,
+        ));
+    }
+
+    let blob = oxide_artifacts::build_artifact_blob(&spec)?;
+    let object = oxide_artifacts::build_host_object_for_target(&blob, host_target)?;
+    let safe_output_name = sanitize_path_component(output_name);
+    let artifact_id = ARTIFACT_OBJECT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let object_dir = output_dir
+        .join(".oxide-artifacts")
+        .join(&safe_output_name)
+        .join(sanitize_path_component(host_target));
+    std::fs::create_dir_all(&object_dir)?;
+    let object_path = object_dir.join(format!(
+        "{safe_output_name}.{}.{artifact_id}.embed.o",
+        std::process::id(),
+    ));
+    std::fs::write(&object_path, object)?;
+    Ok(object_path)
+}
+
+fn sanitize_path_component(name: &str) -> String {
+    name.chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => ch,
+            _ => '_',
+        })
+        .collect()
 }
 
 /// Entry point called by rustc to instantiate the backend.
