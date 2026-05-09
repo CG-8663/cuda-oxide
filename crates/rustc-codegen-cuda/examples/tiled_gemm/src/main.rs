@@ -15,7 +15,7 @@
 
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
 use cuda_device::{DisjointSlice, SharedArray, kernel, thread};
-use cuda_host::cuda_launch;
+use cuda_host::cuda_module;
 use std::time::Instant;
 
 // =============================================================================
@@ -23,95 +23,99 @@ use std::time::Instant;
 // =============================================================================
 
 const TILE_SIZE: usize = 16;
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-/// Tiled GEMM kernel using shared memory: C = alpha * A * B + beta * C
-///
-/// Each thread block computes a TILE_SIZE x TILE_SIZE tile of C.
-/// Tiles are loaded cooperatively into shared memory, reducing global
-/// memory accesses by ~TILE_SIZE factor.
-#[kernel]
-pub fn sgemm_tiled(
-    m: u32,
-    n: u32,
-    k: u32,
-    alpha: f32,
-    a: &[f32], // M x K matrix
-    b: &[f32], // K x N matrix
-    beta: f32,
-    mut c: DisjointSlice<f32>, // M x N matrix (output)
-) {
-    // Shared memory tiles for A and B (16x16 = 256 elements each)
-    static mut TILE_A: SharedArray<f32, 256> = SharedArray::UNINIT;
-    static mut TILE_B: SharedArray<f32, 256> = SharedArray::UNINIT;
+    /// Tiled GEMM kernel using shared memory: C = alpha * A * B + beta * C
+    ///
+    /// Each thread block computes a TILE_SIZE x TILE_SIZE tile of C.
+    /// Tiles are loaded cooperatively into shared memory, reducing global
+    /// memory accesses by ~TILE_SIZE factor.
+    #[kernel]
+    pub fn sgemm_tiled(
+        m: u32,
+        n: u32,
+        k: u32,
+        alpha: f32,
+        a: &[f32], // M x K matrix
+        b: &[f32], // K x N matrix
+        beta: f32,
+        mut c: DisjointSlice<f32>, // M x N matrix (output)
+    ) {
+        // Shared memory tiles for A and B (16x16 = 256 elements each)
+        static mut TILE_A: SharedArray<f32, 256> = SharedArray::UNINIT;
+        static mut TILE_B: SharedArray<f32, 256> = SharedArray::UNINIT;
 
-    let tx = thread::threadIdx_x() as usize; // column within tile
-    let ty = thread::threadIdx_y() as usize; // row within tile
+        let tx = thread::threadIdx_x() as usize; // column within tile
+        let ty = thread::threadIdx_y() as usize; // row within tile
 
-    // Global row and column this thread computes
-    let row = thread::blockIdx_y() as usize * TILE_SIZE + ty;
-    let col = thread::blockIdx_x() as usize * TILE_SIZE + tx;
+        // Global row and column this thread computes
+        let row = thread::blockIdx_y() as usize * TILE_SIZE + ty;
+        let col = thread::blockIdx_x() as usize * TILE_SIZE + tx;
 
-    let m_size = m as usize;
-    let n_size = n as usize;
-    let k_size = k as usize;
+        let m_size = m as usize;
+        let n_size = n as usize;
+        let k_size = k as usize;
 
-    // Number of tiles along K dimension
-    let num_tiles = (k_size + TILE_SIZE - 1) / TILE_SIZE;
+        // Number of tiles along K dimension
+        let num_tiles = (k_size + TILE_SIZE - 1) / TILE_SIZE;
 
-    // Accumulator for dot product
-    let mut sum = 0.0f32;
+        // Accumulator for dot product
+        let mut sum = 0.0f32;
 
-    // Iterate over tiles along K dimension
-    let mut tile = 0usize;
-    while tile < num_tiles {
-        let tile_start = tile * TILE_SIZE;
+        // Iterate over tiles along K dimension
+        let mut tile = 0usize;
+        while tile < num_tiles {
+            let tile_start = tile * TILE_SIZE;
 
-        // Shared memory index for this thread (unique per thread)
-        let smem_idx = ty * TILE_SIZE + tx;
+            // Shared memory index for this thread (unique per thread)
+            let smem_idx = ty * TILE_SIZE + tx;
 
-        // Collaboratively load tiles into shared memory
-        unsafe {
-            // Load A[row, tile_start + tx] into shared memory
-            let a_col = tile_start + tx;
-            if row < m_size && a_col < k_size {
-                TILE_A[smem_idx] = a[row * k_size + a_col];
-            } else {
-                TILE_A[smem_idx] = 0.0;
+            // Collaboratively load tiles into shared memory
+            unsafe {
+                // Load A[row, tile_start + tx] into shared memory
+                let a_col = tile_start + tx;
+                if row < m_size && a_col < k_size {
+                    TILE_A[smem_idx] = a[row * k_size + a_col];
+                } else {
+                    TILE_A[smem_idx] = 0.0;
+                }
+
+                // Load B[tile_start + ty, col] into shared memory
+                let b_row = tile_start + ty;
+                if b_row < k_size && col < n_size {
+                    TILE_B[smem_idx] = b[b_row * n_size + col];
+                } else {
+                    TILE_B[smem_idx] = 0.0;
+                }
             }
 
-            // Load B[tile_start + ty, col] into shared memory
-            let b_row = tile_start + ty;
-            if b_row < k_size && col < n_size {
-                TILE_B[smem_idx] = b[b_row * n_size + col];
-            } else {
-                TILE_B[smem_idx] = 0.0;
+            // Wait for all threads to finish loading
+            thread::sync_threads();
+
+            // Compute partial dot product for this tile
+            unsafe {
+                let mut i = 0usize;
+                while i < TILE_SIZE {
+                    sum = sum + TILE_A[ty * TILE_SIZE + i] * TILE_B[i * TILE_SIZE + tx];
+                    i = i + 1;
+                }
             }
+
+            // Wait before loading next tile
+            thread::sync_threads();
+
+            tile = tile + 1;
         }
 
-        // Wait for all threads to finish loading
-        thread::sync_threads();
-
-        // Compute partial dot product for this tile
-        unsafe {
-            let mut i = 0usize;
-            while i < TILE_SIZE {
-                sum = sum + TILE_A[ty * TILE_SIZE + i] * TILE_B[i * TILE_SIZE + tx];
-                i = i + 1;
-            }
-        }
-
-        // Wait before loading next tile
-        thread::sync_threads();
-
-        tile = tile + 1;
-    }
-
-    // Write result to global memory
-    if let Some(c_idx) = thread::index_2d(n_size) {
-        // col < n_size guaranteed by index_2d returning Some
-        if row < m_size {
-            if let Some(c_elem) = c.get_mut(c_idx) {
-                *c_elem = alpha * sum + beta * (*c_elem);
+        // Write result to global memory
+        if let Some(c_idx) = thread::index_2d(n_size) {
+            // col < n_size guaranteed by index_2d returning Some
+            if row < m_size {
+                if let Some(c_elem) = c.get_mut(c_idx) {
+                    *c_elem = alpha * sum + beta * (*c_elem);
+                }
             }
         }
     }
@@ -160,6 +164,7 @@ fn main() {
     let module = ctx
         .load_module_from_file("tiled_gemm.ptx")
         .expect("Failed to load PTX module");
+    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
 
     // Configure launch: 16x16 threads per block (matches TILE_SIZE)
     let block_size = 16u32;
@@ -185,14 +190,20 @@ fn main() {
 
     // Warmup
     println!("\nWarmup...");
-    cuda_launch! {
-        kernel: sgemm_tiled,
-        stream: stream,
-        module: module,
-        config: cfg,
-        args: [m_arg, n_arg, k_arg, ALPHA, slice(a_dev), slice(b_dev), BETA, slice_mut(c_dev)]
-    }
-    .unwrap();
+    module
+        .sgemm_tiled(
+            (stream).as_ref(),
+            cfg,
+            m_arg,
+            n_arg,
+            k_arg,
+            ALPHA,
+            &a_dev,
+            &b_dev,
+            BETA,
+            &mut c_dev,
+        )
+        .unwrap();
     stream.synchronize().unwrap();
 
     // Timed runs
@@ -200,14 +211,20 @@ fn main() {
     println!("Running {} iterations...", NUM_RUNS);
     let start = Instant::now();
     for _ in 0..NUM_RUNS {
-        cuda_launch! {
-            kernel: sgemm_tiled,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [m_arg, n_arg, k_arg, ALPHA, slice(a_dev), slice(b_dev), BETA, slice_mut(c_dev)]
-        }
-        .unwrap();
+        module
+            .sgemm_tiled(
+                (stream).as_ref(),
+                cfg,
+                m_arg,
+                n_arg,
+                k_arg,
+                ALPHA,
+                &a_dev,
+                &b_dev,
+                BETA,
+                &mut c_dev,
+            )
+            .unwrap();
     }
     stream.synchronize().unwrap();
     let elapsed = start.elapsed();

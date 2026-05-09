@@ -57,136 +57,140 @@
 //! ```rust
 //! let factor = 5;
 //! let scale = move |x| x * factor;
-//! cuda_launch!(map_kernel, config, (scale, &input, &mut out));
-//! // Compiler automatically extracts captures and passes them
+//! module.map_kernel(&stream, config, scale, &input, &mut out)?;
+//! // The typed launch method passes the capture values as kernel arguments
 //! ```
 
 use cuda_device::{DisjointSlice, kernel, thread};
-use cuda_host::cuda_launch;
+use cuda_host::cuda_module;
 
 // =============================================================================
 // KERNELS
 // =============================================================================
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-/// Pattern A: Inline closure (defined and used within kernel)
-/// The closure has no captures from outside the kernel - it's fully self-contained.
-#[kernel]
-pub fn test_inline_closure(mut out: DisjointSlice<u32>) {
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
-        // Closure defined inline - will be optimized away
-        let double = |x: u32| x * 2;
-        let val = idx.get() as u32;
-        *out_elem = double(val);
+    /// Pattern A: Inline closure (defined and used within kernel)
+    /// The closure has no captures from outside the kernel - it's fully self-contained.
+    #[kernel]
+    pub fn test_inline_closure(mut out: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            // Closure defined inline - will be optimized away
+            let double = |x: u32| x * 2;
+            let val = idx.get() as u32;
+            *out_elem = double(val);
+        }
     }
-}
 
-/// Pattern B: Scalarized capture - single value
-/// The 'factor' parameter represents what would be a closure capture.
-/// Host passes factor=5, kernel uses it like a captured variable.
-#[kernel]
-pub fn scale_kernel(factor: u32, input: &[u32], mut out: DisjointSlice<u32>) {
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
-        // This is equivalent to: let scale = move |x| x * factor;
-        *out_elem = input[idx.get()] * factor;
+    /// Pattern B: Scalarized capture - single value
+    /// The 'factor' parameter represents what would be a closure capture.
+    /// Host passes factor=5, kernel uses it like a captured variable.
+    #[kernel]
+    pub fn scale_kernel(factor: u32, input: &[u32], mut out: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            // This is equivalent to: let scale = move |x| x * factor;
+            *out_elem = input[idx.get()] * factor;
+        }
     }
-}
 
-/// Pattern B: Scalarized captures - multiple values
-/// Multiple captures (offset, scale) are passed as separate scalar arguments.
-#[kernel]
-pub fn transform_kernel(offset: i32, scale: i32, input: &[i32], mut out: DisjointSlice<i32>) {
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
-        // Equivalent to: let transform = move |x| (x + offset) * scale;
-        let x = input[idx.get()];
-        *out_elem = (x + offset) * scale;
+    /// Pattern B: Scalarized captures - multiple values
+    /// Multiple captures (offset, scale) are passed as separate scalar arguments.
+    #[kernel]
+    pub fn transform_kernel(offset: i32, scale: i32, input: &[i32], mut out: DisjointSlice<i32>) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            // Equivalent to: let transform = move |x| (x + offset) * scale;
+            let x = input[idx.get()];
+            *out_elem = (x + offset) * scale;
+        }
     }
-}
 
-/// Pattern A+B combined: Inline closure using kernel parameter
-/// The closure is defined inside the kernel but captures a kernel parameter.
-#[kernel]
-pub fn inline_with_param(factor: u32, input: &[u32], mut out: DisjointSlice<u32>) {
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
-        // Closure captures 'factor' which is a kernel parameter
-        let scale = |x: u32| x * factor;
-        *out_elem = scale(input[idx.get()]);
+    /// Pattern A+B combined: Inline closure using kernel parameter
+    /// The closure is defined inside the kernel but captures a kernel parameter.
+    #[kernel]
+    pub fn inline_with_param(factor: u32, input: &[u32], mut out: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            // Closure captures 'factor' which is a kernel parameter
+            let scale = |x: u32| x * factor;
+            *out_elem = scale(input[idx.get()]);
+        }
     }
-}
 
-// =============================================================================
-// ADVANCED: Closures Passed to Device Functions
-// =============================================================================
+    // =============================================================================
+    // ADVANCED: Closures Passed to Device Functions
+    // =============================================================================
 
-/// Helper function that takes a closure (FnOnce)
-#[inline(always)]
-fn apply_closure<F: FnOnce(u32) -> u32>(f: F, x: u32) -> u32 {
-    f(x)
-}
-
-// Note: apply_twice with Fn trait is commented out due to control flow issues.
-// The `Fn` trait requires the closure to be called multiple times, which
-// can create complex control flow that the backend doesn't fully support yet.
-// #[inline(always)]
-// fn apply_twice<F: Fn(u32) -> u32>(f: F, x: u32) -> u32 {
-//     f(f(x))
-// }
-
-/// Test: Closure with no captures, no arguments - just returns constant
-#[kernel]
-pub fn test_closure_constant(mut out: DisjointSlice<u32>) {
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
-        let f = || 42u32;
-        *out_elem = f();
+    /// Helper function that takes a closure (FnOnce)
+    #[inline(always)]
+    fn apply_closure<F: FnOnce(u32) -> u32>(f: F, x: u32) -> u32 {
+        f(x)
     }
-}
 
-/// Test: Closure with multiple arguments, no captures
-#[kernel]
-pub fn test_closure_multi_arg(mut out: DisjointSlice<u32>) {
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
-        let add = |a: u32, b: u32| a + b;
-        let val = idx.get() as u32;
-        *out_elem = add(val, 10);
+    // Note: apply_twice with Fn trait is commented out due to control flow issues.
+    // The `Fn` trait requires the closure to be called multiple times, which
+    // can create complex control flow that the backend doesn't fully support yet.
+    // #[inline(always)]
+    // fn apply_twice<F: Fn(u32) -> u32>(f: F, x: u32) -> u32 {
+    //     f(f(x))
+    // }
+
+    /// Test: Closure with no captures, no arguments - just returns constant
+    #[kernel]
+    pub fn test_closure_constant(mut out: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let f = || 42u32;
+            *out_elem = f();
+        }
     }
-}
 
-/// Test: Passing closure to FnOnce generic function
-#[kernel]
-pub fn test_closure_fnonce(mut out: DisjointSlice<u32>) {
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
-        let triple = |x: u32| x * 3;
-        let val = idx.get() as u32;
-        *out_elem = apply_closure(triple, val);
+    /// Test: Closure with multiple arguments, no captures
+    #[kernel]
+    pub fn test_closure_multi_arg(mut out: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let add = |a: u32, b: u32| a + b;
+            let val = idx.get() as u32;
+            *out_elem = add(val, 10);
+        }
     }
-}
 
-// Note: test_closure_apply_twice is commented out due to control flow issues
-// with the Fn trait (closure called multiple times).
-// #[kernel]
-// pub fn test_closure_apply_twice(mut out: DisjointSlice<u32>) {
-//     let idx = thread::index_1d();
-//     if let Some(slot) = out.get_mut(idx) {
-//         let inc = |x: u32| x + 1;
-//         let val = idx.get() as u32;
-//         *slot = apply_twice(inc, val);
-//     }
-// }
+    /// Test: Passing closure to FnOnce generic function
+    #[kernel]
+    pub fn test_closure_fnonce(mut out: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let triple = |x: u32| x * 3;
+            let val = idx.get() as u32;
+            *out_elem = apply_closure(triple, val);
+        }
+    }
 
-/// Test: Closure with capture passed to generic function
-#[kernel]
-pub fn test_closure_capture_fnonce(factor: u32, mut out: DisjointSlice<u32>) {
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
-        let scale = |x: u32| x * factor;
-        let val = idx.get() as u32;
-        *out_elem = apply_closure(scale, val);
+    // Note: test_closure_apply_twice is commented out due to control flow issues
+    // with the Fn trait (closure called multiple times).
+    // #[kernel]
+    // pub fn test_closure_apply_twice(mut out: DisjointSlice<u32>) {
+    //     let idx = thread::index_1d();
+    //     if let Some(slot) = out.get_mut(idx) {
+    //         let inc = |x: u32| x + 1;
+    //         let val = idx.get() as u32;
+    //         *slot = apply_twice(inc, val);
+    //     }
+    // }
+
+    /// Test: Closure with capture passed to generic function
+    #[kernel]
+    pub fn test_closure_capture_fnonce(factor: u32, mut out: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let scale = |x: u32| x * factor;
+            let val = idx.get() as u32;
+            *out_elem = apply_closure(scale, val);
+        }
     }
 }
 
@@ -205,6 +209,7 @@ fn main() {
     let module = ctx
         .load_module_from_file("device_closures.ptx")
         .expect("Failed to load PTX module");
+    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
 
     // =========================================================================
     // Test 1: Inline closure (no external captures)
@@ -214,14 +219,13 @@ fn main() {
         const N: usize = 8;
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: test_inline_closure,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(N as u32),
-            args: [slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .test_inline_closure(
+                (stream).as_ref(),
+                LaunchConfig::for_num_elems(N as u32),
+                &mut out_dev,
+            )
+            .expect("Kernel launch failed");
 
         let out: Vec<u32> = out_dev.to_host_vec(&stream).unwrap();
         let expected: Vec<u32> = (0..N).map(|i| (i * 2) as u32).collect();
@@ -246,14 +250,15 @@ fn main() {
         let input_dev = DeviceBuffer::from_host(&stream, &input).unwrap();
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: scale_kernel,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(N as u32),
-            args: [factor, slice(input_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .scale_kernel(
+                (stream).as_ref(),
+                LaunchConfig::for_num_elems(N as u32),
+                factor,
+                &input_dev,
+                &mut out_dev,
+            )
+            .expect("Kernel launch failed");
 
         let out: Vec<u32> = out_dev.to_host_vec(&stream).unwrap();
         let expected: Vec<u32> = input.iter().map(|&x| x * factor).collect();
@@ -280,14 +285,16 @@ fn main() {
         let input_dev = DeviceBuffer::from_host(&stream, &input).unwrap();
         let mut out_dev = DeviceBuffer::<i32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: transform_kernel,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(N as u32),
-            args: [offset, scale, slice(input_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .transform_kernel(
+                (stream).as_ref(),
+                LaunchConfig::for_num_elems(N as u32),
+                offset,
+                scale,
+                &input_dev,
+                &mut out_dev,
+            )
+            .expect("Kernel launch failed");
 
         let out: Vec<i32> = out_dev.to_host_vec(&stream).unwrap();
         let expected: Vec<i32> = input.iter().map(|&x| (x + offset) * scale).collect();
@@ -313,14 +320,15 @@ fn main() {
         let input_dev = DeviceBuffer::from_host(&stream, &input).unwrap();
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: inline_with_param,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(N as u32),
-            args: [factor, slice(input_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .inline_with_param(
+                (stream).as_ref(),
+                LaunchConfig::for_num_elems(N as u32),
+                factor,
+                &input_dev,
+                &mut out_dev,
+            )
+            .expect("Kernel launch failed");
 
         let out: Vec<u32> = out_dev.to_host_vec(&stream).unwrap();
         let expected: Vec<u32> = input.iter().map(|&x| x * factor).collect();
@@ -340,14 +348,13 @@ fn main() {
         const N: usize = 8;
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: test_closure_constant,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(N as u32),
-            args: [slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .test_closure_constant(
+                (stream).as_ref(),
+                LaunchConfig::for_num_elems(N as u32),
+                &mut out_dev,
+            )
+            .expect("Kernel launch failed");
 
         let out: Vec<u32> = out_dev.to_host_vec(&stream).unwrap();
         let expected: Vec<u32> = vec![42; N];
@@ -366,14 +373,13 @@ fn main() {
         const N: usize = 8;
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: test_closure_multi_arg,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(N as u32),
-            args: [slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .test_closure_multi_arg(
+                (stream).as_ref(),
+                LaunchConfig::for_num_elems(N as u32),
+                &mut out_dev,
+            )
+            .expect("Kernel launch failed");
 
         let out: Vec<u32> = out_dev.to_host_vec(&stream).unwrap();
         let expected: Vec<u32> = (0..N).map(|i| i as u32 + 10).collect();
@@ -392,14 +398,13 @@ fn main() {
         const N: usize = 8;
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: test_closure_fnonce,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(N as u32),
-            args: [slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .test_closure_fnonce(
+                (stream).as_ref(),
+                LaunchConfig::for_num_elems(N as u32),
+                &mut out_dev,
+            )
+            .expect("Kernel launch failed");
 
         let out: Vec<u32> = out_dev.to_host_vec(&stream).unwrap();
         let expected: Vec<u32> = (0..N).map(|i| (i * 3) as u32).collect();
@@ -424,14 +429,14 @@ fn main() {
 
         println!("  factor = {}", factor);
 
-        cuda_launch! {
-            kernel: test_closure_capture_fnonce,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(N as u32),
-            args: [factor, slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .test_closure_capture_fnonce(
+                (stream).as_ref(),
+                LaunchConfig::for_num_elems(N as u32),
+                factor,
+                &mut out_dev,
+            )
+            .expect("Kernel launch failed");
 
         let out: Vec<u32> = out_dev.to_host_vec(&stream).unwrap();
         let expected: Vec<u32> = (0..N).map(|i| (i * factor as usize) as u32).collect();

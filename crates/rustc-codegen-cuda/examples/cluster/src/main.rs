@@ -16,176 +16,181 @@
 
 use core::ptr::{addr_of, addr_of_mut};
 use cuda_device::{DisjointSlice, SharedArray, cluster, cluster_launch, kernel, thread};
-use cuda_host::cuda_launch;
+use cuda_host::cuda_module;
 
 // ============================================================================
 // Test 0: Compile-Time Cluster Configuration with #[cluster(x,y,z)]
 // ============================================================================
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-/// Test kernel with compile-time cluster configuration.
-///
-/// The `#[cluster_launch(4, 1, 1)]` attribute tells the compiler to emit:
-/// ```ptx
-/// .entry test_cluster_compile_time .reqnctapercluster 4, 1, 1 { ... }
-/// ```
-#[kernel]
-#[cluster_launch(4, 1, 1)]
-pub fn test_cluster_compile_time(mut output: DisjointSlice<u32>) {
-    let tid = thread::threadIdx_x();
-    let my_rank = cluster::block_rank();
-    let cluster_size = cluster::cluster_size();
+    /// Test kernel with compile-time cluster configuration.
+    ///
+    /// The `#[cluster_launch(4, 1, 1)]` attribute tells the compiler to emit:
+    /// ```ptx
+    /// .entry test_cluster_compile_time .reqnctapercluster 4, 1, 1 { ... }
+    /// ```
+    #[kernel]
+    #[cluster_launch(4, 1, 1)]
+    pub fn test_cluster_compile_time(mut output: DisjointSlice<u32>) {
+        let tid = thread::threadIdx_x();
+        let my_rank = cluster::block_rank();
+        let cluster_size = cluster::cluster_size();
 
-    // Write cluster info to output
-    if tid == 0 {
-        let idx = my_rank as usize;
-        if idx < output.len() {
-            // Encode: high 16 bits = rank, low 16 bits = cluster_size
-            let value = ((my_rank as u32) << 16) | (cluster_size as u32);
-            unsafe { *output.get_unchecked_mut(idx) = value };
-        }
-    }
-}
-
-// ============================================================================
-// Test 1: Basic Cluster Intrinsics
-// ============================================================================
-
-/// Test kernel for cluster special registers.
-#[kernel]
-pub fn test_cluster_intrinsics(mut output: DisjointSlice<u32>) {
-    let tid = thread::threadIdx_x();
-    let bid = thread::blockIdx_x();
-
-    // Offset for this block's output
-    let base = (bid as usize) * 8;
-
-    let value = match tid {
-        0 => cluster::cluster_ctaidX(),
-        1 => cluster::cluster_ctaidY(),
-        2 => cluster::cluster_ctaidZ(),
-        3 => cluster::cluster_nctaidX(),
-        4 => cluster::cluster_nctaidY(),
-        5 => cluster::cluster_nctaidZ(),
-        6 => cluster::block_rank(),
-        7 => cluster::cluster_size(),
-        _ => 0xDEADBEEF,
-    };
-
-    if tid < 8 {
-        let idx = base + tid as usize;
-        if idx < output.len() {
-            unsafe { *output.get_unchecked_mut(idx) = value };
-        }
-    }
-}
-
-// ============================================================================
-// Test 2: Cluster Synchronization
-// ============================================================================
-
-/// Test kernel for cluster_sync().
-#[kernel]
-pub fn test_cluster_sync(mut output: DisjointSlice<u32>) {
-    static mut SHMEM: SharedArray<u32, 1> = SharedArray::UNINIT;
-
-    let tid = thread::threadIdx_x();
-    let my_rank = cluster::block_rank();
-
-    // Step 1: Thread 0 writes block's rank to shared memory
-    if tid == 0 {
-        unsafe { (addr_of_mut!(SHMEM) as *mut u32).write(my_rank * 100 + 42) };
-    }
-    thread::sync_threads();
-
-    // Step 2: Synchronize entire cluster
-    cluster::cluster_sync();
-
-    // Step 3: Write result (proves we passed the barrier)
-    if tid == 0 {
-        let idx = my_rank as usize;
-        if idx < output.len() {
-            let local_value = unsafe { *(addr_of!(SHMEM) as *const u32) };
-            unsafe { *output.get_unchecked_mut(idx) = local_value };
-        }
-    }
-}
-
-// ============================================================================
-// Test 3: Distributed Shared Memory (Ring Exchange)
-// ============================================================================
-
-/// Test kernel for distributed shared memory via dsmem_read_u32().
-#[kernel]
-#[cluster_launch(4, 1, 1)]
-pub fn test_dsmem_ring_exchange(mut output: DisjointSlice<u32>) {
-    static mut SHMEM: SharedArray<u32, 1> = SharedArray::UNINIT;
-
-    let tid = thread::threadIdx_x();
-    let my_rank = cluster::block_rank();
-    let cluster_size = cluster::cluster_size();
-
-    // Step 1: Each block writes its unique value to shared memory
-    if tid == 0 {
-        unsafe { (addr_of_mut!(SHMEM) as *mut u32).write(1000 + my_rank) };
-    }
-    thread::sync_threads();
-
-    // Step 2: Cluster-wide sync to ensure all blocks have written
-    cluster::cluster_sync();
-
-    // Step 3: Read neighbor's shared memory (ring pattern)
-    if tid == 0 {
-        let neighbor_rank = (my_rank + 1) % cluster_size;
-        let neighbor_value =
-            unsafe { cluster::dsmem_read_u32(addr_of!(SHMEM) as *const u32, neighbor_rank) };
-
-        let idx = my_rank as usize;
-        if idx < output.len() {
-            unsafe { *output.get_unchecked_mut(idx) = neighbor_value };
-        }
-    }
-}
-
-// ============================================================================
-// Test 4: Distributed Reduction (All-to-One)
-// ============================================================================
-
-/// Test kernel for distributed reduction using DSMEM.
-#[kernel]
-#[cluster_launch(4, 1, 1)]
-pub fn test_dsmem_reduction(mut output: DisjointSlice<u32>) {
-    static mut LOCAL_VAL: SharedArray<u32, 1> = SharedArray::UNINIT;
-
-    let tid = thread::threadIdx_x();
-    let my_rank = cluster::block_rank();
-    let cluster_size = cluster::cluster_size();
-
-    // Step 1: Each block writes its contribution
-    if tid == 0 {
-        unsafe { (addr_of_mut!(LOCAL_VAL) as *mut u32).write((my_rank + 1) * 10) };
-    }
-    thread::sync_threads();
-
-    // Step 2: Cluster-wide sync
-    cluster::cluster_sync();
-
-    // Step 3: Block 0 reads all blocks' values and sums them
-    if tid == 0 && my_rank == 0 {
-        let mut total = unsafe { *(addr_of!(LOCAL_VAL) as *const u32) };
-
-        let mut rank = 1u32;
-        while rank < cluster_size {
-            total += unsafe { cluster::dsmem_read_u32(addr_of!(LOCAL_VAL) as *const u32, rank) };
-            rank += 1;
-        }
-
-        if output.len() > 0 {
-            unsafe { *output.get_unchecked_mut(0) = total };
+        // Write cluster info to output
+        if tid == 0 {
+            let idx = my_rank as usize;
+            if idx < output.len() {
+                // Encode: high 16 bits = rank, low 16 bits = cluster_size
+                let value = ((my_rank as u32) << 16) | (cluster_size as u32);
+                unsafe { *output.get_unchecked_mut(idx) = value };
+            }
         }
     }
 
-    // All blocks must stay alive while block 0 reads DSMEM
-    cluster::cluster_sync();
+    // ============================================================================
+    // Test 1: Basic Cluster Intrinsics
+    // ============================================================================
+
+    /// Test kernel for cluster special registers.
+    #[kernel]
+    pub fn test_cluster_intrinsics(mut output: DisjointSlice<u32>) {
+        let tid = thread::threadIdx_x();
+        let bid = thread::blockIdx_x();
+
+        // Offset for this block's output
+        let base = (bid as usize) * 8;
+
+        let value = match tid {
+            0 => cluster::cluster_ctaidX(),
+            1 => cluster::cluster_ctaidY(),
+            2 => cluster::cluster_ctaidZ(),
+            3 => cluster::cluster_nctaidX(),
+            4 => cluster::cluster_nctaidY(),
+            5 => cluster::cluster_nctaidZ(),
+            6 => cluster::block_rank(),
+            7 => cluster::cluster_size(),
+            _ => 0xDEADBEEF,
+        };
+
+        if tid < 8 {
+            let idx = base + tid as usize;
+            if idx < output.len() {
+                unsafe { *output.get_unchecked_mut(idx) = value };
+            }
+        }
+    }
+
+    // ============================================================================
+    // Test 2: Cluster Synchronization
+    // ============================================================================
+
+    /// Test kernel for cluster_sync().
+    #[kernel]
+    pub fn test_cluster_sync(mut output: DisjointSlice<u32>) {
+        static mut SHMEM: SharedArray<u32, 1> = SharedArray::UNINIT;
+
+        let tid = thread::threadIdx_x();
+        let my_rank = cluster::block_rank();
+
+        // Step 1: Thread 0 writes block's rank to shared memory
+        if tid == 0 {
+            unsafe { (addr_of_mut!(SHMEM) as *mut u32).write(my_rank * 100 + 42) };
+        }
+        thread::sync_threads();
+
+        // Step 2: Synchronize entire cluster
+        cluster::cluster_sync();
+
+        // Step 3: Write result (proves we passed the barrier)
+        if tid == 0 {
+            let idx = my_rank as usize;
+            if idx < output.len() {
+                let local_value = unsafe { *(addr_of!(SHMEM) as *const u32) };
+                unsafe { *output.get_unchecked_mut(idx) = local_value };
+            }
+        }
+    }
+
+    // ============================================================================
+    // Test 3: Distributed Shared Memory (Ring Exchange)
+    // ============================================================================
+
+    /// Test kernel for distributed shared memory via dsmem_read_u32().
+    #[kernel]
+    #[cluster_launch(4, 1, 1)]
+    pub fn test_dsmem_ring_exchange(mut output: DisjointSlice<u32>) {
+        static mut SHMEM: SharedArray<u32, 1> = SharedArray::UNINIT;
+
+        let tid = thread::threadIdx_x();
+        let my_rank = cluster::block_rank();
+        let cluster_size = cluster::cluster_size();
+
+        // Step 1: Each block writes its unique value to shared memory
+        if tid == 0 {
+            unsafe { (addr_of_mut!(SHMEM) as *mut u32).write(1000 + my_rank) };
+        }
+        thread::sync_threads();
+
+        // Step 2: Cluster-wide sync to ensure all blocks have written
+        cluster::cluster_sync();
+
+        // Step 3: Read neighbor's shared memory (ring pattern)
+        if tid == 0 {
+            let neighbor_rank = (my_rank + 1) % cluster_size;
+            let neighbor_value =
+                unsafe { cluster::dsmem_read_u32(addr_of!(SHMEM) as *const u32, neighbor_rank) };
+
+            let idx = my_rank as usize;
+            if idx < output.len() {
+                unsafe { *output.get_unchecked_mut(idx) = neighbor_value };
+            }
+        }
+    }
+
+    // ============================================================================
+    // Test 4: Distributed Reduction (All-to-One)
+    // ============================================================================
+
+    /// Test kernel for distributed reduction using DSMEM.
+    #[kernel]
+    #[cluster_launch(4, 1, 1)]
+    pub fn test_dsmem_reduction(mut output: DisjointSlice<u32>) {
+        static mut LOCAL_VAL: SharedArray<u32, 1> = SharedArray::UNINIT;
+
+        let tid = thread::threadIdx_x();
+        let my_rank = cluster::block_rank();
+        let cluster_size = cluster::cluster_size();
+
+        // Step 1: Each block writes its contribution
+        if tid == 0 {
+            unsafe { (addr_of_mut!(LOCAL_VAL) as *mut u32).write((my_rank + 1) * 10) };
+        }
+        thread::sync_threads();
+
+        // Step 2: Cluster-wide sync
+        cluster::cluster_sync();
+
+        // Step 3: Block 0 reads all blocks' values and sums them
+        if tid == 0 && my_rank == 0 {
+            let mut total = unsafe { *(addr_of!(LOCAL_VAL) as *const u32) };
+
+            let mut rank = 1u32;
+            while rank < cluster_size {
+                total +=
+                    unsafe { cluster::dsmem_read_u32(addr_of!(LOCAL_VAL) as *const u32, rank) };
+                rank += 1;
+            }
+
+            if output.len() > 0 {
+                unsafe { *output.get_unchecked_mut(0) = total };
+            }
+        }
+
+        // All blocks must stay alive while block 0 reads DSMEM
+        cluster::cluster_sync();
+    }
 }
 
 // ============================================================================
@@ -216,6 +221,7 @@ fn main() {
     let module = ctx
         .load_module_from_file("cluster.ptx")
         .expect("Load PTX module");
+    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
 
     let cluster_size = 4u32;
 
@@ -230,19 +236,17 @@ fn main() {
     println!("Launching test_cluster_compile_time via cuLaunchKernelEx");
     println!("  Grid: 4x1x1, Block: 32, Cluster: 4x1x1\n");
 
-    cuda_launch! {
-        kernel: test_cluster_compile_time,
-        stream: stream,
-        module: module,
-        config: LaunchConfig {
-            grid_dim: (cluster_size, 1, 1),
-            block_dim: (32, 1, 1),
-            shared_mem_bytes: 0,
-        },
-        cluster_dim: (cluster_size, 1, 1),
-        args: [slice_mut(ct_output)]
-    }
-    .expect("Launch compile-time cluster kernel");
+    module
+        .test_cluster_compile_time(
+            (stream).as_ref(),
+            LaunchConfig {
+                grid_dim: (cluster_size, 1, 1),
+                block_dim: (32, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            &mut ct_output,
+        )
+        .expect("Launch compile-time cluster kernel");
     stream.synchronize().expect("Synchronize");
 
     let ct_results: Vec<u32> = ct_output.to_host_vec(&stream).unwrap();
@@ -289,18 +293,17 @@ fn main() {
     println!("Launching test_cluster_intrinsics...");
     println!("  Grid: 4x1x1 blocks, Block: 32 threads\n");
 
-    cuda_launch! {
-        kernel: test_cluster_intrinsics,
-        stream: stream,
-        module: module,
-        config: LaunchConfig {
-            grid_dim: (n_blocks, 1, 1),
-            block_dim: (32, 1, 1),
-            shared_mem_bytes: 0,
-        },
-        args: [slice_mut(output_dev)]
-    }
-    .expect("Launch kernel");
+    module
+        .test_cluster_intrinsics(
+            (stream).as_ref(),
+            LaunchConfig {
+                grid_dim: (n_blocks, 1, 1),
+                block_dim: (32, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            &mut output_dev,
+        )
+        .expect("Launch kernel");
     stream.synchronize().expect("Synchronize");
 
     let output: Vec<u32> = output_dev.to_host_vec(&stream).unwrap();
@@ -334,19 +337,17 @@ fn main() {
     println!("Launching test_cluster_sync via cuLaunchKernelEx");
     println!("  Grid: 4x1x1, Block: 32, Cluster: 4x1x1\n");
 
-    cuda_launch! {
-        kernel: test_cluster_sync,
-        stream: stream,
-        module: module,
-        config: LaunchConfig {
-            grid_dim: (cluster_size, 1, 1),
-            block_dim: (32, 1, 1),
-            shared_mem_bytes: 0,
-        },
-        cluster_dim: (cluster_size, 1, 1),
-        args: [slice_mut(sync_output)]
-    }
-    .expect("Launch sync kernel");
+    module
+        .test_cluster_sync(
+            (stream).as_ref(),
+            LaunchConfig {
+                grid_dim: (cluster_size, 1, 1),
+                block_dim: (32, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            &mut sync_output,
+        )
+        .expect("Launch sync kernel");
     stream.synchronize().expect("Synchronize");
 
     let sync_results: Vec<u32> = sync_output.to_host_vec(&stream).unwrap();
@@ -374,18 +375,15 @@ fn main() {
     println!("  Grid: 4x1x1, Block: 32, Cluster: 4x1x1");
     println!("  Expected: Block 0 reads 1001, Block 1 reads 1002, ...\n");
 
-    let ring_result = cuda_launch! {
-        kernel: test_dsmem_ring_exchange,
-        stream: stream,
-        module: module,
-        config: LaunchConfig {
+    let ring_result = module.test_dsmem_ring_exchange(
+        (stream).as_ref(),
+        LaunchConfig {
             grid_dim: (cluster_size, 1, 1),
             block_dim: (32, 1, 1),
             shared_mem_bytes: 0,
         },
-        cluster_dim: (cluster_size, 1, 1),
-        args: [slice_mut(ring_output)]
-    };
+        &mut ring_output,
+    );
 
     let (ring_pass, dsmem_context_error) = match ring_result {
         Ok(_) => match stream.synchronize() {
@@ -441,18 +439,15 @@ fn main() {
         println!("  Grid: 4x1x1, Block: 32, Cluster: 4x1x1");
         println!("  Expected: Block 0 sums all blocks' values: 10+20+30+40 = 100\n");
 
-        let reduce_result = cuda_launch! {
-            kernel: test_dsmem_reduction,
-            stream: stream,
-            module: module,
-            config: LaunchConfig {
+        let reduce_result = module.test_dsmem_reduction(
+            (stream).as_ref(),
+            LaunchConfig {
                 grid_dim: (cluster_size, 1, 1),
                 block_dim: (32, 1, 1),
                 shared_mem_bytes: 0,
             },
-            cluster_dim: (cluster_size, 1, 1),
-            args: [slice_mut(reduce_output)]
-        };
+            &mut reduce_output,
+        );
 
         match reduce_result {
             Ok(_) => match stream.synchronize() {

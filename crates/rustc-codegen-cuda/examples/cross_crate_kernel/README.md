@@ -69,18 +69,20 @@ pub fn scale<T: Copy + Mul<Output = T>>(factor: T, input: &[T], mut out: Disjoin
 ### 2. Kernel Usage (src/main.rs)
 
 ```rust
-use kernel_lib::*;
+use kernel_lib::kernels;
 
 fn main() {
     // scale::<f32> is monomorphized HERE, not in kernel-lib
-    cuda_launch! {
-        kernel: scale::<f32>,
-        stream: stream,
-        module: module,
-        config: LaunchConfig::for_num_elems(N as u32),
-        args: [factor, slice(input_dev), slice_mut(output_dev)]
-    }
-    .expect("Kernel launch failed");
+    let module = kernels::from_module(raw_module).expect("typed module");
+    module
+        .scale::<f32>(
+            stream.as_ref(),
+            LaunchConfig::for_num_elems(N as u32),
+            factor,
+            &input_dev,
+            &mut output_dev,
+        )
+        .expect("Kernel launch failed");
 }
 ```
 

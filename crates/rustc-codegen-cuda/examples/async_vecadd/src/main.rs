@@ -6,7 +6,8 @@
 //! Async Vector Addition Example
 //!
 //! Demonstrates the cuda-async execution model:
-//! - `cuda_launch_async!` returns a lazy `DeviceOperation`, no GPU work yet
+//! - `#[cuda_module]` generates typed async launch methods
+//! - `vecadd_async` returns a lazy `DeviceOperation`, no GPU work yet
 //! - `.await` schedules it on a round-robin stream pool and waits
 //! - `.sync()` does the same but blocks the calling thread
 //! - `and_then` chains operations on the same stream
@@ -16,17 +17,22 @@
 //!   cargo oxide run async_vecadd
 
 use cuda_device::{DisjointSlice, kernel, thread};
-use cuda_host::cuda_launch_async;
+use cuda_host::cuda_module;
 
 // =============================================================================
 // KERNEL -- compiled to PTX by rustc-codegen-cuda
 // =============================================================================
 
-#[kernel]
-pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
-    let idx = thread::index_1d();
-    if let Some(c_elem) = c.get_mut(idx) {
-        *c_elem = a[idx.get()] + b[idx.get()];
+#[cuda_module]
+mod kernels {
+    use super::*;
+
+    #[kernel]
+    pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
+        let idx = thread::index_1d();
+        if let Some(c_elem) = c.get_mut(idx) {
+            *c_elem = a[idx.get()] + b[idx.get()];
+        }
     }
 }
 
@@ -37,7 +43,7 @@ pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use cuda_async::device_box::DeviceBox;
-    use cuda_async::device_context::{init_device_contexts, load_kernel_module_async};
+    use cuda_async::device_context::init_device_contexts;
     use cuda_async::device_operation::DeviceOperation;
     use cuda_core::LaunchConfig;
     use cuda_core::memory::{malloc_async, memcpy_dtoh_async, memcpy_htod_async};
@@ -48,10 +54,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Initialize the async device context (round-robin pool of 4 streams).
     init_device_contexts(0, 1)?;
 
-    // 2. Load the kernel module into the thread-local kernel cache.
-    //    `load_kernel_module_async` accepts a stem name and transparently
-    //    picks `.cubin` / `.ptx` / `.ll` (with libdevice link) under the hood.
-    let module = load_kernel_module_async("async_vecadd", 0)?;
+    // 2. Load the embedded CUDA module from the async device context.
+    let module = kernels::load_async(0)?;
 
     const N: usize = 1024;
     let a_host: Vec<f32> = (0..N).map(|i| i as f32).collect();
@@ -85,15 +89,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     // 4. Launch the kernel asynchronously.
-    //    `cuda_launch_async!` returns an AsyncKernelLaunch (a DeviceOperation).
+    //    `vecadd_async` returns an AsyncKernelLaunch (a DeviceOperation).
     //    No GPU work happens until we `.sync()` or `.await`.
-    cuda_launch_async! {
-        kernel: vecadd,
-        module: module,
-        config: LaunchConfig::for_num_elems(N as u32),
-        args: [slice(a_dev), slice(b_dev), slice_mut(c_dev)]
-    }
-    .sync()?;
+    module
+        .vecadd_async(
+            LaunchConfig::for_num_elems(N as u32),
+            &a_dev,
+            &b_dev,
+            &mut c_dev,
+        )?
+        .sync()?;
 
     // 5. Copy results back.
     let mut c_host = vec![0.0f32; N];

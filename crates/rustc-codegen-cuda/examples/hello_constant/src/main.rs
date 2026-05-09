@@ -13,17 +13,21 @@
 
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
 use cuda_device::kernel;
-use cuda_host::cuda_launch;
+use cuda_host::cuda_module;
 
 // =============================================================================
 // KERNEL - Compiled to PTX by rustc-codegen-cuda
 // =============================================================================
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-/// Minimal kernel that writes 42 to a memory location.
-/// Tests raw pointer passing to kernels.
-#[kernel]
-pub unsafe fn hello_constant(out: *mut i32) {
-    unsafe { *out = 42 };
+    /// Minimal kernel that writes 42 to a memory location.
+    /// Tests raw pointer passing to kernels.
+    #[kernel]
+    pub unsafe fn hello_constant(out: *mut i32) {
+        unsafe { *out = 42 };
+    }
 }
 
 // =============================================================================
@@ -42,14 +46,15 @@ fn main() {
     let module = ctx
         .load_module_from_file("hello_constant.ptx")
         .expect("Failed to load PTX module");
+    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
 
     println!("Launching kernel...");
-    cuda_launch! {
-        kernel: hello_constant,
-        stream: stream,
-        module: module,
-        config: LaunchConfig::for_num_elems(1),
-        args: [out_dev.cu_deviceptr() as *mut i32]
+    unsafe {
+        module.hello_constant(
+            (stream).as_ref(),
+            LaunchConfig::for_num_elems(1),
+            out_dev.cu_deviceptr() as *mut i32,
+        )
     }
     .expect("Kernel launch failed");
 

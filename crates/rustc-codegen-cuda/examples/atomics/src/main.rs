@@ -44,480 +44,493 @@ use cuda_device::atomic::{
     DeviceAtomicI64, DeviceAtomicU32, DeviceAtomicU64,
 };
 use cuda_device::{DisjointSlice, kernel, thread};
-use cuda_host::cuda_launch;
+use cuda_host::cuda_module;
 
 // =============================================================================
 // KERNELS
 // =============================================================================
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-/// Test 1: Atomic fetch_add -- every thread atomically increments a counter.
-///
-/// After N threads run, counter[0] should equal N.
-/// This tests the atomicrmw path with the fence-splitting workaround.
-#[kernel]
-pub fn atomic_fetch_add_test(counter: &[u32], mut out: DisjointSlice<u32>) {
-    let gid = thread::index_1d();
+    /// Test 1: Atomic fetch_add -- every thread atomically increments a counter.
+    ///
+    /// After N threads run, counter[0] should equal N.
+    /// This tests the atomicrmw path with the fence-splitting workaround.
+    #[kernel]
+    pub fn atomic_fetch_add_test(counter: &[u32], mut out: DisjointSlice<u32>) {
+        let gid = thread::index_1d();
 
-    // Get an DeviceAtomicU32 reference to counter[0] (shared access via interior mutability)
-    let atomic_counter = unsafe { &*(counter.as_ptr() as *const DeviceAtomicU32) };
+        // Get an DeviceAtomicU32 reference to counter[0] (shared access via interior mutability)
+        let atomic_counter = unsafe { &*(counter.as_ptr() as *const DeviceAtomicU32) };
 
-    // Each thread atomically increments the counter and gets the old value
-    let old = atomic_counter.fetch_add(1, AtomicOrdering::Relaxed);
+        // Each thread atomically increments the counter and gets the old value
+        let old = atomic_counter.fetch_add(1, AtomicOrdering::Relaxed);
 
-    // Store the old value so we can verify uniqueness on the host
-    if let Some(out_elem) = out.get_mut(gid) {
-        *out_elem = old;
-    }
-}
-
-/// Test 2: Atomic load/store -- thread 0 stores a value, all threads load it.
-///
-/// Uses Acquire/Release ordering for proper visibility:
-/// - Thread 0: store with Release (makes the write visible)
-/// - Other threads: load with Acquire (sees the Release'd write)
-#[kernel]
-pub fn atomic_load_store_test(flag: &[u32], mut out: DisjointSlice<u32>) {
-    let tid = thread::threadIdx_x();
-    let gid = thread::index_1d();
-
-    // Get an DeviceAtomicU32 reference to flag[0] (shared access via interior mutability)
-    let atomic_flag = unsafe { &*(flag.as_ptr() as *const DeviceAtomicU32) };
-
-    // Thread 0 stores a sentinel value
-    if tid == 0 {
-        atomic_flag.store(42, AtomicOrdering::Release);
-    }
-
-    // Barrier ensures all threads see the store
-    thread::sync_threads();
-
-    // All threads load the value
-    let val = atomic_flag.load(AtomicOrdering::Acquire);
-    if let Some(out_elem) = out.get_mut(gid) {
-        *out_elem = val;
-    }
-}
-
-/// Test 3: Atomic compare_exchange -- only one thread wins the CAS race.
-///
-/// All threads try to CAS 0 -> their_tid. Exactly one succeeds.
-#[kernel]
-pub fn atomic_cas_test(winner: &[u32], mut out: DisjointSlice<u32>) {
-    let tid = thread::threadIdx_x();
-    let gid = thread::index_1d();
-
-    // Get an DeviceAtomicU32 reference to winner[0] (shared access via interior mutability)
-    let atomic_winner = unsafe { &*(winner.as_ptr() as *const DeviceAtomicU32) };
-
-    // Try to be the first thread to swap 0 -> (tid + 1)
-    // We use tid+1 so that thread 0's success value (1) differs from the
-    // initial value (0).
-    let result =
-        atomic_winner.compare_exchange(0, tid + 1, AtomicOrdering::AcqRel, AtomicOrdering::Relaxed);
-
-    if let Some(out_elem) = out.get_mut(gid) {
-        match result {
-            Ok(_old) => {
-                // This thread won the race
-                *out_elem = 1;
-            }
-            Err(_old) => {
-                // Another thread already swapped
-                *out_elem = 0;
-            }
+        // Store the old value so we can verify uniqueness on the host
+        if let Some(out_elem) = out.get_mut(gid) {
+            *out_elem = old;
         }
     }
-}
 
-/// Test 4: Atomic fetch_add with AcqRel ordering -- exercises fence-splitting workaround.
-///
-/// The LLVM NVPTX backend drops orderings on atomicrmw (fix in LLVM 23).
-/// We work around this by emitting: fence release + atomicrmw monotonic + fence acquire.
-/// This test verifies that path produces correct results.
-#[kernel]
-pub fn atomic_fetch_add_acqrel_test(counter: &[u32], mut out: DisjointSlice<u32>) {
-    let gid = thread::index_1d();
+    /// Test 2: Atomic load/store -- thread 0 stores a value, all threads load it.
+    ///
+    /// Uses Acquire/Release ordering for proper visibility:
+    /// - Thread 0: store with Release (makes the write visible)
+    /// - Other threads: load with Acquire (sees the Release'd write)
+    #[kernel]
+    pub fn atomic_load_store_test(flag: &[u32], mut out: DisjointSlice<u32>) {
+        let tid = thread::threadIdx_x();
+        let gid = thread::index_1d();
 
-    let atomic_counter = unsafe { &*(counter.as_ptr() as *const DeviceAtomicU32) };
+        // Get an DeviceAtomicU32 reference to flag[0] (shared access via interior mutability)
+        let atomic_flag = unsafe { &*(flag.as_ptr() as *const DeviceAtomicU32) };
 
-    // AcqRel triggers: fence release + atomicrmw monotonic + fence acquire
-    let old = atomic_counter.fetch_add(1, AtomicOrdering::AcqRel);
-
-    if let Some(out_elem) = out.get_mut(gid) {
-        *out_elem = old;
-    }
-}
-
-/// Test 5: Atomic fetch_add with SeqCst ordering -- exercises fence.sc pattern.
-///
-/// SeqCst emits: fence seq_cst + atomicrmw monotonic + fence seq_cst.
-#[kernel]
-pub fn atomic_fetch_add_seqcst_test(counter: &[u32], mut out: DisjointSlice<u32>) {
-    let gid = thread::index_1d();
-
-    let atomic_counter = unsafe { &*(counter.as_ptr() as *const DeviceAtomicU32) };
-
-    // SeqCst triggers: fence seq_cst + atomicrmw monotonic + fence seq_cst
-    let old = atomic_counter.fetch_add(1, AtomicOrdering::SeqCst);
-
-    if let Some(out_elem) = out.get_mut(gid) {
-        *out_elem = old;
-    }
-}
-
-/// Test 6: DeviceAtomicI32 -- exercises signed atomic type with fetch_add and compare_exchange.
-///
-/// Verifies that signed atomics work correctly (i32 vs u32 in LLVM IR).
-#[kernel]
-pub fn atomic_i32_test(counter: &[i32], cas_target: &[i32], mut out: DisjointSlice<i32>) {
-    let tid = thread::threadIdx_x();
-    let gid = thread::index_1d();
-
-    let atomic_counter = unsafe { &*(counter.as_ptr() as *const DeviceAtomicI32) };
-    let atomic_cas = unsafe { &*(cas_target.as_ptr() as *const DeviceAtomicI32) };
-
-    // All threads increment the counter
-    let _old = atomic_counter.fetch_add(1, AtomicOrdering::Relaxed);
-
-    // Thread 0 does a CAS: swap 0 -> -42
-    if let Some(out_elem) = out.get_mut(gid) {
+        // Thread 0 stores a sentinel value
         if tid == 0 {
-            let result = atomic_cas.compare_exchange(
-                0,
-                -42,
-                AtomicOrdering::AcqRel,
-                AtomicOrdering::Relaxed,
-            );
-            match result {
-                Ok(_) => *out_elem = 1,
-                Err(_) => *out_elem = 0,
-            }
-        } else {
-            // Other threads just read the CAS target after a barrier
-            thread::sync_threads();
-            let val = atomic_cas.load(AtomicOrdering::Acquire);
+            atomic_flag.store(42, AtomicOrdering::Release);
+        }
+
+        // Barrier ensures all threads see the store
+        thread::sync_threads();
+
+        // All threads load the value
+        let val = atomic_flag.load(AtomicOrdering::Acquire);
+        if let Some(out_elem) = out.get_mut(gid) {
             *out_elem = val;
         }
     }
-}
 
-/// Test 7: Multi-block fetch_add -- exercises device-scope atomics across CTAs.
-///
-/// Uses 4 blocks x 64 threads = 256 threads total. The counter must reach 256,
-/// proving that atomics work across different thread blocks (CTAs).
-#[kernel]
-pub fn atomic_multiblock_test(counter: &[u32], mut out: DisjointSlice<u32>) {
-    let gid = thread::index_1d();
+    /// Test 3: Atomic compare_exchange -- only one thread wins the CAS race.
+    ///
+    /// All threads try to CAS 0 -> their_tid. Exactly one succeeds.
+    #[kernel]
+    pub fn atomic_cas_test(winner: &[u32], mut out: DisjointSlice<u32>) {
+        let tid = thread::threadIdx_x();
+        let gid = thread::index_1d();
 
-    let atomic_counter = unsafe { &*(counter.as_ptr() as *const DeviceAtomicU32) };
+        // Get an DeviceAtomicU32 reference to winner[0] (shared access via interior mutability)
+        let atomic_winner = unsafe { &*(winner.as_ptr() as *const DeviceAtomicU32) };
 
-    let old = atomic_counter.fetch_add(1, AtomicOrdering::Relaxed);
+        // Try to be the first thread to swap 0 -> (tid + 1)
+        // We use tid+1 so that thread 0's success value (1) differs from the
+        // initial value (0).
+        let result = atomic_winner.compare_exchange(
+            0,
+            tid + 1,
+            AtomicOrdering::AcqRel,
+            AtomicOrdering::Relaxed,
+        );
 
-    if let Some(out_elem) = out.get_mut(gid) {
-        *out_elem = old;
-    }
-}
-
-/// Test 8: DeviceAtomicU64 fetch_add -- 64-bit unsigned atomics.
-///
-/// Same pattern as test 1 but with u64 to verify 64-bit type plumbing.
-#[kernel]
-pub fn atomic_u64_fetch_add_test(counter: &[u64], mut out: DisjointSlice<u64>) {
-    let gid = thread::index_1d();
-
-    let atomic_counter = unsafe { &*(counter.as_ptr() as *const DeviceAtomicU64) };
-
-    let old = atomic_counter.fetch_add(1, AtomicOrdering::Relaxed);
-
-    if let Some(out_elem) = out.get_mut(gid) {
-        *out_elem = old;
-    }
-}
-
-/// Test 9: DeviceAtomicI64 fetch_add + compare_exchange -- 64-bit signed atomics.
-///
-/// Verifies i64 path: fetch_add increments, CAS swaps 0 -> -100.
-#[kernel]
-pub fn atomic_i64_test(counter: &[i64], cas_target: &[i64], mut out: DisjointSlice<i64>) {
-    let tid = thread::threadIdx_x();
-    let gid = thread::index_1d();
-
-    let atomic_counter = unsafe { &*(counter.as_ptr() as *const DeviceAtomicI64) };
-    let atomic_cas = unsafe { &*(cas_target.as_ptr() as *const DeviceAtomicI64) };
-
-    // All threads increment the counter
-    let _old = atomic_counter.fetch_add(1, AtomicOrdering::Relaxed);
-
-    // Thread 0 does a CAS: swap 0 -> -100
-    if let Some(out_elem) = out.get_mut(gid) {
-        if tid == 0 {
-            let result = atomic_cas.compare_exchange(
-                0,
-                -100,
-                AtomicOrdering::AcqRel,
-                AtomicOrdering::Relaxed,
-            );
+        if let Some(out_elem) = out.get_mut(gid) {
             match result {
-                Ok(_) => *out_elem = 1,
-                Err(_) => *out_elem = 0,
+                Ok(_old) => {
+                    // This thread won the race
+                    *out_elem = 1;
+                }
+                Err(_old) => {
+                    // Another thread already swapped
+                    *out_elem = 0;
+                }
             }
-        } else {
-            thread::sync_threads();
-            let val = atomic_cas.load(AtomicOrdering::Acquire);
+        }
+    }
+
+    /// Test 4: Atomic fetch_add with AcqRel ordering -- exercises fence-splitting workaround.
+    ///
+    /// The LLVM NVPTX backend drops orderings on atomicrmw (fix in LLVM 23).
+    /// We work around this by emitting: fence release + atomicrmw monotonic + fence acquire.
+    /// This test verifies that path produces correct results.
+    #[kernel]
+    pub fn atomic_fetch_add_acqrel_test(counter: &[u32], mut out: DisjointSlice<u32>) {
+        let gid = thread::index_1d();
+
+        let atomic_counter = unsafe { &*(counter.as_ptr() as *const DeviceAtomicU32) };
+
+        // AcqRel triggers: fence release + atomicrmw monotonic + fence acquire
+        let old = atomic_counter.fetch_add(1, AtomicOrdering::AcqRel);
+
+        if let Some(out_elem) = out.get_mut(gid) {
+            *out_elem = old;
+        }
+    }
+
+    /// Test 5: Atomic fetch_add with SeqCst ordering -- exercises fence.sc pattern.
+    ///
+    /// SeqCst emits: fence seq_cst + atomicrmw monotonic + fence seq_cst.
+    #[kernel]
+    pub fn atomic_fetch_add_seqcst_test(counter: &[u32], mut out: DisjointSlice<u32>) {
+        let gid = thread::index_1d();
+
+        let atomic_counter = unsafe { &*(counter.as_ptr() as *const DeviceAtomicU32) };
+
+        // SeqCst triggers: fence seq_cst + atomicrmw monotonic + fence seq_cst
+        let old = atomic_counter.fetch_add(1, AtomicOrdering::SeqCst);
+
+        if let Some(out_elem) = out.get_mut(gid) {
+            *out_elem = old;
+        }
+    }
+
+    /// Test 6: DeviceAtomicI32 -- exercises signed atomic type with fetch_add and compare_exchange.
+    ///
+    /// Verifies that signed atomics work correctly (i32 vs u32 in LLVM IR).
+    #[kernel]
+    pub fn atomic_i32_test(counter: &[i32], cas_target: &[i32], mut out: DisjointSlice<i32>) {
+        let tid = thread::threadIdx_x();
+        let gid = thread::index_1d();
+
+        let atomic_counter = unsafe { &*(counter.as_ptr() as *const DeviceAtomicI32) };
+        let atomic_cas = unsafe { &*(cas_target.as_ptr() as *const DeviceAtomicI32) };
+
+        // All threads increment the counter
+        let _old = atomic_counter.fetch_add(1, AtomicOrdering::Relaxed);
+
+        // Thread 0 does a CAS: swap 0 -> -42
+        if let Some(out_elem) = out.get_mut(gid) {
+            if tid == 0 {
+                let result = atomic_cas.compare_exchange(
+                    0,
+                    -42,
+                    AtomicOrdering::AcqRel,
+                    AtomicOrdering::Relaxed,
+                );
+                match result {
+                    Ok(_) => *out_elem = 1,
+                    Err(_) => *out_elem = 0,
+                }
+            } else {
+                // Other threads just read the CAS target after a barrier
+                thread::sync_threads();
+                let val = atomic_cas.load(AtomicOrdering::Acquire);
+                *out_elem = val;
+            }
+        }
+    }
+
+    /// Test 7: Multi-block fetch_add -- exercises device-scope atomics across CTAs.
+    ///
+    /// Uses 4 blocks x 64 threads = 256 threads total. The counter must reach 256,
+    /// proving that atomics work across different thread blocks (CTAs).
+    #[kernel]
+    pub fn atomic_multiblock_test(counter: &[u32], mut out: DisjointSlice<u32>) {
+        let gid = thread::index_1d();
+
+        let atomic_counter = unsafe { &*(counter.as_ptr() as *const DeviceAtomicU32) };
+
+        let old = atomic_counter.fetch_add(1, AtomicOrdering::Relaxed);
+
+        if let Some(out_elem) = out.get_mut(gid) {
+            *out_elem = old;
+        }
+    }
+
+    /// Test 8: DeviceAtomicU64 fetch_add -- 64-bit unsigned atomics.
+    ///
+    /// Same pattern as test 1 but with u64 to verify 64-bit type plumbing.
+    #[kernel]
+    pub fn atomic_u64_fetch_add_test(counter: &[u64], mut out: DisjointSlice<u64>) {
+        let gid = thread::index_1d();
+
+        let atomic_counter = unsafe { &*(counter.as_ptr() as *const DeviceAtomicU64) };
+
+        let old = atomic_counter.fetch_add(1, AtomicOrdering::Relaxed);
+
+        if let Some(out_elem) = out.get_mut(gid) {
+            *out_elem = old;
+        }
+    }
+
+    /// Test 9: DeviceAtomicI64 fetch_add + compare_exchange -- 64-bit signed atomics.
+    ///
+    /// Verifies i64 path: fetch_add increments, CAS swaps 0 -> -100.
+    #[kernel]
+    pub fn atomic_i64_test(counter: &[i64], cas_target: &[i64], mut out: DisjointSlice<i64>) {
+        let tid = thread::threadIdx_x();
+        let gid = thread::index_1d();
+
+        let atomic_counter = unsafe { &*(counter.as_ptr() as *const DeviceAtomicI64) };
+        let atomic_cas = unsafe { &*(cas_target.as_ptr() as *const DeviceAtomicI64) };
+
+        // All threads increment the counter
+        let _old = atomic_counter.fetch_add(1, AtomicOrdering::Relaxed);
+
+        // Thread 0 does a CAS: swap 0 -> -100
+        if let Some(out_elem) = out.get_mut(gid) {
+            if tid == 0 {
+                let result = atomic_cas.compare_exchange(
+                    0,
+                    -100,
+                    AtomicOrdering::AcqRel,
+                    AtomicOrdering::Relaxed,
+                );
+                match result {
+                    Ok(_) => *out_elem = 1,
+                    Err(_) => *out_elem = 0,
+                }
+            } else {
+                thread::sync_threads();
+                let val = atomic_cas.load(AtomicOrdering::Acquire);
+                *out_elem = val;
+            }
+        }
+    }
+
+    /// Test 10: DeviceAtomicU32 fetch_sub -- subtraction RMW op.
+    ///
+    /// Start counter at N, each thread subtracts 1. Result should be 0.
+    #[kernel]
+    pub fn atomic_fetch_sub_test(counter: &[u32], mut out: DisjointSlice<u32>) {
+        let gid = thread::index_1d();
+
+        let atomic_counter = unsafe { &*(counter.as_ptr() as *const DeviceAtomicU32) };
+
+        let old = atomic_counter.fetch_sub(1, AtomicOrdering::Relaxed);
+
+        if let Some(out_elem) = out.get_mut(gid) {
+            *out_elem = old;
+        }
+    }
+
+    /// Test 11: DeviceAtomicU32 bitwise ops -- fetch_and, fetch_or, fetch_xor.
+    ///
+    /// Three separate counters:
+    /// - or_acc: starts at 0, each thread ORs in (1 << (tid % 32))
+    /// - and_acc: starts at 0xFFFFFFFF, thread 0 ANDs with 0x0000FFFF
+    /// - xor_acc: starts at 0, each thread XORs with 1 (odd/even toggle)
+    #[kernel]
+    pub fn atomic_bitwise_test(
+        or_acc: &[u32],
+        and_acc: &[u32],
+        xor_acc: &[u32],
+        mut out: DisjointSlice<u32>,
+    ) {
+        let tid = thread::threadIdx_x();
+        let gid = thread::index_1d();
+
+        let atomic_or = unsafe { &*(or_acc.as_ptr() as *const DeviceAtomicU32) };
+        let atomic_and = unsafe { &*(and_acc.as_ptr() as *const DeviceAtomicU32) };
+        let atomic_xor = unsafe { &*(xor_acc.as_ptr() as *const DeviceAtomicU32) };
+
+        // Each thread sets its bit in the OR accumulator
+        let bit = 1u32 << (tid % 32);
+        atomic_or.fetch_or(bit, AtomicOrdering::Relaxed);
+
+        // Thread 0 masks out the upper 16 bits via AND
+        if tid == 0 {
+            atomic_and.fetch_and(0x0000FFFF, AtomicOrdering::Relaxed);
+        }
+
+        // Every thread XORs with 1 (toggles bit 0)
+        atomic_xor.fetch_xor(1, AtomicOrdering::Relaxed);
+
+        // Store tid so we can verify the kernel ran
+        if let Some(out_elem) = out.get_mut(gid) {
+            *out_elem = tid;
+        }
+    }
+
+    /// Test 12: DeviceAtomicU32 swap -- atomic exchange.
+    ///
+    /// Thread 0 swaps in a sentinel value (0xDEADBEEF), gets back the old value (0).
+    #[kernel]
+    pub fn atomic_swap_test(target: &[u32], mut out: DisjointSlice<u32>) {
+        let tid = thread::threadIdx_x();
+        let gid = thread::index_1d();
+
+        let atomic_target = unsafe { &*(target.as_ptr() as *const DeviceAtomicU32) };
+
+        if let Some(out_elem) = out.get_mut(gid) {
+            if tid == 0 {
+                let old = atomic_target.swap(0xDEADBEEF, AtomicOrdering::AcqRel);
+                *out_elem = old; // Should be 0 (initial value)
+            } else {
+                // Other threads wait, then read
+                thread::sync_threads();
+                let val = atomic_target.load(AtomicOrdering::Acquire);
+                *out_elem = val; // Should be 0xDEADBEEF
+            }
+        }
+    }
+
+    /// Test 13: DeviceAtomicI32 fetch_min / fetch_max -- signed min/max RMW.
+    ///
+    /// All threads atomically update min and max accumulators with their
+    /// (signed) thread id offset by -128. After 256 threads:
+    /// - min should be -128 (thread 0's value)
+    /// - max should be 127 (thread 255's value)
+    #[kernel]
+    pub fn atomic_minmax_test(min_acc: &[i32], max_acc: &[i32], mut out: DisjointSlice<i32>) {
+        let tid = thread::threadIdx_x();
+        let gid = thread::index_1d();
+
+        let atomic_min = unsafe { &*(min_acc.as_ptr() as *const DeviceAtomicI32) };
+        let atomic_max = unsafe { &*(max_acc.as_ptr() as *const DeviceAtomicI32) };
+
+        // Each thread contributes a signed value: tid - 128
+        // Range: -128 to +127 for 256 threads
+        let val = tid as i32 - 128;
+
+        atomic_min.fetch_min(val, AtomicOrdering::Relaxed);
+        atomic_max.fetch_max(val, AtomicOrdering::Relaxed);
+
+        if let Some(out_elem) = out.get_mut(gid) {
             *out_elem = val;
         }
     }
-}
 
-/// Test 10: DeviceAtomicU32 fetch_sub -- subtraction RMW op.
-///
-/// Start counter at N, each thread subtracts 1. Result should be 0.
-#[kernel]
-pub fn atomic_fetch_sub_test(counter: &[u32], mut out: DisjointSlice<u32>) {
-    let gid = thread::index_1d();
+    /// Test 14: DeviceAtomicF32 fetch_add -- floating-point atomic add.
+    ///
+    /// Each thread adds 1.0 to a counter. After N threads, should equal N.0.
+    /// This tests the FAdd RMW kind path (atomicrmw fadd).
+    #[kernel]
+    pub fn atomic_f32_fetch_add_test(counter: &[f32], mut out: DisjointSlice<u32>) {
+        let gid = thread::index_1d();
 
-    let atomic_counter = unsafe { &*(counter.as_ptr() as *const DeviceAtomicU32) };
+        let atomic_counter = unsafe { &*(counter.as_ptr() as *const DeviceAtomicF32) };
 
-    let old = atomic_counter.fetch_sub(1, AtomicOrdering::Relaxed);
+        // Each thread adds 1.0
+        let _old = atomic_counter.fetch_add(1.0, AtomicOrdering::Relaxed);
 
-    if let Some(out_elem) = out.get_mut(gid) {
-        *out_elem = old;
-    }
-}
-
-/// Test 11: DeviceAtomicU32 bitwise ops -- fetch_and, fetch_or, fetch_xor.
-///
-/// Three separate counters:
-/// - or_acc: starts at 0, each thread ORs in (1 << (tid % 32))
-/// - and_acc: starts at 0xFFFFFFFF, thread 0 ANDs with 0x0000FFFF
-/// - xor_acc: starts at 0, each thread XORs with 1 (odd/even toggle)
-#[kernel]
-pub fn atomic_bitwise_test(
-    or_acc: &[u32],
-    and_acc: &[u32],
-    xor_acc: &[u32],
-    mut out: DisjointSlice<u32>,
-) {
-    let tid = thread::threadIdx_x();
-    let gid = thread::index_1d();
-
-    let atomic_or = unsafe { &*(or_acc.as_ptr() as *const DeviceAtomicU32) };
-    let atomic_and = unsafe { &*(and_acc.as_ptr() as *const DeviceAtomicU32) };
-    let atomic_xor = unsafe { &*(xor_acc.as_ptr() as *const DeviceAtomicU32) };
-
-    // Each thread sets its bit in the OR accumulator
-    let bit = 1u32 << (tid % 32);
-    atomic_or.fetch_or(bit, AtomicOrdering::Relaxed);
-
-    // Thread 0 masks out the upper 16 bits via AND
-    if tid == 0 {
-        atomic_and.fetch_and(0x0000FFFF, AtomicOrdering::Relaxed);
-    }
-
-    // Every thread XORs with 1 (toggles bit 0)
-    atomic_xor.fetch_xor(1, AtomicOrdering::Relaxed);
-
-    // Store tid so we can verify the kernel ran
-    if let Some(out_elem) = out.get_mut(gid) {
-        *out_elem = tid;
-    }
-}
-
-/// Test 12: DeviceAtomicU32 swap -- atomic exchange.
-///
-/// Thread 0 swaps in a sentinel value (0xDEADBEEF), gets back the old value (0).
-#[kernel]
-pub fn atomic_swap_test(target: &[u32], mut out: DisjointSlice<u32>) {
-    let tid = thread::threadIdx_x();
-    let gid = thread::index_1d();
-
-    let atomic_target = unsafe { &*(target.as_ptr() as *const DeviceAtomicU32) };
-
-    if let Some(out_elem) = out.get_mut(gid) {
-        if tid == 0 {
-            let old = atomic_target.swap(0xDEADBEEF, AtomicOrdering::AcqRel);
-            *out_elem = old; // Should be 0 (initial value)
-        } else {
-            // Other threads wait, then read
-            thread::sync_threads();
-            let val = atomic_target.load(AtomicOrdering::Acquire);
-            *out_elem = val; // Should be 0xDEADBEEF
+        // Store 1 to indicate this thread ran
+        if let Some(out_elem) = out.get_mut(gid) {
+            *out_elem = 1;
         }
     }
-}
 
-/// Test 13: DeviceAtomicI32 fetch_min / fetch_max -- signed min/max RMW.
-///
-/// All threads atomically update min and max accumulators with their
-/// (signed) thread id offset by -128. After 256 threads:
-/// - min should be -128 (thread 0's value)
-/// - max should be 127 (thread 255's value)
-#[kernel]
-pub fn atomic_minmax_test(min_acc: &[i32], max_acc: &[i32], mut out: DisjointSlice<i32>) {
-    let tid = thread::threadIdx_x();
-    let gid = thread::index_1d();
+    /// Test 15: DeviceAtomicF64 fetch_add -- 64-bit floating-point atomic add.
+    ///
+    /// Same pattern as test 14 but with f64. Requires sm_60+ (we target sm_80+).
+    #[kernel]
+    pub fn atomic_f64_fetch_add_test(counter: &[f64], mut out: DisjointSlice<u32>) {
+        let gid = thread::index_1d();
 
-    let atomic_min = unsafe { &*(min_acc.as_ptr() as *const DeviceAtomicI32) };
-    let atomic_max = unsafe { &*(max_acc.as_ptr() as *const DeviceAtomicI32) };
+        let atomic_counter = unsafe { &*(counter.as_ptr() as *const DeviceAtomicF64) };
 
-    // Each thread contributes a signed value: tid - 128
-    // Range: -128 to +127 for 256 threads
-    let val = tid as i32 - 128;
+        let _old = atomic_counter.fetch_add(1.0, AtomicOrdering::Relaxed);
 
-    atomic_min.fetch_min(val, AtomicOrdering::Relaxed);
-    atomic_max.fetch_max(val, AtomicOrdering::Relaxed);
-
-    if let Some(out_elem) = out.get_mut(gid) {
-        *out_elem = val;
+        if let Some(out_elem) = out.get_mut(gid) {
+            *out_elem = 1;
+        }
     }
-}
 
-/// Test 14: DeviceAtomicF32 fetch_add -- floating-point atomic add.
-///
-/// Each thread adds 1.0 to a counter. After N threads, should equal N.0.
-/// This tests the FAdd RMW kind path (atomicrmw fadd).
-#[kernel]
-pub fn atomic_f32_fetch_add_test(counter: &[f32], mut out: DisjointSlice<u32>) {
-    let gid = thread::index_1d();
+    /// Test 16: DeviceAtomicF32 swap -- float atomic exchange.
+    ///
+    /// Thread 0 swaps in 3.14, gets back 0.0. Other threads read 3.14 after barrier.
+    /// This verifies atomicrmw xchg works on float types.
+    #[kernel]
+    pub fn atomic_f32_swap_test(target: &[f32], mut out: DisjointSlice<u32>) {
+        let tid = thread::threadIdx_x();
+        let gid = thread::index_1d();
 
-    let atomic_counter = unsafe { &*(counter.as_ptr() as *const DeviceAtomicF32) };
+        let atomic_target = unsafe { &*(target.as_ptr() as *const DeviceAtomicF32) };
 
-    // Each thread adds 1.0
-    let _old = atomic_counter.fetch_add(1.0, AtomicOrdering::Relaxed);
-
-    // Store 1 to indicate this thread ran
-    if let Some(out_elem) = out.get_mut(gid) {
-        *out_elem = 1;
-    }
-}
-
-/// Test 15: DeviceAtomicF64 fetch_add -- 64-bit floating-point atomic add.
-///
-/// Same pattern as test 14 but with f64. Requires sm_60+ (we target sm_80+).
-#[kernel]
-pub fn atomic_f64_fetch_add_test(counter: &[f64], mut out: DisjointSlice<u32>) {
-    let gid = thread::index_1d();
-
-    let atomic_counter = unsafe { &*(counter.as_ptr() as *const DeviceAtomicF64) };
-
-    let _old = atomic_counter.fetch_add(1.0, AtomicOrdering::Relaxed);
-
-    if let Some(out_elem) = out.get_mut(gid) {
-        *out_elem = 1;
-    }
-}
-
-/// Test 16: DeviceAtomicF32 swap -- float atomic exchange.
-///
-/// Thread 0 swaps in 3.14, gets back 0.0. Other threads read 3.14 after barrier.
-/// This verifies atomicrmw xchg works on float types.
-#[kernel]
-pub fn atomic_f32_swap_test(target: &[f32], mut out: DisjointSlice<u32>) {
-    let tid = thread::threadIdx_x();
-    let gid = thread::index_1d();
-
-    let atomic_target = unsafe { &*(target.as_ptr() as *const DeviceAtomicF32) };
-
-    if let Some(out_elem) = out.get_mut(gid) {
-        if tid == 0 {
-            let old = atomic_target.swap(3.14, AtomicOrdering::AcqRel);
-            // old should be 0.0 (initial); write 1 to indicate success
-            // We check old == 0.0 by testing if it's < 0.01
-            if old < 0.01 {
-                *out_elem = 1;
+        if let Some(out_elem) = out.get_mut(gid) {
+            if tid == 0 {
+                let old = atomic_target.swap(3.14, AtomicOrdering::AcqRel);
+                // old should be 0.0 (initial); write 1 to indicate success
+                // We check old == 0.0 by testing if it's < 0.01
+                if old < 0.01 {
+                    *out_elem = 1;
+                } else {
+                    *out_elem = 0;
+                }
             } else {
-                *out_elem = 0;
-            }
-        } else {
-            thread::sync_threads();
-            let val = atomic_target.load(AtomicOrdering::Acquire);
-            // All other threads should read ~3.14
-            if val > 3.0 {
-                *out_elem = 1;
-            } else {
-                *out_elem = 0;
+                thread::sync_threads();
+                let val = atomic_target.load(AtomicOrdering::Acquire);
+                // All other threads should read ~3.14
+                if val > 3.0 {
+                    *out_elem = 1;
+                } else {
+                    *out_elem = 0;
+                }
             }
         }
     }
-}
 
-/// Test 17: DeviceAtomicU32 fetch_min / fetch_max -- unsigned min/max (UMin/UMax).
-///
-/// All threads contribute their tid. After 256 threads:
-/// - min should be 0 (thread 0's value)
-/// - max should be 255 (thread 255's value)
-///
-/// This specifically tests the UMin/UMax path (unsigned), whereas test 13
-/// tests the Min/Max path (signed).
-#[kernel]
-pub fn atomic_unsigned_minmax_test(min_acc: &[u32], max_acc: &[u32], mut out: DisjointSlice<u32>) {
-    let tid = thread::threadIdx_x();
-    let gid = thread::index_1d();
+    /// Test 17: DeviceAtomicU32 fetch_min / fetch_max -- unsigned min/max (UMin/UMax).
+    ///
+    /// All threads contribute their tid. After 256 threads:
+    /// - min should be 0 (thread 0's value)
+    /// - max should be 255 (thread 255's value)
+    ///
+    /// This specifically tests the UMin/UMax path (unsigned), whereas test 13
+    /// tests the Min/Max path (signed).
+    #[kernel]
+    pub fn atomic_unsigned_minmax_test(
+        min_acc: &[u32],
+        max_acc: &[u32],
+        mut out: DisjointSlice<u32>,
+    ) {
+        let tid = thread::threadIdx_x();
+        let gid = thread::index_1d();
 
-    let atomic_min = unsafe { &*(min_acc.as_ptr() as *const DeviceAtomicU32) };
-    let atomic_max = unsafe { &*(max_acc.as_ptr() as *const DeviceAtomicU32) };
+        let atomic_min = unsafe { &*(min_acc.as_ptr() as *const DeviceAtomicU32) };
+        let atomic_max = unsafe { &*(max_acc.as_ptr() as *const DeviceAtomicU32) };
 
-    atomic_min.fetch_min(tid, AtomicOrdering::Relaxed);
-    atomic_max.fetch_max(tid, AtomicOrdering::Relaxed);
+        atomic_min.fetch_min(tid, AtomicOrdering::Relaxed);
+        atomic_max.fetch_max(tid, AtomicOrdering::Relaxed);
 
-    if let Some(out_elem) = out.get_mut(gid) {
-        *out_elem = tid;
+        if let Some(out_elem) = out.get_mut(gid) {
+            *out_elem = tid;
+        }
     }
-}
 
-/// Test 18: BlockAtomicU32 fetch_add -- block-scope (.cta) atomics.
-///
-/// Uses BlockAtomicU32 which emits syncscope("block") → `.cta` in PTX.
-/// Since we launch a single block, block scope is correct here.
-/// The counter should reach N just like device-scope, but with cheaper
-/// coherence (block scope only guarantees visibility within the CTA).
-#[kernel]
-pub fn atomic_block_scope_test(counter: &[u32], mut out: DisjointSlice<u32>) {
-    let gid = thread::index_1d();
+    /// Test 18: BlockAtomicU32 fetch_add -- block-scope (.cta) atomics.
+    ///
+    /// Uses BlockAtomicU32 which emits syncscope("block") → `.cta` in PTX.
+    /// Since we launch a single block, block scope is correct here.
+    /// The counter should reach N just like device-scope, but with cheaper
+    /// coherence (block scope only guarantees visibility within the CTA).
+    #[kernel]
+    pub fn atomic_block_scope_test(counter: &[u32], mut out: DisjointSlice<u32>) {
+        let gid = thread::index_1d();
 
-    let atomic_counter = unsafe { &*(counter.as_ptr() as *const BlockAtomicU32) };
+        let atomic_counter = unsafe { &*(counter.as_ptr() as *const BlockAtomicU32) };
 
-    let old = atomic_counter.fetch_add(1, AtomicOrdering::Relaxed);
+        let old = atomic_counter.fetch_add(1, AtomicOrdering::Relaxed);
 
-    if let Some(out_elem) = out.get_mut(gid) {
-        *out_elem = old;
+        if let Some(out_elem) = out.get_mut(gid) {
+            *out_elem = old;
+        }
     }
-}
 
-/// Test 19: BlockAtomicU32 fetch_add with AcqRel -- proves `.cta` scope on fences.
-///
-/// Same logic as test 18, but uses AcqRel ordering.  Fence-splitting emits:
-///   fence.acq_rel.cta;  atom.add.u32 ...;  fence.acq_rel.cta;
-/// The `.cta` on the fences confirms the block-scope syncscope is propagated.
-#[kernel]
-pub fn atomic_block_scope_acqrel_test(counter: &[u32], mut out: DisjointSlice<u32>) {
-    let gid = thread::index_1d();
+    /// Test 19: BlockAtomicU32 fetch_add with AcqRel -- proves `.cta` scope on fences.
+    ///
+    /// Same logic as test 18, but uses AcqRel ordering.  Fence-splitting emits:
+    ///   fence.acq_rel.cta;  atom.add.u32 ...;  fence.acq_rel.cta;
+    /// The `.cta` on the fences confirms the block-scope syncscope is propagated.
+    #[kernel]
+    pub fn atomic_block_scope_acqrel_test(counter: &[u32], mut out: DisjointSlice<u32>) {
+        let gid = thread::index_1d();
 
-    let atomic_counter = unsafe { &*(counter.as_ptr() as *const BlockAtomicU32) };
+        let atomic_counter = unsafe { &*(counter.as_ptr() as *const BlockAtomicU32) };
 
-    let old = atomic_counter.fetch_add(1, AtomicOrdering::AcqRel);
+        let old = atomic_counter.fetch_add(1, AtomicOrdering::AcqRel);
 
-    if let Some(out_elem) = out.get_mut(gid) {
-        *out_elem = old;
+        if let Some(out_elem) = out.get_mut(gid) {
+            *out_elem = old;
+        }
     }
-}
 
-/// Test 20: core::sync::atomic::AtomicU32 -- standard library atomics.
-///
-/// Uses `core::sync::atomic::AtomicU32` with full path (no alias) to avoid
-/// collision with `cuda_device::atomic::DeviceAtomicU32`. Verifies that
-/// std::intrinsics::atomic_xadd is intercepted and lowered to NVVM atomics
-/// with system scope.
-#[kernel]
-pub fn core_atomic_fetch_add_test(counter: &[u32], mut out: DisjointSlice<u32>) {
-    let gid = thread::index_1d();
+    /// Test 20: core::sync::atomic::AtomicU32 -- standard library atomics.
+    ///
+    /// Uses `core::sync::atomic::AtomicU32` with full path (no alias) to avoid
+    /// collision with `cuda_device::atomic::DeviceAtomicU32`. Verifies that
+    /// std::intrinsics::atomic_xadd is intercepted and lowered to NVVM atomics
+    /// with system scope.
+    #[kernel]
+    pub fn core_atomic_fetch_add_test(counter: &[u32], mut out: DisjointSlice<u32>) {
+        let gid = thread::index_1d();
 
-    let atomic_counter = unsafe { &*(counter.as_ptr() as *const core::sync::atomic::AtomicU32) };
+        let atomic_counter =
+            unsafe { &*(counter.as_ptr() as *const core::sync::atomic::AtomicU32) };
 
-    let old = atomic_counter.fetch_add(1, Ordering::Relaxed);
+        let old = atomic_counter.fetch_add(1, Ordering::Relaxed);
 
-    if let Some(out_elem) = out.get_mut(gid) {
-        *out_elem = old;
+        if let Some(out_elem) = out.get_mut(gid) {
+            *out_elem = old;
+        }
     }
 }
 
@@ -534,6 +547,7 @@ fn main() {
     let module = ctx
         .load_module_from_file("atomics.ptx")
         .expect("Failed to load PTX module");
+    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
 
     const N: usize = 256;
 
@@ -552,14 +566,9 @@ fn main() {
         let counter_dev = DeviceBuffer::<u32>::zeroed(&stream, 1).unwrap();
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: atomic_fetch_add_test,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(counter_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .atomic_fetch_add_test((stream).as_ref(), cfg, &counter_dev, &mut out_dev)
+            .expect("Kernel launch failed");
 
         stream.synchronize().unwrap();
 
@@ -597,14 +606,9 @@ fn main() {
         let flag_dev = DeviceBuffer::<u32>::zeroed(&stream, 1).unwrap();
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: atomic_load_store_test,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(flag_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .atomic_load_store_test((stream).as_ref(), cfg, &flag_dev, &mut out_dev)
+            .expect("Kernel launch failed");
 
         stream.synchronize().unwrap();
         let result = out_dev.to_host_vec(&stream).unwrap();
@@ -632,14 +636,9 @@ fn main() {
         let winner_dev = DeviceBuffer::<u32>::zeroed(&stream, 1).unwrap();
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: atomic_cas_test,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(winner_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .atomic_cas_test((stream).as_ref(), cfg, &winner_dev, &mut out_dev)
+            .expect("Kernel launch failed");
 
         stream.synchronize().unwrap();
 
@@ -669,14 +668,9 @@ fn main() {
         let counter_dev = DeviceBuffer::<u32>::zeroed(&stream, 1).unwrap();
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: atomic_fetch_add_acqrel_test,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(counter_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .atomic_fetch_add_acqrel_test((stream).as_ref(), cfg, &counter_dev, &mut out_dev)
+            .expect("Kernel launch failed");
 
         stream.synchronize().unwrap();
         let counter_val = counter_dev.to_host_vec(&stream).unwrap();
@@ -713,14 +707,9 @@ fn main() {
         let counter_dev = DeviceBuffer::<u32>::zeroed(&stream, 1).unwrap();
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: atomic_fetch_add_seqcst_test,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(counter_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .atomic_fetch_add_seqcst_test((stream).as_ref(), cfg, &counter_dev, &mut out_dev)
+            .expect("Kernel launch failed");
 
         stream.synchronize().unwrap();
         let counter_val = counter_dev.to_host_vec(&stream).unwrap();
@@ -758,14 +747,15 @@ fn main() {
         let cas_target_dev = DeviceBuffer::<i32>::zeroed(&stream, 1).unwrap();
         let mut out_dev = DeviceBuffer::<i32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: atomic_i32_test,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(counter_dev), slice(cas_target_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .atomic_i32_test(
+                (stream).as_ref(),
+                cfg,
+                &counter_dev,
+                &cas_target_dev,
+                &mut out_dev,
+            )
+            .expect("Kernel launch failed");
 
         stream.synchronize().unwrap();
         let counter_val = counter_dev.to_host_vec(&stream).unwrap();
@@ -805,14 +795,14 @@ fn main() {
         let counter_dev = DeviceBuffer::<u32>::zeroed(&stream, 1).unwrap();
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, total_threads).unwrap();
 
-        cuda_launch! {
-            kernel: atomic_multiblock_test,
-            stream: stream,
-            module: module,
-            config: multiblock_cfg,
-            args: [slice(counter_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .atomic_multiblock_test(
+                (stream).as_ref(),
+                multiblock_cfg,
+                &counter_dev,
+                &mut out_dev,
+            )
+            .expect("Kernel launch failed");
 
         stream.synchronize().unwrap();
         let counter_val = counter_dev.to_host_vec(&stream).unwrap();
@@ -852,14 +842,9 @@ fn main() {
         let counter_dev = DeviceBuffer::<u64>::zeroed(&stream, 1).unwrap();
         let mut out_dev = DeviceBuffer::<u64>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: atomic_u64_fetch_add_test,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(counter_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .atomic_u64_fetch_add_test((stream).as_ref(), cfg, &counter_dev, &mut out_dev)
+            .expect("Kernel launch failed");
 
         stream.synchronize().unwrap();
         let counter_val = counter_dev.to_host_vec(&stream).unwrap();
@@ -894,14 +879,15 @@ fn main() {
         let cas_target_dev = DeviceBuffer::<i64>::zeroed(&stream, 1).unwrap();
         let mut out_dev = DeviceBuffer::<i64>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: atomic_i64_test,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(counter_dev), slice(cas_target_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .atomic_i64_test(
+                (stream).as_ref(),
+                cfg,
+                &counter_dev,
+                &cas_target_dev,
+                &mut out_dev,
+            )
+            .expect("Kernel launch failed");
 
         stream.synchronize().unwrap();
         let counter_val = counter_dev.to_host_vec(&stream).unwrap();
@@ -935,14 +921,9 @@ fn main() {
         let counter_dev = DeviceBuffer::from_host(&stream, &counter_host).unwrap();
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: atomic_fetch_sub_test,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(counter_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .atomic_fetch_sub_test((stream).as_ref(), cfg, &counter_dev, &mut out_dev)
+            .expect("Kernel launch failed");
 
         stream.synchronize().unwrap();
         let counter_val = counter_dev.to_host_vec(&stream).unwrap();
@@ -983,14 +964,16 @@ fn main() {
 
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: atomic_bitwise_test,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(or_dev), slice(and_dev), slice(xor_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .atomic_bitwise_test(
+                (stream).as_ref(),
+                cfg,
+                &or_dev,
+                &and_dev,
+                &xor_dev,
+                &mut out_dev,
+            )
+            .expect("Kernel launch failed");
 
         stream.synchronize().unwrap();
         let or_val = or_dev.to_host_vec(&stream).unwrap()[0];
@@ -1025,14 +1008,9 @@ fn main() {
         let target_dev = DeviceBuffer::<u32>::zeroed(&stream, 1).unwrap();
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: atomic_swap_test,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(target_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .atomic_swap_test((stream).as_ref(), cfg, &target_dev, &mut out_dev)
+            .expect("Kernel launch failed");
 
         stream.synchronize().unwrap();
         let target_val = target_dev.to_host_vec(&stream).unwrap()[0];
@@ -1069,14 +1047,9 @@ fn main() {
         let max_dev = DeviceBuffer::from_host(&stream, &max_host).unwrap();
         let mut out_dev = DeviceBuffer::<i32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: atomic_minmax_test,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(min_dev), slice(max_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .atomic_minmax_test((stream).as_ref(), cfg, &min_dev, &max_dev, &mut out_dev)
+            .expect("Kernel launch failed");
 
         stream.synchronize().unwrap();
         let min_val = min_dev.to_host_vec(&stream).unwrap()[0];
@@ -1103,14 +1076,9 @@ fn main() {
         let counter_dev = DeviceBuffer::<f32>::zeroed(&stream, 1).unwrap();
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: atomic_f32_fetch_add_test,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(counter_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .atomic_f32_fetch_add_test((stream).as_ref(), cfg, &counter_dev, &mut out_dev)
+            .expect("Kernel launch failed");
 
         stream.synchronize().unwrap();
         let counter_val = counter_dev.to_host_vec(&stream).unwrap();
@@ -1141,14 +1109,9 @@ fn main() {
         let counter_dev = DeviceBuffer::<f64>::zeroed(&stream, 1).unwrap();
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: atomic_f64_fetch_add_test,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(counter_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .atomic_f64_fetch_add_test((stream).as_ref(), cfg, &counter_dev, &mut out_dev)
+            .expect("Kernel launch failed");
 
         stream.synchronize().unwrap();
         let counter_val = counter_dev.to_host_vec(&stream).unwrap();
@@ -1178,14 +1141,9 @@ fn main() {
         let target_dev = DeviceBuffer::<f32>::zeroed(&stream, 1).unwrap();
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: atomic_f32_swap_test,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(target_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .atomic_f32_swap_test((stream).as_ref(), cfg, &target_dev, &mut out_dev)
+            .expect("Kernel launch failed");
 
         stream.synchronize().unwrap();
         let target_val = target_dev.to_host_vec(&stream).unwrap();
@@ -1219,14 +1177,9 @@ fn main() {
         let max_dev = DeviceBuffer::<u32>::zeroed(&stream, 1).unwrap();
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: atomic_unsigned_minmax_test,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(min_dev), slice(max_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .atomic_unsigned_minmax_test((stream).as_ref(), cfg, &min_dev, &max_dev, &mut out_dev)
+            .expect("Kernel launch failed");
 
         stream.synchronize().unwrap();
         let min_val = min_dev.to_host_vec(&stream).unwrap();
@@ -1261,14 +1214,9 @@ fn main() {
         let counter_dev = DeviceBuffer::<u32>::zeroed(&stream, 1).unwrap();
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: atomic_block_scope_test,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(counter_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .atomic_block_scope_test((stream).as_ref(), cfg, &counter_dev, &mut out_dev)
+            .expect("Kernel launch failed");
 
         stream.synchronize().unwrap();
         let counter_val = counter_dev.to_host_vec(&stream).unwrap();
@@ -1309,14 +1257,9 @@ fn main() {
         let counter_dev = DeviceBuffer::<u32>::zeroed(&stream, 1).unwrap();
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: atomic_block_scope_acqrel_test,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(counter_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .atomic_block_scope_acqrel_test((stream).as_ref(), cfg, &counter_dev, &mut out_dev)
+            .expect("Kernel launch failed");
 
         stream.synchronize().unwrap();
         let counter_val = counter_dev.to_host_vec(&stream).unwrap();
@@ -1356,14 +1299,9 @@ fn main() {
         let counter_dev = DeviceBuffer::<u32>::zeroed(&stream, 1).unwrap();
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: core_atomic_fetch_add_test,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(counter_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .core_atomic_fetch_add_test((stream).as_ref(), cfg, &counter_dev, &mut out_dev)
+            .expect("Kernel launch failed");
 
         stream.synchronize().unwrap();
         let counter_val = counter_dev.to_host_vec(&stream).unwrap();

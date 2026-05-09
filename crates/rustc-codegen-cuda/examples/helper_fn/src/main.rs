@@ -14,7 +14,7 @@
 
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
 use cuda_device::{DisjointSlice, device, kernel, thread};
-use cuda_host::cuda_launch;
+use cuda_host::cuda_module;
 
 // =============================================================================
 // DEVICE FUNCTION - Helper that gets inlined/linked into the kernel
@@ -39,18 +39,22 @@ pub fn vecadd_device(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
 // =============================================================================
 // KERNEL - Entry point that calls the device function
 // =============================================================================
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-/// Kernel that delegates to the device helper function.
-/// This tests the full pipeline: kernel -> device function -> PTX
-///
-/// Note: The kernel takes `c: DisjointSlice<f32>` (no `mut`) because it just
-/// forwards to the device function. In Rust, `mut` on a by-value parameter is
-/// purely local binding mutability — the caller doesn't need `mut` to pass
-/// an owned value.
-#[kernel]
-pub fn vecadd_with_helper(a: &[f32], b: &[f32], c: DisjointSlice<f32>) {
-    // Call the device function by its original name
-    vecadd_device(a, b, c);
+    /// Kernel that delegates to the device helper function.
+    /// This tests the full pipeline: kernel -> device function -> PTX
+    ///
+    /// Note: The kernel takes `c: DisjointSlice<f32>` (no `mut`) because it just
+    /// forwards to the device function. In Rust, `mut` on a by-value parameter is
+    /// purely local binding mutability — the caller doesn't need `mut` to pass
+    /// an owned value.
+    #[kernel]
+    pub fn vecadd_with_helper(a: &[f32], b: &[f32], c: DisjointSlice<f32>) {
+        // Call the device function by its original name
+        vecadd_device(a, b, c);
+    }
 }
 
 // =============================================================================
@@ -80,16 +84,18 @@ fn main() {
     let module = ctx
         .load_module_from_file("helper_fn.ptx")
         .expect("Failed to load PTX module");
+    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
 
     // Launch kernel
-    cuda_launch! {
-        kernel: vecadd_with_helper,
-        stream: stream,
-        module: module,
-        config: LaunchConfig::for_num_elems(N as u32),
-        args: [slice(a_dev), slice(b_dev), slice_mut(c_dev)]
-    }
-    .expect("Kernel launch failed");
+    module
+        .vecadd_with_helper(
+            (stream).as_ref(),
+            LaunchConfig::for_num_elems(N as u32),
+            &a_dev,
+            &b_dev,
+            &mut c_dev,
+        )
+        .expect("Kernel launch failed");
 
     // Get results
     let c_host = c_dev.to_host_vec(&stream).unwrap();

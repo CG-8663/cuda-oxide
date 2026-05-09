@@ -34,13 +34,13 @@
 //!   cargo oxide run async_mlp
 
 use cuda_async::device_box::DeviceBox;
-use cuda_async::device_context::{init_device_contexts, load_kernel_module_async};
+use cuda_async::device_context::init_device_contexts;
 use cuda_async::device_operation::{self, DeviceOperation, Zippable, value};
-use cuda_async::launch::AsyncKernelLaunch;
 use cuda_async::zip;
+use cuda_core::LaunchConfig;
 use cuda_core::memory::{malloc_async, memcpy_dtoh_async, memcpy_htod_async, memset_d8_async};
-use cuda_core::{CudaModule, LaunchConfig};
 use cuda_device::{DisjointSlice, kernel, thread};
+use cuda_host::cuda_module;
 use std::future::IntoFuture;
 use std::mem;
 use std::sync::Arc;
@@ -51,62 +51,73 @@ use std::sync::Arc;
 
 /// Naive GEMM: C = alpha * A * B + beta * C
 /// Each thread computes one element of C. Row-major layout.
-#[kernel]
-pub fn sgemm_naive(
-    m: u32,
-    n: u32,
-    k: u32,
-    alpha: f32,
-    a: &[f32],
-    b: &[f32],
-    beta: f32,
-    mut c: DisjointSlice<f32>,
-) {
-    let row = thread::index_2d_row();
-    let col = thread::index_2d_col();
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-    if let Some(c_idx) = thread::index_2d(n as usize) {
-        // col < n guaranteed by index_2d returning Some
-        if row < m as usize {
+    #[kernel]
+    pub fn sgemm_naive(
+        m: u32,
+        n: u32,
+        k: u32,
+        alpha: f32,
+        a: &[f32],
+        b: &[f32],
+        beta: f32,
+        mut c: DisjointSlice<f32>,
+    ) {
+        let row = thread::index_2d_row();
+        let col = thread::index_2d_col();
+
+        if let Some(c_idx) = thread::index_2d(n as usize) {
+            // col < n guaranteed by index_2d returning Some
+            if row < m as usize {
+                let n_sz = n as usize;
+                let k_sz = k as usize;
+                let mut sum = 0.0f32;
+                let mut i = 0usize;
+                while i < k_sz {
+                    sum = sum + a[row * k_sz + i] * b[i * n_sz + col];
+                    i = i + 1;
+                }
+                if let Some(c_elem) = c.get_mut(c_idx) {
+                    *c_elem = alpha * sum + beta * (*c_elem);
+                }
+            }
+        }
+    }
+
+    /// Naive matrix-vector multiply: out = mat * vec_in
+    /// Each thread computes one element of the output vector.
+    #[kernel]
+    pub fn matvec_naive(
+        _m: u32,
+        n: u32,
+        mat: &[f32],
+        vec_in: &[f32],
+        mut vec_out: DisjointSlice<f32>,
+    ) {
+        let row = thread::index_1d();
+        if let Some(out_elem) = vec_out.get_mut(row) {
             let n_sz = n as usize;
-            let k_sz = k as usize;
             let mut sum = 0.0f32;
-            let mut i = 0usize;
-            while i < k_sz {
-                sum = sum + a[row * k_sz + i] * b[i * n_sz + col];
-                i = i + 1;
+            let mut j = 0usize;
+            while j < n_sz {
+                sum = sum + mat[row.get() * n_sz + j] * vec_in[j];
+                j = j + 1;
             }
-            if let Some(c_elem) = c.get_mut(c_idx) {
-                *c_elem = alpha * sum + beta * (*c_elem);
-            }
+            *out_elem = sum;
         }
     }
-}
 
-/// Naive matrix-vector multiply: out = mat * vec_in
-/// Each thread computes one element of the output vector.
-#[kernel]
-pub fn matvec_naive(_m: u32, n: u32, mat: &[f32], vec_in: &[f32], mut vec_out: DisjointSlice<f32>) {
-    let row = thread::index_1d();
-    if let Some(out_elem) = vec_out.get_mut(row) {
-        let n_sz = n as usize;
-        let mut sum = 0.0f32;
-        let mut j = 0usize;
-        while j < n_sz {
-            sum = sum + mat[row.get() * n_sz + j] * vec_in[j];
-            j = j + 1;
+    /// In-place ReLU: data[i] = max(0, data[i])
+    #[kernel]
+    pub fn relu(mut data: DisjointSlice<f32>) {
+        let idx = thread::index_1d();
+        if let Some(elem) = data.get_mut(idx) {
+            let val = *elem;
+            *elem = if val > 0.0f32 { val } else { 0.0f32 };
         }
-        *out_elem = sum;
-    }
-}
-
-/// Elementwise ReLU: out[i] = max(0, input[i])
-#[kernel]
-pub fn relu(input: &[f32], mut output: DisjointSlice<f32>) {
-    let idx = thread::index_1d();
-    if let Some(out_elem) = output.get_mut(idx) {
-        let val = input[idx.get()];
-        *out_elem = if val > 0.0f32 { val } else { 0.0f32 };
     }
 }
 
@@ -180,7 +191,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. Initialize the async device context (round-robin pool of 4 streams).
     init_device_contexts(0, 1)?;
-    let module = load_kernel_module_async("async_mlp", 0)?;
+    let module = kernels::load_async(0)?;
 
     // 2. Allocate model weights on device using zip! to compose independent ops.
     //    Both allocations are submitted together on the same stream.
@@ -250,26 +261,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     DeviceBox<[f32]>,
                     DeviceBox<[f32]>,
                 )| {
-                    let func = module
-                        .load_function("sgemm_naive")
-                        .expect("Failed to load sgemm_naive");
-                    let mut launch = AsyncKernelLaunch::new(Arc::new(func));
+                    let launch = module
+                        .sgemm_naive_async_owned(
+                            gemm_cfg, DIM as u32, DIM as u32, DIM as u32, 1.0f32, input, w0,
+                            0.0f32, hidden,
+                        )
+                        .expect("Failed to build sgemm_naive launch");
                     launch
-                        .push_args((
-                            DIM as u32,
-                            DIM as u32,
-                            DIM as u32,
-                            1.0f32,
-                            input.cu_deviceptr(),
-                            input.len() as u64,
-                            w0.cu_deviceptr(),
-                            w0.len() as u64,
-                            0.0f32,
-                            hidden.cu_deviceptr(),
-                            hidden.len() as u64,
-                        ))
-                        .set_launch_config(gemm_cfg);
-                    launch.and_then(move |()| value((hidden, output, w1, module)))
+                        .and_then(move |(_input, _w0, hidden)| value((hidden, output, w1, module)))
                 },
             )
             // ── Stage 2: MatVec  output = hidden @ W1 ───────────────────
@@ -278,42 +277,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     DeviceBox<[f32]>,
                     DeviceBox<[f32]>,
                     Arc<DeviceBox<[f32]>>,
-                    Arc<CudaModule>,
+                    kernels::LoadedModule,
                 )| {
-                    let func = module
-                        .load_function("matvec_naive")
-                        .expect("Failed to load matvec_naive");
-                    let mut launch = AsyncKernelLaunch::new(Arc::new(func));
-                    launch
-                        .push_args((
-                            DIM as u32,
-                            DIM as u32,
-                            hidden.cu_deviceptr(),
-                            hidden.len() as u64,
-                            w1.cu_deviceptr(),
-                            w1.len() as u64,
-                            output.cu_deviceptr(),
-                            output.len() as u64,
-                        ))
-                        .set_launch_config(matvec_cfg);
-                    launch.and_then(move |()| value((output, module)))
+                    let launch = module
+                        .matvec_naive_async_owned(
+                            matvec_cfg, DIM as u32, DIM as u32, hidden, w1, output,
+                        )
+                        .expect("Failed to build matvec_naive launch");
+                    launch.and_then(move |(_hidden, _w1, output)| value((output, module)))
                 },
             )
             // ── Stage 3: ReLU  result = max(0, output) ──────────────────
             .and_then(
-                move |(output, module): (DeviceBox<[f32]>, Arc<CudaModule>)| {
-                    let func = module.load_function("relu").expect("Failed to load relu");
-                    let relu_out: DeviceBox<[f32]> = output;
-                    let mut launch = AsyncKernelLaunch::new(Arc::new(func));
-                    launch
-                        .push_args((
-                            relu_out.cu_deviceptr(),
-                            relu_out.len() as u64,
-                            relu_out.cu_deviceptr(),
-                            relu_out.len() as u64,
-                        ))
-                        .set_launch_config(relu_cfg);
-                    launch.and_then(move |()| value(relu_out))
+                move |(output, module): (DeviceBox<[f32]>, kernels::LoadedModule)| {
+                    module
+                        .relu_async_owned(relu_cfg, output)
+                        .expect("Failed to build relu launch")
                 },
             )
             // ── Stage 4: D2H  copy result back to host ──────────────────

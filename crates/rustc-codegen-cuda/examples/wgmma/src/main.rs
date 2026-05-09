@@ -16,41 +16,45 @@
 //! Build and run with:
 //!   cargo oxide run wgmma
 
-use cuda_core::{CudaContext, CudaModule, CudaStream, DeviceBuffer, LaunchConfig};
+use cuda_core::{CudaContext, CudaStream, DeviceBuffer, LaunchConfig};
 use cuda_device::shared::SharedArray;
 use cuda_device::wgmma::{make_smem_desc, wgmma_commit_group, wgmma_fence, wgmma_wait_group};
 use cuda_device::{DisjointSlice, kernel, thread};
-use cuda_host::cuda_launch;
+use cuda_host::cuda_module;
 use std::sync::Arc;
 
 // =============================================================================
 // KERNELS
 // =============================================================================
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-/// Test kernel for WGMMA sync primitives (no MMA).
-///
-/// This tests the basic WGMMA infrastructure:
-/// - make_smem_desc(): Create SMEM descriptor with swizzle
-/// - wgmma_fence(): Ensure prior memory operations complete
-/// - wgmma_commit_group(): Commit current instruction group
-/// - wgmma_wait_group::<0>(): Wait for all groups to complete
-#[kernel]
-pub unsafe fn wgmma_sync_test(mut output: DisjointSlice<u64>) {
-    static mut SMEM: SharedArray<u8, 256, 128> = SharedArray::UNINIT;
+    /// Test kernel for WGMMA sync primitives (no MMA).
+    ///
+    /// This tests the basic WGMMA infrastructure:
+    /// - make_smem_desc(): Create SMEM descriptor with swizzle
+    /// - wgmma_fence(): Ensure prior memory operations complete
+    /// - wgmma_commit_group(): Commit current instruction group
+    /// - wgmma_wait_group::<0>(): Wait for all groups to complete
+    #[kernel]
+    pub unsafe fn wgmma_sync_test(mut output: DisjointSlice<u64>) {
+        static mut SMEM: SharedArray<u8, 256, 128> = SharedArray::UNINIT;
 
-    let tid = thread::threadIdx_x();
-    let gid = thread::index_1d();
+        let tid = thread::threadIdx_x();
+        let gid = thread::index_1d();
 
-    unsafe {
-        let desc = make_smem_desc(&raw const SMEM as *const u8);
+        unsafe {
+            let desc = make_smem_desc(&raw const SMEM as *const u8);
 
-        wgmma_fence();
-        wgmma_commit_group();
-        wgmma_wait_group::<0>();
+            wgmma_fence();
+            wgmma_commit_group();
+            wgmma_wait_group::<0>();
 
-        if tid == 0 {
-            if let Some(output_elem) = output.get_mut(gid) {
-                *output_elem = desc;
+            if tid == 0 {
+                if let Some(output_elem) = output.get_mut(gid) {
+                    *output_elem = desc;
+                }
             }
         }
     }
@@ -90,6 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nLoading PTX from: {}", ptx_path.display());
     let ptx_file = ptx_path.to_str().ok_or("PTX path is not valid UTF-8")?;
     let module = ctx.load_module_from_file(ptx_file)?;
+    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
     println!("✓ PTX loaded successfully\n");
 
     // Test: Sync primitives
@@ -123,7 +128,7 @@ fn verify_ptx_only(ctx: &Arc<CudaContext>) -> Result<(), Box<dyn std::error::Err
 
 fn run_wgmma_sync_test(
     stream: &Arc<CudaStream>,
-    module: &Arc<CudaModule>,
+    module: &kernels::LoadedModule,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Test: WGMMA Sync Primitives ---\n");
 
@@ -138,13 +143,7 @@ fn run_wgmma_sync_test(
     };
 
     println!("Launching wgmma_sync_test kernel...");
-    cuda_launch! {
-        kernel: wgmma_sync_test,
-        stream: stream,
-        module: module,
-        config: cfg,
-        args: [slice_mut(dev_output)]
-    }?;
+    unsafe { module.wgmma_sync_test((stream).as_ref(), cfg, &mut dev_output) }?;
 
     stream.synchronize()?;
 

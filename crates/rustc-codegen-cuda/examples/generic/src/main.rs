@@ -23,7 +23,7 @@
 //! We should see a PTX entry point for `scale` (or `scale_f32` if we add type info).
 
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
-use cuda_device::{DisjointSlice, kernel, thread};
+use cuda_device::{DisjointSlice, cuda_module, kernel, thread};
 use std::ops::{Add, Mul};
 
 // =============================================================================
@@ -34,20 +34,26 @@ use std::ops::{Add, Mul};
 ///
 /// This kernel is generic over T. When called with `scale::<f32>`, rustc
 /// monomorphizes it to a concrete f32 version.
-#[kernel]
-pub fn scale<T: Copy + Mul<Output = T>>(factor: T, input: &[T], mut out: DisjointSlice<T>) {
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
-        *out_elem = input[idx.get()] * factor;
-    }
-}
+#[allow(dead_code)]
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-/// Generic add kernel - adds two arrays element-wise.
-#[kernel]
-pub fn add<T: Copy + Add<Output = T>>(a: &[T], b: &[T], mut c: DisjointSlice<T>) {
-    let idx = thread::index_1d();
-    if let Some(c_elem) = c.get_mut(idx) {
-        *c_elem = a[idx.get()] + b[idx.get()];
+    #[kernel]
+    pub fn scale<T: Copy + Mul<Output = T>>(factor: T, input: &[T], mut out: DisjointSlice<T>) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            *out_elem = input[idx.get()] * factor;
+        }
+    }
+
+    /// Generic add kernel - adds two arrays element-wise.
+    #[kernel]
+    pub fn add<T: Copy + Add<Output = T>>(a: &[T], b: &[T], mut c: DisjointSlice<T>) {
+        let idx = thread::index_1d();
+        if let Some(c_elem) = c.get_mut(idx) {
+            *c_elem = a[idx.get()] + b[idx.get()];
+        }
     }
 }
 
@@ -55,11 +61,7 @@ pub fn add<T: Copy + Add<Output = T>>(a: &[T], b: &[T], mut c: DisjointSlice<T>)
 // HOST CODE
 // =============================================================================
 //
-// Using cuda_launch! with type parameters to trigger monomorphization.
-// The macro expansion references cuda_oxide_kernel_<hash>_scale::<f32>, which forces
-// rustc to generate the monomorphized version.
-
-use cuda_host::cuda_launch;
+// Calling the typed module method with type parameters triggers monomorphization.
 
 fn main() {
     println!("=== Unified Generic Kernel Test ===\n");
@@ -76,38 +78,29 @@ fn main() {
     let input_dev = DeviceBuffer::from_host(&stream, &input_data).expect("Failed to copy input");
     let mut output_dev = DeviceBuffer::<f32>::zeroed(&stream, N).expect("Failed to alloc output");
 
-    let module = ctx
-        .load_module_from_file("generic.ptx")
-        .expect("Failed to load PTX module");
+    let module = kernels::load(&ctx).expect("Failed to load embedded CUDA module");
 
     // =========================================================================
-    // THE KEY: cuda_launch! with type parameter forces monomorphization!
+    // THE KEY: typed method call with type parameter forces monomorphization!
     // =========================================================================
     //
-    // cuda_launch! {
-    //     kernel: scale::<f32>,  // <-- Type parameter here!
-    //     stream: stream,
-    //     module: module,
-    //     config: LaunchConfig::for_num_elems(N as u32),
-    //     args: [factor, slice(input_dev), slice_mut(output_dev)]
-    // }
-    //
-    // This expands to code that references cuda_oxide_kernel_<hash>_scale::<f32>,
-    // which forces rustc to monomorphize it, which makes it visible to the
-    // backend's collector.
+    // module.scale::<f32>(...) expands to code that references
+    // cuda_oxide_kernel_scale::<f32>, forcing rustc to monomorphize it and
+    // making it visible to the backend's collector.
 
     println!("\nLaunching scale::<f32> kernel...");
     println!("  factor = {}", factor);
     println!("  N = {}", N);
 
-    cuda_launch! {
-        kernel: scale::<f32>,
-        stream: stream,
-        module: module,
-        config: LaunchConfig::for_num_elems(N as u32),
-        args: [factor, slice(input_dev), slice_mut(output_dev)]
-    }
-    .expect("Kernel launch failed");
+    module
+        .scale::<f32>(
+            &stream,
+            LaunchConfig::for_num_elems(N as u32),
+            factor,
+            &input_dev,
+            &mut output_dev,
+        )
+        .expect("Kernel launch failed");
 
     let output_host = output_dev
         .to_host_vec(&stream)
