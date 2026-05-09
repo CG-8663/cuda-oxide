@@ -808,6 +808,12 @@ fn build_rustflags(backend_so: &Path, debug: bool) -> String {
     if debug {
         flags.push_str(" -C debuginfo=2");
     }
+    if let Ok(existing) = std::env::var("RUSTFLAGS")
+        && !existing.is_empty()
+    {
+        flags.push(' ');
+        flags.push_str(&existing);
+    }
     flags
 }
 
