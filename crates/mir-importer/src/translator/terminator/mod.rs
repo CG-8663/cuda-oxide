@@ -73,12 +73,12 @@ use pliron::builtin::op_interfaces::OperandSegmentInterface;
 use pliron::builtin::types::{IntegerType, Signedness};
 use pliron::context::{Context, Ptr};
 use pliron::identifier::Legaliser;
-use pliron::input_err;
 use pliron::linked_list::ContainsLinkedList;
 use pliron::location::{Located, Location};
 use pliron::op::Op;
 use pliron::operation::Operation;
 use pliron::r#type::Typed;
+use pliron::{input_err, input_error};
 use rustc_public::CrateDef;
 use rustc_public::mir;
 use rustc_public::ty::ConstantKind;
@@ -164,7 +164,7 @@ pub fn translate_terminator(
             target,
             unwind,
         } => translate_drop(
-            ctx, place, *target, unwind, block_ptr, prev_op, block_map, loc,
+            ctx, body, place, *target, unwind, block_ptr, prev_op, block_map, loc,
         ),
 
         mir::TerminatorKind::Unreachable => {
@@ -725,54 +725,48 @@ fn translate_switch(
     Ok(first_branch)
 }
 
-/// Translates a MIR `Drop` terminator to a goto (no-op for GPU).
+/// Translates a MIR `Drop` terminator.
 ///
-/// On GPU, `Drop` is a no-op because:
-/// - Only `Copy` types are supported (no heap allocation)
-/// - Destructors are not called
+/// rustc emits `TerminatorKind::Drop` only for places whose type has drop
+/// glue. cuda-oxide does not yet emit device-side `drop_in_place` calls,
+/// so any drop-glued type reaching codegen would have its destructor
+/// silently skipped. Rather than lower to a goto and produce a silent
+/// miscompile, we surface a hard error with the dropped place's type so
+/// the user can diagnose and restructure the kernel.
 ///
-/// Simply emits a goto to the target block.
-///
-/// # GPU Constraints
-///
-/// Unwind edges are treated as unreachable (the CUDA toolchain does not
-/// support exception handling today).
+/// Suppressing drop glue on a Copy-shaped value (e.g. wrapping in
+/// `core::mem::ManuallyDrop`) prevents the Drop terminator from being
+/// emitted in the first place and lets the kernel compile.
 #[allow(clippy::too_many_arguments)]
 fn translate_drop(
-    ctx: &mut Context,
-    _place: &mir::Place,
-    target: mir::BasicBlockIdx,
-    unwind: &mir::UnwindAction,
-    block_ptr: Ptr<BasicBlock>,
-    prev_op: Option<Ptr<Operation>>,
-    block_map: &[Ptr<BasicBlock>],
+    _ctx: &mut Context,
+    body: &mir::Body,
+    place: &mir::Place,
+    _target: mir::BasicBlockIdx,
+    _unwind: &mir::UnwindAction,
+    _block_ptr: Ptr<BasicBlock>,
+    _prev_op: Option<Ptr<Operation>>,
+    _block_map: &[Ptr<BasicBlock>],
     loc: Location,
 ) -> TranslationResult<Ptr<Operation>> {
-    // See comment in translate_assert for rationale.
-    let _ = unwind;
-
-    // For GPU code, Drop is a no-op (Copy types only, no heap). Just branch
-    // to the target block.
-    let target_idx: usize = target;
-
-    if let Some(prev) = prev_op {
-        Ok(helpers::emit_goto(ctx, target_idx, prev, block_map, loc))
-    } else {
-        // No previous op - create a dummy unit value first
-        let unit_ty = dialect_mir::types::MirTupleType::get(ctx, vec![]);
-        let unit_op = Operation::new(
-            ctx,
-            dialect_mir::ops::MirConstructTupleOp::get_concrete_op_info(),
-            vec![unit_ty.into()],
-            vec![],
-            vec![],
-            0,
-        );
-        unit_op.deref_mut(ctx).set_loc(loc.clone());
-        unit_op.insert_at_front(block_ptr, ctx);
-
-        Ok(helpers::emit_goto(ctx, target_idx, unit_op, block_map, loc))
-    }
+    let dropped_ty = place.ty(body.locals()).map_err(|e| {
+        input_error!(
+            loc.clone(),
+            TranslationErr::unsupported(format!(
+                "drop terminator: failed to compute place type: {e:?}"
+            ))
+        )
+    })?;
+    input_err!(
+        loc,
+        TranslationErr::unsupported(format!(
+            "drop of `{:?}` is not supported on the device; cuda-oxide does \
+             not yet emit device-side `drop_in_place` calls. Restructure the \
+             kernel to use only `Copy` types, or wrap the value in \
+             `core::mem::ManuallyDrop` to suppress drop glue.",
+            dropped_ty.kind()
+        ))
+    )
 }
 
 // ============================================================================

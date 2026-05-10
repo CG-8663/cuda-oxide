@@ -36,13 +36,14 @@ set -uo pipefail
 TCGEN05_EXAMPLES=(gemm_sol tcgen05 tcgen05_matmul)
 WGMMA_EXAMPLES=(wgmma)
 LTOIR_EXAMPLES=(cpp_consumes_rust_device device_ffi_test mathdx_ffi_test primitive_stress)
+ERROR_EXAMPLES=(error error_wgmma_mma_unimplemented error_copy_nonoverlapping_unhandled error_drop_glue)
 
 classify() {
     local ex="$1" cat
     for cat in "${TCGEN05_EXAMPLES[@]}";     do [[ "$ex" == "$cat" ]] && { echo tcgen05;     return; }; done
     for cat in "${WGMMA_EXAMPLES[@]}";       do [[ "$ex" == "$cat" ]] && { echo wgmma;       return; }; done
     for cat in "${LTOIR_EXAMPLES[@]}";       do [[ "$ex" == "$cat" ]] && { echo ltoir;       return; }; done
-    [[ "$ex" == "error" ]] && { echo error; return; }
+    for cat in "${ERROR_EXAMPLES[@]}";       do [[ "$ex" == "$cat" ]] && { echo error;       return; }; done
     echo standard
 }
 

@@ -125,23 +125,26 @@ pub(crate) fn convert_make_smem_desc(
     Ok(())
 }
 
-/// Convert WGMMA MMA operation to inline PTX (placeholder).
+/// Convert WGMMA MMA operation to inline PTX.
+///
+/// The full lowering requires register allocation for 16+ output registers
+/// and is not yet implemented. Until it lands, calls to
+/// `cuda_device::wgmma::wgmma_mma_*` from a `#[kernel]` are rejected at
+/// codegen time with a clear diagnostic.
+///
+/// The previous behaviour silently emitted `// wgmma.mma placeholder` as an
+/// inline-asm comment and erased the op, producing PTX that loaded and ran
+/// but multiplied-accumulated to zero — a silent miscompile with no warning.
 pub(crate) fn convert_mma(
-    ctx: &mut Context,
-    rewriter: &mut DialectConversionRewriter,
-    op: Ptr<Operation>,
+    _ctx: &mut Context,
+    _rewriter: &mut DialectConversionRewriter,
+    _op: Ptr<Operation>,
     _operands_info: &OperandsInfo,
 ) -> Result<()> {
-    let void_ty = llvm_types::VoidType::get(ctx);
-    inline_asm_convergent(
-        ctx,
-        rewriter,
-        void_ty.into(),
-        vec![],
-        "// wgmma.mma placeholder",
-        "",
-    );
-    // TODO (npasham): Full WGMMA MMA requires 16+ output regs and register allocation strategy
-    rewriter.erase_operation(ctx, op);
-    Ok(())
+    pliron::input_err_noloc!(
+        "wgmma.mma_async lowering is not yet implemented; \
+         calls to `cuda_device::wgmma::wgmma_mma_*` from a kernel are \
+         currently unsupported. Tracking issue: full lowering requires \
+         register allocation for 16+ output registers."
+    )
 }

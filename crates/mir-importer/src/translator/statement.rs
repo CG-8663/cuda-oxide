@@ -682,13 +682,41 @@ pub fn translate_statement(
             // No-op statement, skip
             Ok(prev_op)
         }
-        _ => {
-            // TODO (npasham): Handle other statement kinds
-            // For now, just skip them instead of inserting dummy operations that might be unlinked
-            // or creating incorrect flow.
-            // NOTE: If we encounter important statements, we must implement them!
-            Ok(prev_op)
+
+        // Codegen-irrelevant statements: borrow-check / type-system / coverage
+        // hints that have no runtime effect. Skipping is correct.
+        mir::StatementKind::FakeRead(..)
+        | mir::StatementKind::Retag(..)
+        | mir::StatementKind::PlaceMention(..)
+        | mir::StatementKind::AscribeUserType { .. }
+        | mir::StatementKind::Coverage(..)
+        | mir::StatementKind::ConstEvalCounter => Ok(prev_op),
+
+        // `Assume` is an optimisation hint with no observable effect; safe to skip.
+        mir::StatementKind::Intrinsic(mir::NonDivergingIntrinsic::Assume(_)) => Ok(prev_op),
+
+        // Statements with observable runtime effect that are not yet lowered.
+        // Returning a hard error here converts what was previously a silent
+        // miscompile (the catch-all `Ok(prev_op)`) into a clear build failure.
+        // `Intrinsic(CopyNonOverlapping)` is the user-visible memcpy emitted by
+        // `core::ptr::copy_nonoverlapping`; `SetDiscriminant` mutates an enum's
+        // discriminant. Both must be implemented before they can be accepted.
+        mir::StatementKind::Intrinsic(mir::NonDivergingIntrinsic::CopyNonOverlapping(_)) => {
+            input_err!(
+                loc,
+                TranslationErr::unsupported(
+                    "core::ptr::copy_nonoverlapping is not yet supported on the device; \
+                     until it is lowered, the call would be silently dropped from the PTX",
+                )
+            )
         }
+        mir::StatementKind::SetDiscriminant { .. } => input_err!(
+            loc,
+            TranslationErr::unsupported(
+                "SetDiscriminant statements are not yet supported on the device; \
+                 until they are lowered, enum discriminant writes would be silently dropped",
+            )
+        ),
     }
 }
 
