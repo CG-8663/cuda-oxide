@@ -146,8 +146,8 @@ What test 6 does **not** cover:
 ## Intentionally Out of Scope for v1
 
 - **Deletion** — `hashmap_v2` and `hashmap_v3` introduce tombstone tags.
-- **Resize / rehash** — `hashmap_v3` adds a single-kernel `grid.sync()`
-  rehash.
+- **Resize / rehash** — `hashmap_v3` adds a single-kernel strided
+  two-buffer rehash.
 - **Generic `<K, V>`** — deferred for API design reasons (sentinel
   selection, slot-packing atomicity, hasher choice), not because of any
   cuda-oxide compiler limitation. `#[kernel]` already supports generics.
@@ -168,7 +168,7 @@ this one stays a clean, minimal reference:
 - **`hashmap_v3`** — keeps v2's storage layout and probe shape, drops
   the second insert protocol, and adds 16-lane sub-warp find tiles
   (`WarpTile<16>`), intra-warp insert dedup via `tile.match_any`,
-  `DELETED`-slot reclaim on insert, and a single-kernel `grid.sync()`
-  rehash with auto-resize.
+  `DELETED`-slot reclaim on insert, and a strided two-buffer rehash
+  with auto-resize.
 
 None of that retrofits onto v1; v1 stands on its own.
