@@ -43,6 +43,11 @@ use crate::stream::CudaStream;
 /// copied back from device memory must have a bit pattern that is valid for
 /// `Self`, and the all-zero bit pattern must also be valid because
 /// [`DeviceBuffer::zeroed`] initializes memory with zero bytes.
+///
+/// `Copy` alone is not enough: types such as `bool`, `char`, and
+/// `NonZeroU32` are `Copy`, but not every byte pattern is a valid value of
+/// those types. `DeviceCopy` is the stronger promise required when
+/// `DeviceBuffer` turns raw device bytes back into initialized Rust values.
 pub unsafe trait DeviceCopy: Copy {}
 
 macro_rules! impl_device_copy {
