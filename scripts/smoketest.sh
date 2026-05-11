@@ -81,7 +81,8 @@ EXAMPLES
   scripts/smoketest.sh -s 'wgmma|tma'  # skip wgmma and tma examples
   scripts/smoketest.sh -x -v vecadd    # stop on first fail, stream output
 
-Per-example logs live under target/smoketest-logs/.
+Per-example logs live under .smoketest-logs/ by default. Set
+SMOKETEST_LOG_DIR to override this path.
 EOF
 }
 
@@ -179,7 +180,13 @@ echo ""
 
 # ---- Example selection ---------------------------------------------------
 
-mapfile -t ALL_EXAMPLES < <(cd crates/rustc-codegen-cuda/examples && for d in */; do echo "${d%/}"; done | sort)
+mapfile -t ALL_EXAMPLES < <(
+    cd crates/rustc-codegen-cuda/examples
+    for manifest in */Cargo.toml; do
+        [[ -e "${manifest}" ]] || continue
+        echo "${manifest%/Cargo.toml}"
+    done | sort
+)
 
 selected=()
 for ex in "${ALL_EXAMPLES[@]}"; do
@@ -311,7 +318,7 @@ run_cargo() {
 
 # ---- Main loop -----------------------------------------------------------
 
-log_dir="target/smoketest-logs"
+log_dir="${SMOKETEST_LOG_DIR:-.smoketest-logs}"
 mkdir -p "${log_dir}"
 
 pass=0
@@ -336,14 +343,19 @@ for ex in "${selected[@]}"; do
     ec=${CARGO_EC}
     dt=$((SECONDS - t0))
 
-    case "${cat}" in
-        error)       verdict="$(verdict_error       "${log}" "${ec}")"        && status=0 || status=$? ;;
-        tcgen05)     verdict="$(verdict_tcgen05     "${log}" "${ec}")"        && status=0 || status=$? ;;
-        wgmma)       verdict="$(verdict_wgmma       "${log}" "${ec}")"        && status=0 || status=$? ;;
-        ltoir)       verdict="$(verdict_ltoir       "${ex}" "${log}" "${ec}")" && status=0 || status=$? ;;
-        standard)    verdict="$(verdict_standard    "${log}" "${ec}")"        && status=0 || status=$? ;;
-        *)           verdict="FAIL (unknown category: ${cat})"; status=1 ;;
-    esac
+    if [[ ! -f "${log}" ]]; then
+        verdict="FAIL (log missing: ${log})"
+        status=1
+    else
+        case "${cat}" in
+            error)       verdict="$(verdict_error       "${log}" "${ec}")"        && status=0 || status=$? ;;
+            tcgen05)     verdict="$(verdict_tcgen05     "${log}" "${ec}")"        && status=0 || status=$? ;;
+            wgmma)       verdict="$(verdict_wgmma       "${log}" "${ec}")"        && status=0 || status=$? ;;
+            ltoir)       verdict="$(verdict_ltoir       "${ex}" "${log}" "${ec}")" && status=0 || status=$? ;;
+            standard)    verdict="$(verdict_standard    "${log}" "${ec}")"        && status=0 || status=$? ;;
+            *)           verdict="FAIL (unknown category: ${cat})"; status=1 ;;
+        esac
+    fi
 
     if [[ ${status} -eq 0 ]]; then
         color="${C_PASS}"

@@ -3,8 +3,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// HMM kernels take raw `*mut T` from the host so the GPU can dereference
-// pageable host memory; the implicit `unsafe` is in the launch contract.
 #![allow(clippy::not_unsafe_ptr_arg_deref, clippy::missing_safety_doc)]
 
 //! Unified ABI + HMM Test Example
@@ -65,37 +63,43 @@ pub struct Extreme {
 // =============================================================================
 // KERNELS
 // =============================================================================
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-/// Kernel that modifies struct through pointer (tests HMM + unified ABI).
-///
-/// The pointer `p` points to HOST memory. GPU accesses it via HMM.
-/// `device_check` is set to 1 to prove the kernel ran on GPU.
-#[kernel]
-pub fn modify_extreme_hmm(p: *mut Extreme, scale: i128, device_check: *mut i32) {
-    let idx = thread::index_1d();
-    let idx_raw = idx.get();
-    if idx_raw == 0 {
-        unsafe {
-            // Mark that we ran on device
-            *device_check = 1;
+    /// Kernel that modifies struct through pointer (tests HMM + unified ABI).
+    ///
+    /// The pointer `p` points to HOST memory. GPU accesses it via HMM.
+    /// `device_check` is set to 1 to prove the kernel ran on GPU.
+    #[kernel]
+    pub fn modify_extreme_hmm(p: *mut Extreme, scale: i128, device_check: *mut i32) {
+        let idx = thread::index_1d();
+        if idx.get() == 0 {
+            unsafe {
+                // Mark that we ran on device
+                *device_check = 1;
 
-            // Access host memory via HMM
-            // Device must read at offset 16 (same as host) for this to work
-            (*p).b *= scale;
+                // Access host memory via HMM
+                // Device must read at offset 16 (same as host) for this to work
+                (*p).b *= scale;
+            }
         }
     }
-}
 
-/// Generic kernel with closure (tests HMM + closure + unified ABI).
-#[kernel]
-pub fn with_closure_hmm<F: Fn(*mut Extreme) + Copy>(p: *mut Extreme, device_check: *mut i32, f: F) {
-    let idx = thread::index_1d();
-    let idx_raw = idx.get();
-    if idx_raw == 0 {
-        unsafe {
-            *device_check = 1;
+    /// Generic kernel with closure (tests HMM + closure + unified ABI).
+    #[kernel]
+    pub fn with_closure_hmm<F: Fn(*mut Extreme) + Copy>(
+        p: *mut Extreme,
+        device_check: *mut i32,
+        f: F,
+    ) {
+        let idx = thread::index_1d();
+        if idx.get() == 0 {
+            unsafe {
+                *device_check = 1;
+            }
+            f(p);
         }
-        f(p);
     }
 }
 
@@ -103,7 +107,8 @@ pub fn with_closure_hmm<F: Fn(*mut Extreme) + Copy>(p: *mut Extreme, device_chec
 // HOST CODE
 // =============================================================================
 
-use cuda_host::cuda_launch;
+use cuda_host::cuda_module;
+
 fn main() {
     println!("=== HMM (Heterogeneous Memory Management) Test ===");
     println!("=== GPU Direct Access to Host Memory ===\n");
@@ -126,6 +131,7 @@ fn main() {
     let module = ctx
         .load_module_from_file("abi_hmm.ptx")
         .expect("Failed to load PTX module");
+    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
 
     // =========================================================================
     // TEST 1: HMM - GPU directly accesses host stack memory
@@ -150,13 +156,13 @@ fn main() {
 
         // Launch kernel with HOST pointers
         // Note: No & needed - macro auto-adds it. Clean syntax like C++!
-        let _res = cuda_launch! {
-            kernel: modify_extreme_hmm,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(1),
-            args: [data_ptr, scale, device_ran_ptr]
-        };
+        let _res = module.modify_extreme_hmm(
+            (stream).as_ref(),
+            LaunchConfig::for_num_elems(1),
+            data_ptr,
+            scale,
+            device_ran_ptr,
+        );
 
         // Synchronize - wait for kernel to complete
         stream.synchronize().expect("sync failed");
@@ -204,15 +210,13 @@ fn main() {
         // But `p` (the struct pointer) points to HOST memory (HMM)
         let scale: i128 = 3;
 
-        let _res = cuda_launch! {
-            kernel: with_closure_hmm::<_>,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(1),
-            args: [data_ptr, device_ran_ptr, move |p: *mut Extreme| unsafe {
-                (*p).b *= scale
-            }]
-        };
+        let _res = module.with_closure_hmm::<_>(
+            (stream).as_ref(),
+            LaunchConfig::for_num_elems(1),
+            data_ptr,
+            device_ran_ptr,
+            move |p: *mut Extreme| unsafe { (*p).b *= scale },
+        );
 
         stream.synchronize().expect("sync failed");
 
@@ -271,17 +275,17 @@ fn main() {
         // NON-MOVE closure - captures scale by reference!
         // Closure struct: { scale: &'a i128 }
         // The &i128 points to host stack, accessed via HMM
-        let _res = cuda_launch! {
-            kernel: with_closure_hmm::<_>,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(1),
-            args: [data_ptr, device_ran_ptr, |p: *mut Extreme| unsafe {
+        let _res = module.with_closure_hmm::<_>(
+            (stream).as_ref(),
+            LaunchConfig::for_num_elems(1),
+            data_ptr,
+            device_ran_ptr,
+            |p: *mut Extreme| unsafe {
                 // `scale` here is actually `*(&scale)` - dereferencing the captured reference
                 // GPU accesses host memory (&scale) via HMM to read the value
                 (*p).b *= scale
-            }]
-        };
+            },
+        );
 
         stream.synchronize().expect("sync failed");
 
@@ -332,17 +336,17 @@ fn main() {
 
         // NON-MOVE closure - captures BOTH scale AND offset by reference!
         // Closure struct: { scale: &i128, offset: &i128 }
-        let _res = cuda_launch! {
-            kernel: with_closure_hmm::<_>,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(1),
-            args: [data_ptr, device_ran_ptr, |p: *mut Extreme| unsafe {
+        let _res = module.with_closure_hmm::<_>(
+            (stream).as_ref(),
+            LaunchConfig::for_num_elems(1),
+            data_ptr,
+            device_ran_ptr,
+            |p: *mut Extreme| unsafe {
                 // Both scale and offset are captured by reference
                 // GPU accesses both host addresses via HMM
-                (*p).b = (*p).b * scale + offset;  // 10 * 5 + 7 = 57
-            }]
-        };
+                (*p).b = (*p).b * scale + offset; // 10 * 5 + 7 = 57
+            },
+        );
 
         stream.synchronize().expect("sync failed");
 

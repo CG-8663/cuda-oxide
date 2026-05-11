@@ -47,7 +47,7 @@ impl<T> DevicePointer<T> {
 
 /// Pushes the underlying device address as a kernel argument.
 impl<T: Send + Sized> KernelArgument for DevicePointer<T> {
-    fn push_arg(self, launcher: &mut AsyncKernelLaunch) {
+    fn push_arg(self, launcher: &mut AsyncKernelLaunch<'_>) {
         launcher.push_arg(self.cu_deviceptr());
     }
 }

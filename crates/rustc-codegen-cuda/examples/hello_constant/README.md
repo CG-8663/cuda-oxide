@@ -32,13 +32,13 @@ Unlike slice parameters, raw pointers are passed directly without (ptr, len) pai
 ### Simple Launch
 
 ```rust
-cuda_launch! {
-    kernel: hello_constant,
-    stream: stream,
-    module: module,
-    config: LaunchConfig::for_num_elems(1),
-    args: [out_dev.cu_deviceptr() as *mut i32]
-}
+unsafe {
+    module.hello_constant(
+        stream.as_ref(),
+        LaunchConfig::for_num_elems(1),
+        out_dev.cu_deviceptr() as *mut i32,
+    )
+}?;
 ```
 
 ## Build and Run

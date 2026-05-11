@@ -18,413 +18,408 @@
 
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
 use cuda_device::{DisjointSlice, SharedArray, kernel, thread};
-use cuda_host::cuda_launch;
+use cuda_host::cuda_module;
 
 // =============================================================================
 // PHASE 1: Multi-way Match (Integer Switches)
 // =============================================================================
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-/// Test multi-way match on u32
-#[kernel]
-pub fn test_multiway_match_u32(val: u32, mut out: DisjointSlice<u32>) {
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
-        let result = match val {
-            0 => 10u32,
-            1 => 20u32,
-            2 => 30u32,
-            _ => 99u32,
-        };
-        *out_elem = result;
-    }
-}
-
-// =============================================================================
-// PHASE 2: Enum Support - Option<T>
-// =============================================================================
-
-/// Test Option<T> - fundamental for for-loops
-#[kernel]
-pub fn test_option(val: u32, mut out: DisjointSlice<u32>) {
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
-        let maybe: Option<u32> = if val > 0 { Some(val) } else { None };
-        let result = maybe.unwrap_or_default();
-        *out_elem = result;
-    }
-}
-
-// =============================================================================
-// PHASE 3: For Loops
-// =============================================================================
-
-/// Test simple for loop with range: sum of 0..8 = 28
-#[kernel]
-pub fn test_for_loop_sum(mut out: DisjointSlice<u32>) {
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
-        let mut sum: u32 = 0;
-        for i in 0u32..8 {
-            sum += i;
+    /// Test multi-way match on u32
+    #[kernel]
+    pub fn test_multiway_match_u32(val: u32, mut out: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let result = match val {
+                0 => 10u32,
+                1 => 20u32,
+                2 => 30u32,
+                _ => 99u32,
+            };
+            *out_elem = result;
         }
-        *out_elem = sum;
     }
-}
 
-/// Test for loop with slice.iter()
-#[kernel]
-pub fn test_iter_sum(data: &[u32], mut out: DisjointSlice<u32>) {
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
-        let mut sum: u32 = 0;
-        for val in data.iter() {
-            sum += *val;
+    // =============================================================================
+    // PHASE 2: Enum Support - Option<T>
+    // =============================================================================
+
+    /// Test Option<T> - fundamental for for-loops
+    #[kernel]
+    pub fn test_option(val: u32, mut out: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let maybe: Option<u32> = if val > 0 { Some(val) } else { None };
+            let result = maybe.unwrap_or_default();
+            *out_elem = result;
         }
-        *out_elem = sum;
     }
-}
 
-/// Test for loop with enumerate()
-#[kernel]
-pub fn test_enumerate(data: &[u32], mut out: DisjointSlice<u32>) {
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
-        let mut sum: u32 = 0;
-        for (i, val) in data.iter().enumerate() {
-            sum += (i as u32) * (*val);
-        }
-        *out_elem = sum;
-    }
-}
+    // =============================================================================
+    // PHASE 3: For Loops
+    // =============================================================================
 
-/// Test nested for loops: sum of i*j for i,j in 0..4 = 36
-#[kernel]
-pub fn test_nested_for_loops(mut out: DisjointSlice<u32>) {
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
-        let mut sum: u32 = 0;
-        for i in 0u32..4 {
-            for j in 0u32..4 {
-                sum += i * j;
+    /// Test simple for loop with range: sum of 0..8 = 28
+    #[kernel]
+    pub fn test_for_loop_sum(mut out: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let mut sum: u32 = 0;
+            for i in 0u32..8 {
+                sum += i;
             }
+            *out_elem = sum;
         }
-        *out_elem = sum;
     }
-}
 
-/// Test for loop with early break: sum 0+1+2+3+4 = 10
-#[kernel]
-pub fn test_for_loop_break(mut out: DisjointSlice<u32>) {
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
-        let mut sum: u32 = 0;
-        for i in 0u32..100 {
-            if i >= 5 {
-                break;
+    /// Test for loop with slice.iter()
+    #[kernel]
+    pub fn test_iter_sum(data: &[u32], mut out: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let mut sum: u32 = 0;
+            for val in data.iter() {
+                sum += *val;
             }
-            sum += i;
+            *out_elem = sum;
         }
-        *out_elem = sum;
     }
-}
 
-/// Test for loop with continue: sum of odd numbers 1+3+5+7 = 16
-#[kernel]
-pub fn test_for_loop_continue(mut out: DisjointSlice<u32>) {
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
-        let mut sum: u32 = 0;
-        for i in 0u32..8 {
-            if i % 2 == 0 {
-                continue;
+    /// Test for loop with enumerate()
+    #[kernel]
+    pub fn test_enumerate(data: &[u32], mut out: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let mut sum: u32 = 0;
+            for (i, val) in data.iter().enumerate() {
+                sum += (i as u32) * (*val);
             }
-            sum += i;
+            *out_elem = sum;
         }
-        *out_elem = sum;
     }
-}
 
-// =============================================================================
-// BASELINE TESTS
-// =============================================================================
-
-/// Baseline while loop for comparison (sum 0..8 = 28)
-#[kernel]
-pub fn baseline_while_loop(mut out: DisjointSlice<u32>) {
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
-        let mut sum: u32 = 0;
-        let mut i: u32 = 0;
-        while i < 8 {
-            sum += i;
-            i += 1;
-        }
-        *out_elem = sum;
-    }
-}
-
-/// Baseline: binary if-else
-#[kernel]
-pub fn baseline_binary_match(flag: bool, mut out: DisjointSlice<u32>) {
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
-        let result = if flag { 100u32 } else { 0u32 };
-        *out_elem = result;
-    }
-}
-
-/// Baseline: simple arithmetic vecadd
-#[kernel]
-pub fn baseline_vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
-    let idx = thread::index_1d();
-    let idx_raw = idx.get();
-    if let Some(c_elem) = c.get_mut(idx) {
-        *c_elem = a[idx_raw] + b[idx_raw];
-    }
-}
-
-// =============================================================================
-// SHARED MEMORY ADDRESS CASTING TESTS
-// =============================================================================
-
-/// Test DIRECT cast to u64 - no intermediate pointer cast.
-///
-/// # Safety
-///
-/// The kernel writes the raw address of a `static mut SharedArray` to
-/// `out`; the read of `SMEM` happens before any thread writes to it.
-#[kernel]
-pub unsafe fn test_smem_addr_direct_u64(mut out: DisjointSlice<u64>) {
-    static mut SMEM: SharedArray<u8, 256, 128> = SharedArray::UNINIT;
-
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
-        let addr = &raw const SMEM as u64;
-        *out_elem = addr;
-    }
-}
-
-/// Test Via *const u8 (current approach - has cvta round-trip).
-///
-/// # Safety
-///
-/// Same as `test_smem_addr_direct_u64`: pure address read of an
-/// untouched `static mut SharedArray`.
-#[kernel]
-pub unsafe fn test_smem_addr_via_ptr_u8(mut out: DisjointSlice<u64>) {
-    static mut SMEM: SharedArray<u8, 256, 128> = SharedArray::UNINIT;
-
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
-        let addr = &raw const SMEM as *const u8 as u64;
-        *out_elem = addr;
-    }
-}
-
-// =============================================================================
-// 64-BIT ARITHMETIC TESTS
-// =============================================================================
-
-/// Test 64-bit descriptor building - reproduces tcgen05 SMEM descriptor bug
-#[kernel]
-pub fn test_u64_descriptor_build(
-    addr: u64,
-    leading_dim_bytes: u32,
-    stride_bytes: u32,
-    mut out: DisjointSlice<u64>,
-) {
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
-        let addr_enc = (addr >> 4) & 0x3FFF;
-        let ld_enc = ((leading_dim_bytes >> 4) & 0x3FFF) as u64;
-        let stride_enc = ((stride_bytes >> 4) & 0x3FFF) as u64;
-        let fixed_bit: u64 = 1u64 << 46;
-
-        let desc = addr_enc | (ld_enc << 16) | (stride_enc << 32) | fixed_bit;
-        *out_elem = desc;
-    }
-}
-
-/// Simpler test: Just test that (val << 32) works correctly for 64-bit
-#[kernel]
-pub fn test_u64_shift_by_32(val: u64, mut out: DisjointSlice<u64>) {
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
-        let shifted = val << 32;
-        *out_elem = shifted;
-    }
-}
-
-/// Test: (1u64 << 46) - fixed bit at position 46
-#[kernel]
-pub fn test_u64_shift_by_46(mut out: DisjointSlice<u64>) {
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
-        let fixed_bit: u64 = 1u64 << 46;
-        *out_elem = fixed_bit;
-    }
-}
-
-// =============================================================================
-// PHASE 4: Parallel For Loop Patterns
-// =============================================================================
-
-/// Parallel polynomial evaluation: p(x) = 1 + x + x^2 + ... + x^7
-#[kernel]
-pub fn parallel_polynomial_eval(input: &[f32], mut out: DisjointSlice<f32>) {
-    let idx = thread::index_1d();
-    let idx_raw = idx.get();
-    if let Some(out_elem) = out.get_mut(idx) {
-        let x = input[idx_raw];
-        let mut result: f32 = 0.0;
-        let mut power: f32 = 1.0;
-        for _ in 0u32..8 {
-            result += power;
-            power *= x;
-        }
-        *out_elem = result;
-    }
-}
-
-/// Parallel chunked sum: each thread sums a contiguous chunk
-#[kernel]
-pub fn parallel_chunked_sum(data: &[u32], chunk_size: u32, mut out: DisjointSlice<u32>) {
-    let idx = thread::index_1d();
-    let idx_raw = idx.get();
-    if let Some(out_elem) = out.get_mut(idx) {
-        let start = idx_raw as u32 * chunk_size;
-        let end = start + chunk_size;
-        let data_len = data.len() as u32;
-        let mut sum: u32 = 0;
-
-        for i in start..end {
-            if i < data_len {
-                sum += data[i as usize];
+    /// Test nested for loops: sum of i*j for i,j in 0..4 = 36
+    #[kernel]
+    pub fn test_nested_for_loops(mut out: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let mut sum: u32 = 0;
+            for i in 0u32..4 {
+                for j in 0u32..4 {
+                    sum += i * j;
+                }
             }
+            *out_elem = sum;
         }
-        *out_elem = sum;
     }
-}
 
-/// Parallel local average: each thread computes average of a window
-#[kernel]
-pub fn parallel_local_average(data: &[f32], radius: u32, mut out: DisjointSlice<f32>) {
-    let idx = thread::index_1d();
-    let idx_raw = idx.get();
-    if let Some(out_elem) = out.get_mut(idx) {
-        let pos = idx_raw as i32;
-        let len = data.len() as i32;
-        let r = radius as i32;
-
-        let mut sum: f32 = 0.0;
-        let mut count: u32 = 0;
-
-        for offset in 0u32..(2 * radius + 1) {
-            let sample_pos = pos - r + (offset as i32);
-            if sample_pos >= 0 && sample_pos < len {
-                sum += data[sample_pos as usize];
-                count += 1;
+    /// Test for loop with early break: sum 0+1+2+3+4 = 10
+    #[kernel]
+    pub fn test_for_loop_break(mut out: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let mut sum: u32 = 0;
+            for i in 0u32..100 {
+                if i >= 5 {
+                    break;
+                }
+                sum += i;
             }
+            *out_elem = sum;
         }
-
-        let avg = if count > 0 { sum / (count as f32) } else { 0.0 };
-        *out_elem = avg;
     }
-}
 
-/// Parallel dot product contribution: each thread computes partial dot product
-#[kernel]
-pub fn parallel_dot_product_chunked(
-    a: &[f32],
-    b: &[f32],
-    chunk_size: u32,
-    mut out: DisjointSlice<f32>,
-) {
-    let idx = thread::index_1d();
-    let idx_raw = idx.get();
-    if let Some(out_elem) = out.get_mut(idx) {
-        let start = idx_raw as u32 * chunk_size;
-        let end = start + chunk_size;
-        let len = a.len() as u32;
-
-        let mut partial_sum: f32 = 0.0;
-        for i in start..end {
-            if i < len {
-                partial_sum += a[i as usize] * b[i as usize];
+    /// Test for loop with continue: sum of odd numbers 1+3+5+7 = 16
+    #[kernel]
+    pub fn test_for_loop_continue(mut out: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let mut sum: u32 = 0;
+            for i in 0u32..8 {
+                if i % 2 == 0 {
+                    continue;
+                }
+                sum += i;
             }
+            *out_elem = sum;
         }
-        *out_elem = partial_sum;
     }
-}
 
-/// Parallel matrix row sum: each thread sums one row
-#[kernel]
-pub fn parallel_row_sum(matrix: &[u32], cols: u32, mut out: DisjointSlice<u32>) {
-    let idx = thread::index_1d();
-    let idx_raw = idx.get();
-    if let Some(out_elem) = out.get_mut(idx) {
-        let row = idx_raw as u32;
-        let row_start = row * cols;
+    // =============================================================================
+    // BASELINE TESTS
+    // =============================================================================
 
-        let mut sum: u32 = 0;
-        for col in 0u32..cols {
-            let elem_idx = row_start + col;
-            if (elem_idx as usize) < matrix.len() {
-                sum += matrix[elem_idx as usize];
+    /// Baseline while loop for comparison (sum 0..8 = 28)
+    #[kernel]
+    pub fn baseline_while_loop(mut out: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let mut sum: u32 = 0;
+            let mut i: u32 = 0;
+            while i < 8 {
+                sum += i;
+                i += 1;
             }
+            *out_elem = sum;
         }
-        *out_elem = sum;
     }
-}
 
-/// Parallel histogram counting: count occurrences in range [low, high)
-#[kernel]
-pub fn parallel_range_count(
-    data: &[u32],
-    chunk_size: u32,
-    low: u32,
-    high: u32,
-    mut out: DisjointSlice<u32>,
-) {
-    let idx = thread::index_1d();
-    let idx_raw = idx.get();
-    if let Some(out_elem) = out.get_mut(idx) {
-        let start = idx_raw as u32 * chunk_size;
-        let end = start + chunk_size;
-        let len = data.len() as u32;
+    /// Baseline: binary if-else
+    #[kernel]
+    pub fn baseline_binary_match(flag: bool, mut out: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let result = if flag { 100u32 } else { 0u32 };
+            *out_elem = result;
+        }
+    }
 
-        let mut count: u32 = 0;
-        for i in start..end {
-            if i < len {
-                let val = data[i as usize];
-                if val >= low && val < high {
+    /// Baseline: simple arithmetic vecadd
+    #[kernel]
+    pub fn baseline_vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
+        let idx = thread::index_1d();
+        let idx_raw = idx.get();
+        if let Some(c_elem) = c.get_mut(idx) {
+            *c_elem = a[idx_raw] + b[idx_raw];
+        }
+    }
+
+    // =============================================================================
+    // SHARED MEMORY ADDRESS CASTING TESTS
+    // =============================================================================
+
+    /// Test DIRECT cast to u64 - no intermediate pointer cast
+    #[kernel]
+    pub unsafe fn test_smem_addr_direct_u64(mut out: DisjointSlice<u64>) {
+        static mut SMEM: SharedArray<u8, 256, 128> = SharedArray::UNINIT;
+
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let addr = &raw const SMEM as u64;
+            *out_elem = addr;
+        }
+    }
+
+    /// Test Via *const u8 (current approach - has cvta round-trip)
+    #[kernel]
+    pub unsafe fn test_smem_addr_via_ptr_u8(mut out: DisjointSlice<u64>) {
+        static mut SMEM: SharedArray<u8, 256, 128> = SharedArray::UNINIT;
+
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let addr = &raw const SMEM as *const u8 as u64;
+            *out_elem = addr;
+        }
+    }
+
+    // =============================================================================
+    // 64-BIT ARITHMETIC TESTS
+    // =============================================================================
+
+    /// Test 64-bit descriptor building - reproduces tcgen05 SMEM descriptor bug
+    #[kernel]
+    pub fn test_u64_descriptor_build(
+        addr: u64,
+        leading_dim_bytes: u32,
+        stride_bytes: u32,
+        mut out: DisjointSlice<u64>,
+    ) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let addr_enc = (addr >> 4) & 0x3FFF;
+            let ld_enc = ((leading_dim_bytes >> 4) & 0x3FFF) as u64;
+            let stride_enc = ((stride_bytes >> 4) & 0x3FFF) as u64;
+            let fixed_bit: u64 = 1u64 << 46;
+
+            let desc = addr_enc | (ld_enc << 16) | (stride_enc << 32) | fixed_bit;
+            *out_elem = desc;
+        }
+    }
+
+    /// Simpler test: Just test that (val << 32) works correctly for 64-bit
+    #[kernel]
+    pub fn test_u64_shift_by_32(val: u64, mut out: DisjointSlice<u64>) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let shifted = val << 32;
+            *out_elem = shifted;
+        }
+    }
+
+    /// Test: (1u64 << 46) - fixed bit at position 46
+    #[kernel]
+    pub fn test_u64_shift_by_46(mut out: DisjointSlice<u64>) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let fixed_bit: u64 = 1u64 << 46;
+            *out_elem = fixed_bit;
+        }
+    }
+
+    // =============================================================================
+    // PHASE 4: Parallel For Loop Patterns
+    // =============================================================================
+
+    /// Parallel polynomial evaluation: p(x) = 1 + x + x^2 + ... + x^7
+    #[kernel]
+    pub fn parallel_polynomial_eval(input: &[f32], mut out: DisjointSlice<f32>) {
+        let idx = thread::index_1d();
+        let idx_raw = idx.get();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let x = input[idx_raw];
+            let mut result: f32 = 0.0;
+            let mut power: f32 = 1.0;
+            for _ in 0u32..8 {
+                result += power;
+                power *= x;
+            }
+            *out_elem = result;
+        }
+    }
+
+    /// Parallel chunked sum: each thread sums a contiguous chunk
+    #[kernel]
+    pub fn parallel_chunked_sum(data: &[u32], chunk_size: u32, mut out: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        let idx_raw = idx.get();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let start = idx_raw as u32 * chunk_size;
+            let end = start + chunk_size;
+            let data_len = data.len() as u32;
+            let mut sum: u32 = 0;
+
+            for i in start..end {
+                if i < data_len {
+                    sum += data[i as usize];
+                }
+            }
+            *out_elem = sum;
+        }
+    }
+
+    /// Parallel local average: each thread computes average of a window
+    #[kernel]
+    pub fn parallel_local_average(data: &[f32], radius: u32, mut out: DisjointSlice<f32>) {
+        let idx = thread::index_1d();
+        let idx_raw = idx.get();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let pos = idx_raw as i32;
+            let len = data.len() as i32;
+            let r = radius as i32;
+
+            let mut sum: f32 = 0.0;
+            let mut count: u32 = 0;
+
+            for offset in 0u32..(2 * radius + 1) {
+                let sample_pos = pos - r + (offset as i32);
+                if sample_pos >= 0 && sample_pos < len {
+                    sum += data[sample_pos as usize];
                     count += 1;
                 }
             }
+
+            let avg = if count > 0 { sum / (count as f32) } else { 0.0 };
+            *out_elem = avg;
         }
-        *out_elem = count;
     }
-}
 
-/// Parallel partial product: each thread computes a factorial-like product
-#[kernel]
-pub fn parallel_partial_product(elements_per_thread: u32, mut out: DisjointSlice<u64>) {
-    let idx = thread::index_1d();
-    let idx_raw = idx.get();
-    if let Some(out_elem) = out.get_mut(idx) {
-        let base = idx_raw as u64 * elements_per_thread as u64;
+    /// Parallel dot product contribution: each thread computes partial dot product
+    #[kernel]
+    pub fn parallel_dot_product_chunked(
+        a: &[f32],
+        b: &[f32],
+        chunk_size: u32,
+        mut out: DisjointSlice<f32>,
+    ) {
+        let idx = thread::index_1d();
+        let idx_raw = idx.get();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let start = idx_raw as u32 * chunk_size;
+            let end = start + chunk_size;
+            let len = a.len() as u32;
 
-        let mut product: u64 = 1;
-        for i in 1u32..=elements_per_thread {
-            product *= base + (i as u64);
+            let mut partial_sum: f32 = 0.0;
+            for i in start..end {
+                if i < len {
+                    partial_sum += a[i as usize] * b[i as usize];
+                }
+            }
+            *out_elem = partial_sum;
         }
-        *out_elem = product;
+    }
+
+    /// Parallel matrix row sum: each thread sums one row
+    #[kernel]
+    pub fn parallel_row_sum(matrix: &[u32], cols: u32, mut out: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        let idx_raw = idx.get();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let row = idx_raw as u32;
+            let row_start = row * cols;
+
+            let mut sum: u32 = 0;
+            for col in 0u32..cols {
+                let elem_idx = row_start + col;
+                if (elem_idx as usize) < matrix.len() {
+                    sum += matrix[elem_idx as usize];
+                }
+            }
+            *out_elem = sum;
+        }
+    }
+
+    /// Parallel histogram counting: count occurrences in range [low, high)
+    #[kernel]
+    pub fn parallel_range_count(
+        data: &[u32],
+        chunk_size: u32,
+        low: u32,
+        high: u32,
+        mut out: DisjointSlice<u32>,
+    ) {
+        let idx = thread::index_1d();
+        let idx_raw = idx.get();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let start = idx_raw as u32 * chunk_size;
+            let end = start + chunk_size;
+            let len = data.len() as u32;
+
+            let mut count: u32 = 0;
+            for i in start..end {
+                if i < len {
+                    let val = data[i as usize];
+                    if val >= low && val < high {
+                        count += 1;
+                    }
+                }
+            }
+            *out_elem = count;
+        }
+    }
+
+    /// Parallel partial product: each thread computes a factorial-like product
+    #[kernel]
+    pub fn parallel_partial_product(elements_per_thread: u32, mut out: DisjointSlice<u64>) {
+        let idx = thread::index_1d();
+        let idx_raw = idx.get();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let base = idx_raw as u64 * elements_per_thread as u64;
+
+            let mut product: u64 = 1;
+            for i in 1u32..=elements_per_thread {
+                product *= base + (i as u64);
+            }
+            *out_elem = product;
+        }
     }
 }
 
 // =============================================================================
 // HOST CODE
 // =============================================================================
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Compiler Features Test (Unified) ===\n");
 
@@ -432,6 +427,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stream = ctx.default_stream();
 
     let module = ctx.load_module_from_file("compiler_features.ptx")?;
+    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
 
     const N: usize = 1;
     let cfg = LaunchConfig::for_num_elems(N as u32);
@@ -440,13 +436,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Testing: baseline_while_loop");
     {
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N)?;
-        cuda_launch! {
-            kernel: baseline_while_loop,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice_mut(out_dev)]
-        }?;
+        module.baseline_while_loop((stream).as_ref(), cfg, &mut out_dev)?;
         let result = out_dev.to_host_vec(&stream)?;
         assert_eq!(result[0], 28, "baseline_while_loop failed");
         println!("  ✓ Result: {} (expected 28)", result[0]);
@@ -456,25 +446,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Testing: baseline_binary_match");
     {
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N)?;
-        cuda_launch! {
-            kernel: baseline_binary_match,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [true, slice_mut(out_dev)]
-        }?;
+        module.baseline_binary_match((stream).as_ref(), cfg, true, &mut out_dev)?;
         let result = out_dev.to_host_vec(&stream)?;
         assert_eq!(result[0], 100, "baseline_binary_match(true) failed");
         println!("  ✓ flag=true: {} (expected 100)", result[0]);
 
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N)?;
-        cuda_launch! {
-            kernel: baseline_binary_match,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [false, slice_mut(out_dev)]
-        }?;
+        module.baseline_binary_match((stream).as_ref(), cfg, false, &mut out_dev)?;
         let result = out_dev.to_host_vec(&stream)?;
         assert_eq!(result[0], 0, "baseline_binary_match(false) failed");
         println!("  ✓ flag=false: {} (expected 0)", result[0]);
@@ -491,13 +469,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let b_dev = DeviceBuffer::from_host(&stream, &b)?;
         let mut c_dev = DeviceBuffer::<f32>::zeroed(&stream, n)?;
 
-        cuda_launch! {
-            kernel: baseline_vecadd,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(n as u32),
-            args: [slice(a_dev), slice(b_dev), slice_mut(c_dev)]
-        }?;
+        module.baseline_vecadd(
+            (stream).as_ref(),
+            LaunchConfig::for_num_elems(n as u32),
+            &a_dev,
+            &b_dev,
+            &mut c_dev,
+        )?;
         let result = c_dev.to_host_vec(&stream)?;
         let expected = vec![11.0f32, 22.0, 33.0, 44.0];
         assert_eq!(result, expected, "baseline_vecadd failed");
@@ -510,13 +488,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let test_cases = [(0u32, 10u32), (1, 20), (2, 30), (3, 99), (100, 99)];
         for (val, expected) in test_cases {
             let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N)?;
-            cuda_launch! {
-                kernel: test_multiway_match_u32,
-                stream: stream,
-                module: module,
-                config: cfg,
-                args: [val, slice_mut(out_dev)]
-            }?;
+            module.test_multiway_match_u32((stream).as_ref(), cfg, val, &mut out_dev)?;
             let result = out_dev.to_host_vec(&stream)?;
             assert_eq!(
                 result[0], expected,
@@ -533,13 +505,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let test_cases = [(0u32, 0u32), (1u32, 1u32), (42u32, 42u32)];
         for (val, expected) in test_cases {
             let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N)?;
-            cuda_launch! {
-                kernel: test_option,
-                stream: stream,
-                module: module,
-                config: cfg,
-                args: [val, slice_mut(out_dev)]
-            }?;
+            module.test_option((stream).as_ref(), cfg, val, &mut out_dev)?;
             let result = out_dev.to_host_vec(&stream)?;
             assert_eq!(result[0], expected, "test_option({}) failed", val);
             println!("  ✓ val={}: {} (expected {})", val, result[0], expected);
@@ -550,13 +516,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Testing: test_for_loop_sum");
     {
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N)?;
-        cuda_launch! {
-            kernel: test_for_loop_sum,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice_mut(out_dev)]
-        }?;
+        module.test_for_loop_sum((stream).as_ref(), cfg, &mut out_dev)?;
         let result = out_dev.to_host_vec(&stream)?;
         assert_eq!(result[0], 28, "test_for_loop_sum failed");
         println!("  ✓ Result: {} (expected 28)", result[0]);
@@ -568,13 +528,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let data = vec![1u32, 2, 3, 4, 5];
         let data_dev = DeviceBuffer::from_host(&stream, &data)?;
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N)?;
-        cuda_launch! {
-            kernel: test_iter_sum,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(data_dev), slice_mut(out_dev)]
-        }?;
+        module.test_iter_sum((stream).as_ref(), cfg, &data_dev, &mut out_dev)?;
         let result = out_dev.to_host_vec(&stream)?;
         assert_eq!(result[0], 15, "test_iter_sum failed");
         println!("  ✓ Result: {} (expected 15)", result[0]);
@@ -586,13 +540,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let data = vec![10u32, 20, 30, 40]; // 0*10 + 1*20 + 2*30 + 3*40 = 0+20+60+120=200
         let data_dev = DeviceBuffer::from_host(&stream, &data)?;
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N)?;
-        cuda_launch! {
-            kernel: test_enumerate,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(data_dev), slice_mut(out_dev)]
-        }?;
+        module.test_enumerate((stream).as_ref(), cfg, &data_dev, &mut out_dev)?;
         let result = out_dev.to_host_vec(&stream)?;
         assert_eq!(result[0], 200, "test_enumerate failed");
         println!("  ✓ Result: {} (expected 200)", result[0]);
@@ -602,13 +550,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Testing: test_for_loop_break");
     {
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N)?;
-        cuda_launch! {
-            kernel: test_for_loop_break,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice_mut(out_dev)]
-        }?;
+        module.test_for_loop_break((stream).as_ref(), cfg, &mut out_dev)?;
         let result = out_dev.to_host_vec(&stream)?;
         assert_eq!(result[0], 10, "test_for_loop_break failed");
         println!("  ✓ Result: {} (expected 10)", result[0]);
@@ -618,13 +560,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Testing: test_for_loop_continue");
     {
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N)?;
-        cuda_launch! {
-            kernel: test_for_loop_continue,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice_mut(out_dev)]
-        }?;
+        module.test_for_loop_continue((stream).as_ref(), cfg, &mut out_dev)?;
         let result = out_dev.to_host_vec(&stream)?;
         assert_eq!(result[0], 16, "test_for_loop_continue failed");
         println!("  ✓ Result: {} (expected 16)", result[0]);
@@ -634,13 +570,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Testing: test_nested_for_loops");
     {
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N)?;
-        cuda_launch! {
-            kernel: test_nested_for_loops,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice_mut(out_dev)]
-        }?;
+        module.test_nested_for_loops((stream).as_ref(), cfg, &mut out_dev)?;
         let result = out_dev.to_host_vec(&stream)?;
         assert_eq!(result[0], 36, "test_nested_for_loops failed");
         println!("  ✓ Result: {} (expected 36)", result[0]);
@@ -650,13 +580,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Testing: test_u64_shift_by_32");
     {
         let mut out_dev = DeviceBuffer::<u64>::zeroed(&stream, N)?;
-        cuda_launch! {
-            kernel: test_u64_shift_by_32,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [8u64, slice_mut(out_dev)]
-        }?;
+        module.test_u64_shift_by_32((stream).as_ref(), cfg, 8u64, &mut out_dev)?;
         let result = out_dev.to_host_vec(&stream)?;
         let expected = 8u64 << 32;
         assert_eq!(result[0], expected, "test_u64_shift_by_32 failed");
@@ -670,13 +594,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Testing: test_u64_shift_by_46");
     {
         let mut out_dev = DeviceBuffer::<u64>::zeroed(&stream, N)?;
-        cuda_launch! {
-            kernel: test_u64_shift_by_46,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice_mut(out_dev)]
-        }?;
+        module.test_u64_shift_by_46((stream).as_ref(), cfg, &mut out_dev)?;
         let result = out_dev.to_host_vec(&stream)?;
         let expected = 1u64 << 46;
         assert_eq!(result[0], expected, "test_u64_shift_by_46 failed");
@@ -692,13 +610,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let input = vec![2.0f32; 4]; // p(2) = 1 + 2 + 4 + 8 + 16 + 32 + 64 + 128 = 255
         let input_dev = DeviceBuffer::from_host(&stream, &input)?;
         let mut out_dev = DeviceBuffer::<f32>::zeroed(&stream, 4)?;
-        cuda_launch! {
-            kernel: parallel_polynomial_eval,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(4),
-            args: [slice(input_dev), slice_mut(out_dev)]
-        }?;
+        module.parallel_polynomial_eval(
+            (stream).as_ref(),
+            LaunchConfig::for_num_elems(4),
+            &input_dev,
+            &mut out_dev,
+        )?;
         let result = out_dev.to_host_vec(&stream)?;
         let expected = 255.0f32;
         assert!(
@@ -715,13 +632,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let data_dev = DeviceBuffer::from_host(&stream, &data)?;
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, 4)?;
         // 4 threads, chunk_size=4: thread 0 sums 1+2+3+4=10, thread 1 sums 5+6+7+8=26, etc.
-        cuda_launch! {
-            kernel: parallel_chunked_sum,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(4),
-            args: [slice(data_dev), 4u32, slice_mut(out_dev)]
-        }?;
+        module.parallel_chunked_sum(
+            (stream).as_ref(),
+            LaunchConfig::for_num_elems(4),
+            &data_dev,
+            4u32,
+            &mut out_dev,
+        )?;
         let result = out_dev.to_host_vec(&stream)?;
         assert_eq!(result[0], 10, "parallel_chunked_sum[0] failed");
         assert_eq!(result[1], 26, "parallel_chunked_sum[1] failed");
@@ -735,13 +652,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let matrix: Vec<u32> = (1..=16).collect();
         let matrix_dev = DeviceBuffer::from_host(&stream, &matrix)?;
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, 4)?;
-        cuda_launch! {
-            kernel: parallel_row_sum,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(4),
-            args: [slice(matrix_dev), 4u32, slice_mut(out_dev)]
-        }?;
+        module.parallel_row_sum(
+            (stream).as_ref(),
+            LaunchConfig::for_num_elems(4),
+            &matrix_dev,
+            4u32,
+            &mut out_dev,
+        )?;
         let result = out_dev.to_host_vec(&stream)?;
         // Row 0: 1+2+3+4=10, Row 1: 5+6+7+8=26, Row 2: 9+10+11+12=42, Row 3: 13+14+15+16=58
         assert_eq!(result, vec![10, 26, 42, 58], "parallel_row_sum failed");
@@ -756,13 +673,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Thread 1: product of 4,5,6 = 120
         // Thread 2: product of 7,8,9 = 504
         // Thread 3: product of 10,11,12 = 1320
-        cuda_launch! {
-            kernel: parallel_partial_product,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(4),
-            args: [3u32, slice_mut(out_dev)]
-        }?;
+        module.parallel_partial_product(
+            (stream).as_ref(),
+            LaunchConfig::for_num_elems(4),
+            3u32,
+            &mut out_dev,
+        )?;
         let result = out_dev.to_host_vec(&stream)?;
         assert_eq!(result[0], 6, "parallel_partial_product[0] failed");
         assert_eq!(result[1], 120, "parallel_partial_product[1] failed");
@@ -777,13 +693,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let data: Vec<f32> = (0..N).map(|i| i as f32).collect();
         let data_dev = DeviceBuffer::from_host(&stream, &data)?;
         let mut out_dev = DeviceBuffer::<f32>::zeroed(&stream, N)?;
-        cuda_launch! {
-            kernel: parallel_local_average,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(N as u32),
-            args: [slice(data_dev), RADIUS, slice_mut(out_dev)]
-        }?;
+        module.parallel_local_average(
+            (stream).as_ref(),
+            LaunchConfig::for_num_elems(N as u32),
+            &data_dev,
+            RADIUS,
+            &mut out_dev,
+        )?;
         let result = out_dev.to_host_vec(&stream)?;
         // At position 256 (middle), average of 253..259 = 256.0
         let mid = N / 2;
@@ -814,13 +730,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let a_dev = DeviceBuffer::from_host(&stream, &a)?;
         let b_dev = DeviceBuffer::from_host(&stream, &b)?;
         let mut out_dev = DeviceBuffer::<f32>::zeroed(&stream, NUM_THREADS)?;
-        cuda_launch! {
-            kernel: parallel_dot_product_chunked,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(NUM_THREADS as u32),
-            args: [slice(a_dev), slice(b_dev), CHUNK_SIZE, slice_mut(out_dev)]
-        }?;
+        module.parallel_dot_product_chunked(
+            (stream).as_ref(),
+            LaunchConfig::for_num_elems(NUM_THREADS as u32),
+            &a_dev,
+            &b_dev,
+            CHUNK_SIZE,
+            &mut out_dev,
+        )?;
         let result = out_dev.to_host_vec(&stream)?;
         // Each thread: chunk_size * 2.0 = 64.0, total = 128 * 64 = 8192.0
         let total: f32 = result.iter().sum();
@@ -849,13 +766,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, NUM_THREADS)?;
         let low: u32 = 50;
         let high: u32 = 150;
-        cuda_launch! {
-            kernel: parallel_range_count,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(NUM_THREADS as u32),
-            args: [slice(data_dev), CHUNK_SIZE, low, high, slice_mut(out_dev)]
-        }?;
+        module.parallel_range_count(
+            (stream).as_ref(),
+            LaunchConfig::for_num_elems(NUM_THREADS as u32),
+            &data_dev,
+            CHUNK_SIZE,
+            low,
+            high,
+            &mut out_dev,
+        )?;
         let result = out_dev.to_host_vec(&stream)?;
         // Count values in [50, 150) = 100 values
         let total: u32 = result.iter().sum();
@@ -884,12 +803,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Testing: test_smem_addr_direct_u64 (&raw const SMEM as u64)");
     {
         let mut out_dev = DeviceBuffer::<u64>::zeroed(&stream, 1)?;
-        cuda_launch! {
-            kernel: test_smem_addr_direct_u64,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(1),
-            args: [slice_mut(out_dev)]
+        unsafe {
+            module.test_smem_addr_direct_u64(
+                (stream).as_ref(),
+                LaunchConfig::for_num_elems(1),
+                &mut out_dev,
+            )
         }?;
         let result = out_dev.to_host_vec(&stream)?;
         println!("  DIRECT addr: 0x{:016x}", result[0]);
@@ -904,12 +823,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nTesting: test_smem_addr_via_ptr_u8 (&raw const SMEM as *const u8 as u64)");
     {
         let mut out_dev = DeviceBuffer::<u64>::zeroed(&stream, 1)?;
-        cuda_launch! {
-            kernel: test_smem_addr_via_ptr_u8,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(1),
-            args: [slice_mut(out_dev)]
+        unsafe {
+            module.test_smem_addr_via_ptr_u8(
+                (stream).as_ref(),
+                LaunchConfig::for_num_elems(1),
+                &mut out_dev,
+            )
         }?;
         let result = out_dev.to_host_vec(&stream)?;
         println!("  VIA PTR addr: 0x{:016x}", result[0]);

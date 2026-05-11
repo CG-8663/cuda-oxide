@@ -56,9 +56,8 @@ You should see `PASSED: all 1024 elements correct`. The generated template is a 
 Here's a vector addition with a twist: the element-wise addition is factored out into a plain helper function. Both the kernel and the helper live in the same file alongside host code:
 
 ```rust
-use cuda_device::{kernel, thread, DisjointSlice};
+use cuda_device::{cuda_module, kernel, thread, DisjointSlice};
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
-use cuda_host::{cuda_launch, load_kernel_module};
 
 /// Plain helper function -- no annotation needed.
 /// The compiler discovers it automatically because `vecadd` calls it.
@@ -66,11 +65,17 @@ fn add(a: f32, b: f32) -> f32 {
     a + b
 }
 
-#[kernel]
-pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
-    let idx = thread::index_1d();
-    if let Some(c_elem) = c.get_mut(idx) {
-        *c_elem = add(a[idx.get()], b[idx.get()]);
+#[cuda_module]
+mod kernels {
+    use super::*;
+
+    #[kernel]
+    pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        if let Some(c_elem) = c.get_mut(idx) {
+            *c_elem = add(a[i], b[i]);
+        }
     }
 }
 
@@ -86,20 +91,16 @@ fn main() {
     let b_dev = DeviceBuffer::from_host(&stream, &b_host).unwrap();
     let mut c_dev = DeviceBuffer::<f32>::zeroed(&stream, N).unwrap();
 
-    // Loads `my_first_kernel.ptx` directly when cuda-oxide produced PTX, or
-    // builds a cubin from `my_first_kernel.ll` when cuda-oxide auto-detected
-    // CUDA libdevice math (`sin`, `pow`, `exp`, ...). Either way one call.
-    let module = load_kernel_module(&ctx, "my_first_kernel")
-        .expect("Failed to load kernel module");
-
-    cuda_launch! {
-        kernel: vecadd,
-        stream: stream,
-        module: module,
-        config: LaunchConfig::for_num_elems(N as u32),
-        args: [slice(a_dev), slice(b_dev), slice_mut(c_dev)]
-    }
-    .unwrap();
+    let module = kernels::load(&ctx).expect("Failed to load embedded module");
+    module
+        .vecadd(
+            &stream,
+            LaunchConfig::for_num_elems(N as u32),
+            &a_dev,
+            &b_dev,
+            &mut c_dev,
+        )
+        .unwrap();
 
     let c_host = c_dev.to_host_vec(&stream).unwrap();
     let errors = (0..N)
@@ -119,7 +120,7 @@ There's a lot happening here. Let's unpack the key pieces.
 
 ### Single-source compilation
 
-The kernel and host code live in **the same file** and are compiled with a single `cargo` command invocation. The codegen backend intercepts compilation, routes `#[kernel]` functions through the MIR-to-PTX pipeline, and delegates everything else to standard LLVM. The output is a native binary plus a `.ptx` file.
+The kernel and host code live in **the same file** and are compiled with a single `cargo` command invocation. The codegen backend intercepts compilation, routes `#[kernel]` functions through the MIR-to-PTX pipeline, and delegates everything else to standard LLVM. The final binary contains native host code plus the embedded device artifact.
 
 ### `#[kernel]`
 
@@ -139,41 +140,30 @@ The `add` helper above has **no annotation**. When the compiler processes a `#[k
 The `#[device]` attribute exists but serves a different purpose: it marks a function as a standalone device compilation root (for building Rust device libraries consumed by C++) or is used in `#[device] extern "C" { ... }` blocks to declare external device functions for FFI with CUDA C++ LTOIR. You do **not** need `#[device]` for private helper functions called from a kernel.
 :::
 
-### `load_kernel_module`
+### `#[cuda_module]`
 
-One helper hides three different on-disk shapes the build can leave behind:
-
-- `my_first_kernel.cubin` (already linked) — load directly.
-- `my_first_kernel.ptx` (the common case) — load directly.
-- `my_first_kernel.ll` (when the kernel calls CUDA `libdevice` math like `sin`, `pow`, `exp`) — `cuda-oxide` auto-detects the `__nv_*` symbols, emits NVVM IR, and the helper builds + links a cubin via `libNVVM` + `nvJitLink` at startup.
-
-So you keep one line in your `main` regardless of whether you write pure arithmetic or call into device math. The loader needs the CUDA Toolkit on the host; `cargo oxide doctor` checks that up front.
-
-The async equivalent is `cuda_async::device_context::load_kernel_module_async("my_first_kernel", 0)` -- same fall-through, just routed through the per-device async context map.
-
-### `cuda_launch!`
-
-The launch macro ties everything together at the call site:
+`#[cuda_module]` wraps the inline kernel module and generates a typed host API:
 
 ```rust
-cuda_launch! {
-    kernel: vecadd,            // which kernel (by name, with generics)
-    stream: stream,            // CUDA stream to launch on
-    module: module,            // loaded PTX or cubin module
-    config: LaunchConfig::for_num_elems(N as u32),  // grid/block dims
-    args: [slice(a_dev), slice(b_dev), slice_mut(c_dev)]
-}
+let module = kernels::load(&ctx)?;
+module.vecadd(&stream, LaunchConfig::for_num_elems(N as u32), &a_dev, &b_dev, &mut c_dev)?;
 ```
 
-The macro looks up the entry point name from the `CudaKernel` trait, loads the function from the module, and marshals arguments for the driver call.
+The loader reads the embedded device artifact from the host binary, caches kernel
+function handles, and exposes each `#[kernel]` as a Rust method. The method
+signature mirrors the kernel signature, with device slices mapped to
+`DeviceBuffer` borrows.
+
+`load_kernel_module` and `cuda_launch!` remain available as lower-level APIs for
+manual sidecar artifact loading and custom launch code.
 
 ### Argument scalarization
 
 Aggregate types (slices, structs, closures) are **scalarized** at the host/device boundary. A `&[f32]` is decomposed into its `(ptr, len)` components and passed as two separate kernel parameters. On the device side, the compiler reassembles them back into a slice. This avoids ABI mismatches between host and device compilers:
 
 ```text
-Host:   cuda_launch! { args: [slice(data)] }
-          → extracts ptr + len, passes as 2 args
+Host:   module.vecadd(..., &data, ...)
+          → extracts ptr + len, passes two args
 
 PTX:    .entry kernel(.param .u64 ptr, .param .u64 len, ...)
           → receives flat parameters
@@ -209,17 +199,22 @@ The `--async` flag generates a project with `tokio` and `cuda-async` dependencie
 Here's the generated async vecadd template (with minor formatting edits for readability):
 
 ```rust
-use cuda_device::{kernel, thread, DisjointSlice};
-use cuda_host::cuda_launch_async;
-use cuda_async::device_context::{init_device_contexts, load_kernel_module_async};
+use cuda_device::{cuda_module, kernel, thread, DisjointSlice};
+use cuda_async::device_context::init_device_contexts;
 use cuda_async::device_operation::DeviceOperation;
 use cuda_core::LaunchConfig;
 
-#[kernel]
-pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
-    let idx = thread::index_1d();
-    if let Some(c_elem) = c.get_mut(idx) {
-        *c_elem = a[idx.get()] + b[idx.get()];
+#[cuda_module]
+mod kernels {
+    use super::*;
+
+    #[kernel]
+    pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        if let Some(c_elem) = c.get_mut(idx) {
+            *c_elem = a[i] + b[i];
+        }
     }
 }
 
@@ -233,10 +228,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    The round-robin stream pool is created lazily on first use.
     init_device_contexts(0, 1)?;
 
-    // 2. Load the kernel module. Same fall-through as the sync helper: tries
-    //    `my_async_kernel.cubin`, then `.ptx`, then builds a cubin from `.ll`
-    //    when cuda-oxide auto-detected libdevice math.
-    let module = load_kernel_module_async("my_async_kernel", 0)?;
+    // 2. Load the embedded kernel module from the async device context.
+    let module = kernels::load_async(0)?;
 
     const N: usize = 1024;
     let a_host: Vec<f32> = (0..N).map(|i| i as f32).collect();
@@ -263,13 +256,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })?;
 
     // 4. Launch -- returns a lazy DeviceOperation, no GPU work yet.
-    cuda_launch_async! {
-        kernel: vecadd,
-        module: module,
-        config: LaunchConfig::for_num_elems(N as u32),
-        args: [slice(a_dev), slice(b_dev), slice_mut(c_dev)]
-    }
-    .sync()?;  // Block until the GPU finishes.
+    module
+        .vecadd_async(
+            LaunchConfig::for_num_elems(N as u32),
+            &a_dev,
+            &b_dev,
+            &mut c_dev,
+        )?
+        .sync()?;  // Block until the GPU finishes.
 
     // 5. Copy results back to host.
     let mut c_host = vec![0.0f32; N];
@@ -307,7 +301,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 The kernel itself is **identical** -- async only changes how you launch and manage GPU work on the host side.
 
-`cuda_launch_async!` instead of `cuda_launch!`
+`{kernel}_async` instead of `{kernel}`
 : Returns a lazy `DeviceOperation` rather than launching immediately. No GPU work happens until you explicitly schedule it. This lets you build a computation graph before committing resources.
 
 `init_device_contexts(default_device, num_devices)`

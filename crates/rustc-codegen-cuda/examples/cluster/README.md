@@ -149,7 +149,7 @@ GPU Compute Capability: sm_86
 
 - **Required GPU**: Hopper H100, H200 or Blackwell B100, B200 (sm_90+)
 - **CUDA Driver**: 12.0+ for cluster launch support
-- **Cluster launch**: Uses `cuLaunchKernelEx` via cuda-core + `cuda_launch!` macro
+- **Cluster launch**: Uses `cuLaunchKernelEx` through the typed `#[cuda_module]` launch method
 
 ## Cluster vs Traditional CUDA
 

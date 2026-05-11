@@ -304,13 +304,13 @@ const BLOCK: u32 = 16;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_device_contexts(0, 1)?;
-    let module = load_kernel_module_async("async_mlp", 0)?;
+    let module = kernels::load_async(0)?;
 ```
 
 `init_device_contexts(0, 1)` sets device 0 as the default and initializes
 the device context map (capacity 1). The round-robin stream pool is created
-lazily on first use. The PTX module — compiled from our `#[kernel]`
-functions — is loaded once and shared via `Arc<CudaModule>`.
+lazily on first use. The embedded module compiled from our `#[kernel]`
+functions is loaded once and shared by the typed module handle.
 
 ### Step 2: Upload shared weights
 

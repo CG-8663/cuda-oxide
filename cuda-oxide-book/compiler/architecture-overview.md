@@ -128,7 +128,7 @@ cuda-oxide is split into focused crates. Here is every one and its role:
 | `cargo-oxide`        | CLI tool: `cargo oxide build`, `cargo oxide run`, `cargo oxide pipeline`               |
 | `cuda-device`        | Device-side API: intrinsics, `DisjointSlice`, barriers, shared memory, warp ops        |
 | `cuda-macros`        | Proc macros: `#[kernel]`, `#[device]`                                                  |
-| `cuda-host`          | Host-side utilities: `cuda_launch!` macro, argument scalarization                      |
+| `cuda-host`          | Host-side typed module loading and launch helpers                                      |
 | `cuda-core`          | Safe bindings to the CUDA Driver API (`CudaContext`, `DeviceBuffer`, `CudaStream`)     |
 | `cuda-async`         | Async GPU programming: `DeviceOperation`, combinators, stream pool scheduling          |
 | `cuda-bindings`      | Low-level FFI bindings to CUDA driver (`libcuda.so`)                                   |

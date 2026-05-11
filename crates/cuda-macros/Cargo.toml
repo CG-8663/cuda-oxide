@@ -10,6 +10,10 @@ description = "Procedural macros for CUDA kernel development (#[kernel], #[devic
 [lib]
 proc-macro = true
 
+[features]
+default = []
+async = []
+
 [dependencies]
 quote = { workspace = true }
 syn = { workspace = true }

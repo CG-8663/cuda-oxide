@@ -164,7 +164,7 @@ let dev_ptr: DeviceBox<f32> = /* allocated by DeviceOperation chain */;
 |:--------------------|:------------------------------------|:---------------------------------------|
 | **Crate**           | `cuda_core`                         | `cuda_async`                           |
 | **Free on drop**    | `cuMemFree` (sync -- stalls device) | `cuMemFreeAsync` (async -- no stall)   |
-| **Use with**        | `cuda_launch!`                      | `cuda_launch_async!`                   |
+| **Use with**        | typed sync launches                 | typed async launches                   |
 | **Host readback**   | `to_host_vec()`                     | Via explicit memcpy operation          |
 | **Best for**        | Single-stream, blocking workloads   | Multi-stream, pipelined workloads      |
 
@@ -192,8 +192,9 @@ primitive values that both sides interpret identically.
 | Struct `{ a: u32, b: f32 }`    | `a: u32` + `b: f32` (flattened)    |
 | Zero-sized types               | Stripped entirely                  |
 
-This is why `cuda_launch!` uses `slice()` and `slice_mut()` wrappers -- they
-extract the pointer and length for you. Inside the kernel, the compiler
+This is why typed `#[cuda_module]` methods accept `&DeviceBuffer<T>` for `&[T]`
+and `&mut DeviceBuffer<T>` for writable slice-like parameters. The generated
+method extracts the pointer and length for you. Inside the kernel, the compiler
 reconstitutes the slice struct from the scalar parameters, so your kernel code
 sees normal `&[T]` types.
 
@@ -208,8 +209,8 @@ compiler reconstitutes the original Rust types inside the kernel.
 
 :::{tip}
 Scalarization is completely invisible in normal kernel code. You write `&[f32]`
-in the signature and use it as a regular slice. The `cuda_launch!` macro and the
-compiler handle everything else.
+in the signature and use it as a regular slice. The generated launch method and
+the compiler handle everything else.
 :::
 
 ## `DisjointSlice` -- safe parallel writes

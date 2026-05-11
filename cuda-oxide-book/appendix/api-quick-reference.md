@@ -325,45 +325,36 @@ N_COLS must be a power of 2 in the range [32, 512].
 
 ## Host-Side: Kernel Launch
 
-### Synchronous
+### Typed Synchronous
 
 ```rust
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
-use cuda_host::{cuda_launch, load_kernel_module};
 
 let ctx = CudaContext::new(0).unwrap();
 let stream = ctx.default_stream();
-let module = load_kernel_module(&ctx, "vecadd").unwrap();
+let module = kernels::load(&ctx).unwrap();
 
 let a = DeviceBuffer::from_host(&stream, &a_host).unwrap();
 let b = DeviceBuffer::from_host(&stream, &b_host).unwrap();
 let mut output = DeviceBuffer::<f32>::zeroed(&stream, n).unwrap();
 
-cuda_launch! {
-    kernel: vecadd,
-    stream: stream,
-    module: module,
-    config: LaunchConfig::for_num_elems(n),
-    args: [slice(a), slice(b), slice_mut(output)]
-}.unwrap();
+module.vecadd(&stream, LaunchConfig::for_num_elems(n), &a, &b, &mut output).unwrap();
 ```
 
-### Async
+### Typed Async
 
 ```rust
 use cuda_async::device_operation::DeviceOperation;
-use cuda_host::cuda_launch_async;
 
-let op = cuda_launch_async! {
-    kernel: vecadd,
-    module: module,
-    config: LaunchConfig::for_num_elems(n),
-    args: [slice(a), slice(b), slice_mut(output)]
-};
+let module = kernels::load_async(0)?;
+let op = module.vecadd_async(LaunchConfig::for_num_elems(n), &a, &b, &mut output)?;
 
 op.sync()?;       // blocking
 // or: op.await?;  // async with tokio
 ```
+
+`cuda_launch!` and `cuda_launch_async!` remain available as lower-level APIs for
+explicit module loading and custom launch code.
 
 ### LaunchConfig
 
@@ -417,7 +408,7 @@ debug::prof_trigger::<7>();     // Nsight profiler trigger
 |:------------------|:-----------------------------------------------------------------------|
 | `cuda-device`     | Device intrinsics and types (`#![no_std]`)                             |
 | `cuda-macros`     | Proc macros (`#[kernel]`, `#[device]`, `gpu_printf!`)                  |
-| `cuda-host`       | `cuda_launch!` and `cuda_launch_async!`                                |
+| `cuda-host`       | Typed module loading plus low-level launch helpers                     |
 | `cuda-core`       | Safe RAII wrappers (`CudaContext`, `CudaStream`, `DeviceBuffer<T>`)    |
 | `cuda-async`      | `DeviceOperation`, `DeviceFuture`, `DeviceBox<T>`                      |
 | `cuda-bindings`   | Raw `bindgen` FFI to `cuda.h`                                          |

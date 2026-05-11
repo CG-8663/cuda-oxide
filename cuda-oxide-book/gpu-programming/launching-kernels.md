@@ -1,10 +1,11 @@
 # Launching Kernels
 
-Writing a kernel is only half the story. The host must load the compiled PTX,
+Writing a kernel is only half the story. The host must load device code,
 configure the launch grid, marshal arguments, and dispatch the work to the GPU.
-cuda-oxide provides two launch paths: `cuda_launch!` for straightforward
-synchronous enqueuing, and `cuda_launch_async!` for composable, lazy execution
-graphs.
+The primary cuda-oxide launch path is `#[cuda_module]`: it embeds the generated
+device artifact into the host binary and generates typed launch methods. The
+lower-level `load_kernel_module` and `cuda_launch!` APIs remain available when
+you need explicit sidecar loading or custom launch code.
 
 :::{seealso}
 [CUDA Programming Guide -- Execution Configuration](https://docs.nvidia.com/cuda/cuda-programming-guide/#execution-configuration)
@@ -16,8 +17,7 @@ for the authoritative reference on `<<<grid, block, smem, stream>>>` semantics.
 Every kernel launch follows the same sequence:
 
 1. **Initialize a CUDA context** -- bind to a GPU device.
-2. **Load the PTX module** -- the compiled device code produced by
-   `cargo oxide build`.
+2. **Load the device module** -- usually from the embedded artifact bundle.
 3. **Look up the kernel function** -- by its PTX entry point name.
 4. **Configure the grid** -- block dimensions, grid dimensions, shared memory.
 5. **Launch** -- enqueue the kernel on a stream.
@@ -27,52 +27,52 @@ Every kernel launch follows the same sequence:
 :align: center
 :width: 100%
 
-The kernel launch lifecycle. The host initializes a context, loads the PTX
-module, configures the grid, and launches via cuda_launch! (which handles
-steps 3-5 in one call). The GPU scheduler dispatches blocks to SMs.
+The kernel launch lifecycle. The host initializes a context, loads the device
+module, configures the grid, and launches via a typed method. The GPU scheduler
+dispatches blocks to SMs.
 ```
 
-In practice, `cuda_launch!` and `cuda_launch_async!` handle steps 3--5 in a
-single macro invocation. You typically only interact with context creation and
-module loading directly.
+In practice, `#[cuda_module]` handles steps 2--5 behind a generated Rust API.
+You normally interact with context creation, `kernels::load`, and a typed method
+call.
 
-## `cuda_launch!` -- synchronous launch
+## `#[cuda_module]` -- typed launch
 
-The `cuda_launch!` macro is the standard way to launch a kernel. It is
-"synchronous" in the sense that you provide a specific stream and the kernel is
-enqueued immediately (though execution on the GPU is asynchronous relative to the
-host):
+Wrap kernels in an inline `#[cuda_module]` module to generate a typed loader and
+one method per `#[kernel]`. The method is "synchronous" in the CUDA sense: you
+provide a specific stream and the kernel is enqueued immediately, though GPU
+execution still overlaps the host until you synchronize.
 
 ```rust
-use cuda_device::{kernel, thread, DisjointSlice};
+use cuda_device::{cuda_module, kernel, thread, DisjointSlice};
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
-use cuda_host::{cuda_launch, load_kernel_module};
 
-#[kernel]
-pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
-    let idx = thread::index_1d();
-    if let Some(c_elem) = c.get_mut(idx) {
-        *c_elem = a[idx.get()] + b[idx.get()];
+#[cuda_module]
+mod kernels {
+    use super::*;
+
+    #[kernel]
+    pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        if let Some(c_elem) = c.get_mut(idx) {
+            *c_elem = a[i] + b[i];
+        }
     }
 }
 
 fn main() {
     let ctx = CudaContext::new(0).unwrap();
     let stream = ctx.default_stream();
-    let module = load_kernel_module(&ctx, "vecadd").unwrap();
+    let module = kernels::load(&ctx).unwrap();
 
     let a = DeviceBuffer::from_host(&stream, &[1.0f32; 1024]).unwrap();
     let b = DeviceBuffer::from_host(&stream, &[2.0f32; 1024]).unwrap();
     let mut c = DeviceBuffer::<f32>::zeroed(&stream, 1024).unwrap();
 
-    cuda_launch! {
-        kernel: vecadd,
-        stream: stream,
-        module: module,
-        config: LaunchConfig::for_num_elems(1024),
-        args: [slice(a), slice(b), slice_mut(c)]
-    }
-    .expect("Kernel launch failed");
+    module
+        .vecadd(&stream, LaunchConfig::for_num_elems(1024), &a, &b, &mut c)
+        .expect("Kernel launch failed");
 
     let result = c.to_host_vec(&stream).unwrap();
     assert_eq!(result[0], 3.0);
@@ -81,32 +81,63 @@ fn main() {
 
 ### Field-by-field breakdown
 
-| Field    | Type              | Description                                          |
-|:---------|:------------------|:-----------------------------------------------------|
-| `kernel` | Path              | Kernel name (`vecadd`) or generic (`scale::<f32>`)   |
-| `stream` | `Arc<CudaStream>` | The stream to enqueue on                             |
-| `module` | `CudaModule`      | Loaded PTX module containing the kernel              |
-| `config` | `LaunchConfig`    | Grid/block dimensions and shared memory              |
-| `args`   | `[...]`           | Kernel arguments (see below)                         |
+| Piece                  | Description                         |
+|:-----------------------|:------------------------------------|
+| `#[cuda_module]`       | Generates loader and launch methods |
+| `kernels::load(&ctx)`  | Loads the embedded artifact bundle  |
+| `module.vecadd(...)`   | Enqueues a typed kernel launch      |
+| `LaunchConfig`         | Grid/block dimensions and smem      |
 
-### Argument wrappers
+### Argument mapping
 
-The `args` list uses wrapper functions to handle
-{ref}`scalarization <memory-argument-scalarization>`:
+The generated method maps kernel parameters to host values:
 
-| Syntax              | Kernel parameter   | What's passed to the GPU |
-|:--------------------|:-------------------|:-------------------------|
-| `slice(buf)`        | `&[T]`             | Pointer + length         |
-| `slice_mut(buf)`    | `DisjointSlice<T>` | Pointer + length         |
-| `Scalar(val)`       | `T`                | Value directly           |
-| `move \|x\| expr`   | Closure `F`        | Captures individually    |
+| Kernel parameter   | Host argument          | GPU ABI          |
+|:-------------------|:-----------------------|:-----------------|
+| `&[T]`             | `&DeviceBuffer<T>`     | Pointer + length |
+| `&mut [T]`         | `&mut DeviceBuffer<T>` | Pointer + length |
+| `DisjointSlice<T>` | `&mut DeviceBuffer<T>` | Pointer + length |
+| scalar/raw pointer | Same value             | Value directly   |
 
 ### Return value
 
-`cuda_launch!` returns `Result<(), DriverError>`. The `Ok` case means the
+Typed launch methods return `Result<(), DriverError>`. The `Ok` case means the
 kernel was successfully **enqueued** -- not that it finished. To check for
 runtime errors (e.g., out-of-bounds trap), synchronize the stream or context
 afterward.
+
+## `cuda_launch!` -- lower-level launch
+
+`cuda_launch!` is the explicit launch API used by older code and by examples
+that intentionally load a specific module. It remains useful when you need to
+choose a sidecar PTX/cubin/LTOIR artifact manually.
+
+```rust
+use cuda_host::{cuda_launch, load_kernel_module};
+
+let module = load_kernel_module(&ctx, "vecadd").unwrap();
+
+cuda_launch! {
+    kernel: vecadd,
+    stream: stream,
+    module: module,
+    config: LaunchConfig::for_num_elems(1024),
+    args: [slice(a), slice(b), slice_mut(c)]
+}
+.expect("Kernel launch failed");
+```
+
+The wrappers in `args` perform the same scalarization as the generated
+`#[cuda_module]` methods.
+
+## Artifact policy
+
+`#[cuda_module]` is a launch-surface feature, not a target-selection feature. It
+loads the embedded payload that the compiler placed in the host binary. Decisions
+such as PTX versus LTOIR, cubin versus fatbin, or single-arch versus multi-arch
+packaging live in the compiler and artifact/runtime loader layers. Keeping that
+policy separate lets the generated Rust launch methods stay stable as payload
+formats evolve.
 
 ## `LaunchConfig`
 
@@ -165,44 +196,70 @@ Quick guidelines:
 - **Powers of 2** (128, 256, 512) align with warp boundaries.
 - Use `#[launch_bounds]` to hint the compiler about your intended block size.
 
-## `cuda_launch_async!` -- composable async launch
+## Typed async launch
 
-The async launch macro returns a `DeviceOperation` instead of enqueuing
-immediately. No stream is specified at launch time -- the scheduling policy
-chooses one when the operation is executed:
+With the `cuda-host` async feature enabled, `#[cuda_module]` also generates
+borrowed and owned async methods. These return lazy `DeviceOperation` values
+instead of enqueuing immediately. No stream is specified at launch time -- the
+scheduling policy chooses one when the operation is executed:
 
 ```rust
 use cuda_async::device_context::init_device_contexts;
 use cuda_async::device_operation::DeviceOperation;
-use cuda_host::cuda_launch_async;
 
 init_device_contexts(0, 1)?;
+let module = kernels::load_async(0)?;
 
-let op = cuda_launch_async! {
-    kernel: vecadd,
-    module: module,
-    config: LaunchConfig::for_num_elems(1024),
-    args: [slice(a_dev), slice(b_dev), slice_mut(c_dev)]
-};
+let op = module.vecadd_async(
+    LaunchConfig::for_num_elems(1024),
+    &a_dev,
+    &b_dev,
+    &mut c_dev,
+)?;
 
 // Execute and wait
 op.sync()?;
 ```
 
-### `push_arg` and `push_args`
-
-Under the hood, `cuda_launch_async!` builds an `AsyncKernelLaunch` and calls
-`push_arg` for each argument. You can also build launches manually with
-`push_args` for tuple-based argument passing:
+Use the owned form when the operation must be spawned or stored as a `'static`
+future:
 
 ```rust
-let mut launch = AsyncKernelLaunch::new(func, config);
-launch.push_args((ptr_a, len_a, ptr_b, len_b, ptr_c, len_c));
+use std::future::IntoFuture;
+
+let op = module.vecadd_async_owned(
+    LaunchConfig::for_num_elems(1024),
+    a_dev,
+    b_dev,
+    c_dev,
+)?;
+
+let (a_dev, b_dev, c_dev) = tokio::spawn(op.into_future()).await??;
 ```
 
-`push_args` accepts tuples of up to 32 elements, where each element implements
-`KernelArgument`. Scalar types (`u32`, `f32`, `u64`, etc.) are boxed
-automatically.
+### Async buffer lifetimes
+
+Async launches are lazy, so pointer lifetimes matter:
+
+```text
+raw pointer shape:
+  build op from CUdeviceptr
+  drop buffer
+  run op later  -> stale pointer
+
+borrowed typed shape:
+  build op from &DeviceBuffer
+  Rust keeps the buffer borrowed until op completes
+
+owned typed shape:
+  move DeviceBox into op
+  spawned task owns the allocation until completion
+```
+
+`cuda_launch_async!` remains as a lower-level migration API, but prefer the
+generated borrowed or owned methods for new code. Raw pointer async launches are
+only correct when the caller can prove the pointed-to allocation outlives the
+lazy operation.
 
 ### `.sync()` vs `.await`
 

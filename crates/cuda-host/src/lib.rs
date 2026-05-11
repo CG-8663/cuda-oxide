@@ -16,36 +16,43 @@
 //!
 //! ## Macros
 //!
-//! - [`cuda_launch!`]: Launch a kernel synchronously on a given stream
-//!   (via `cuda_core::launch_kernel`)
-//! - [`cuda_launch_async!`]: Build a lazy `DeviceOperation` for async kernel launch
-//!   (via `cuda_async`)
+//! - [`cuda_module`]: Generate a typed embedded-module loader and per-kernel
+//!   sync launch methods from an inline kernel module. Enable the `async`
+//!   feature for borrowed and owned async launch methods.
+//! - [`cuda_launch!`]: Low-level launch macro retained for migration.
+//! - [`cuda_launch_async!`]: Low-level async launch macro retained for
+//!   migration when the `async` feature is enabled.
 //!
 //! ## Usage
 //!
 //! ```ignore
 //! use cuda_device::{kernel, thread, DisjointSlice};
-//! use cuda_host::cuda_launch;
+//! use cuda_host::cuda_module;
 //! use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
 //!
-//! #[kernel]
-//! pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) { ... }
+//! #[cuda_module]
+//! mod kernels {
+//!     use super::*;
+//!
+//!     #[kernel]
+//!     pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) { ... }
+//! }
 //!
 //! let ctx = CudaContext::new(0)?;
 //! let stream = ctx.default_stream();
-//! let module = ctx.load_module_from_file("vecadd.ptx")?;
+//! let module = kernels::load(&ctx)?;
 //!
 //! let a_dev = DeviceBuffer::from_host(&stream, &a_host)?;
 //! let b_dev = DeviceBuffer::from_host(&stream, &b_host)?;
 //! let mut c_dev = DeviceBuffer::<f32>::zeroed(&stream, N)?;
 //!
-//! cuda_launch! {
-//!     kernel: vecadd,
-//!     stream: stream,
-//!     module: module,
-//!     config: LaunchConfig::for_num_elems(N as u32),
-//!     args: [slice(a_dev), slice(b_dev), slice_mut(c_dev)]
-//! }?;
+//! module.vecadd(
+//!     &stream,
+//!     LaunchConfig::for_num_elems(N as u32),
+//!     &a_dev,
+//!     &b_dev,
+//!     &mut c_dev,
+//! )?;
 //!
 //! let c_host = c_dev.to_host_vec(&stream)?;
 //! ```
@@ -54,7 +61,24 @@ pub mod launch;
 pub mod ltoir;
 pub mod tiling;
 
-pub use launch::{CudaKernel, GenericCudaKernel, HasLength, ReadOnly, Scalar, WriteOnly};
+pub use launch::{
+    CudaKernel, GenericCudaKernel, HasLength, KernelScalar, ReadOnly, Scalar, WriteOnly,
+    push_kernel_device_slice, push_kernel_scalar, read_only_device_buffer_arg,
+    writable_device_buffer_arg,
+};
+
+#[cfg(feature = "async")]
+pub use launch::{
+    KernelSliceArg, KernelSliceArgMut, load_cuda_module_from_async_context,
+    load_kernel_module_async, new_async_kernel_launch, new_owned_async_kernel_launch,
+    push_async_kernel_scalar, push_async_read_only_device_slice, push_async_writable_device_slice,
+    set_async_kernel_cluster_dim,
+};
+
+#[cfg(feature = "async")]
+pub use cuda_async;
+#[cfg(feature = "async")]
+pub use cuda_async::launch::{AsyncKernelLaunch, OwnedAsyncKernelLaunch};
 
 /// Loads a compiled kernel module by name. Tries `<name>.cubin`, then
 /// `<name>.ptx`, and finally falls through to the LTOIR build path
@@ -65,13 +89,15 @@ pub use launch::{CudaKernel, GenericCudaKernel, HasLength, ReadOnly, Scalar, Wri
 pub use ltoir::{LtoirError, load_kernel_module};
 
 // Re-export launch macros from cuda-macros for convenience.
-pub use cuda_macros::cuda_launch;
+pub use cuda_macros::{cuda_launch, cuda_module};
 
+pub use cuda_core::embedded;
 /// Re-export of [`cuda_macros::cuda_launch_async`].
 ///
-/// Returns a lazy [`cuda_async::launch::AsyncKernelLaunch`] that implements
-/// [`DeviceOperation`]. Stream assignment is deferred to the scheduling policy --
-/// call `.sync()` to block or `.await` to suspend.
+/// Returns a lazy `cuda_async::launch::AsyncKernelLaunch`. Stream assignment is
+/// deferred to the scheduling policy -- call `.sync()` to block or `.await` to
+/// suspend.
+#[cfg(feature = "async")]
 pub use cuda_macros::cuda_launch_async;
 pub use tiling::{
     TILE_SIZE, k_major_index, mn_major_index, print_layout_indices, to_k_major_f16, to_mn_major_f16,

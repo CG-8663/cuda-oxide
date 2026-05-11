@@ -20,83 +20,81 @@ use cuda_device::barrier::{
 };
 use cuda_device::cluster;
 use cuda_device::{DisjointSlice, cluster_launch, kernel, thread};
-use cuda_host::cuda_launch;
+use cuda_host::cuda_module;
 
 // =============================================================================
 // KERNEL
 // =============================================================================
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-/// # Safety
-///
-/// Must be launched with the cluster shape declared in
-/// `#[cluster_launch(4, 1, 1)]` on SM90+ (Hopper or newer). Uses
-/// uninitialised `static mut Barrier` slots that the kernel itself
-/// initialises before first use.
-#[kernel]
-#[cluster_launch(4, 1, 1)]
-pub unsafe fn mcast_barrier_loop(mut out: DisjointSlice<u32>, num_iters: u32) {
-    unsafe {
-        static mut MCAST_BAR0: Barrier = Barrier::UNINIT;
-        static mut MCAST_BAR1: Barrier = Barrier::UNINIT;
+    #[kernel]
+    #[cluster_launch(4, 1, 1)]
+    pub unsafe fn mcast_barrier_loop(mut out: DisjointSlice<u32>, num_iters: u32) {
+        unsafe {
+            static mut MCAST_BAR0: Barrier = Barrier::UNINIT;
+            static mut MCAST_BAR1: Barrier = Barrier::UNINIT;
 
-        const CLUSTER_SIZE: u32 = 4;
+            const CLUSTER_SIZE: u32 = 4;
 
-        let tid = thread::threadIdx_x();
-        let my_rank = cluster::cluster_ctaidX();
+            let tid = thread::threadIdx_x();
+            let my_rank = cluster::cluster_ctaidX();
 
-        if tid == 0 {
-            mbarrier_init(&raw mut MCAST_BAR0, CLUSTER_SIZE);
-            mbarrier_init(&raw mut MCAST_BAR1, CLUSTER_SIZE);
-            fence_proxy_async_shared_cta();
-        }
-        thread::sync_threads();
-
-        let rank0_bar0_addr = cluster::map_shared_rank(&raw const MCAST_BAR0, 0) as u64;
-        let rank0_bar1_addr = cluster::map_shared_rank(&raw const MCAST_BAR1, 0) as u64;
-
-        let is_rank0 = my_rank == 0;
-
-        cluster::cluster_sync();
-
-        let mut k: u32 = 0;
-        while k < num_iters {
-            let stage = k & 1;
-            let mcast_parity = (k >> 1) & 1;
-
-            // All CTAs: arrive at rank 0's MCAST_BAR for this stage
             if tid == 0 {
+                mbarrier_init(&raw mut MCAST_BAR0, CLUSTER_SIZE);
+                mbarrier_init(&raw mut MCAST_BAR1, CLUSTER_SIZE);
                 fence_proxy_async_shared_cta();
-                if stage == 0 {
-                    mbarrier_arrive_cluster(rank0_bar0_addr);
-                } else {
-                    mbarrier_arrive_cluster(rank0_bar1_addr);
-                }
             }
+            thread::sync_threads();
 
-            // Rank 0: wait for all 4 CTAs to arrive
-            if is_rank0 {
-                if stage == 0 {
-                    while !mbarrier_try_wait_parity(&raw const MCAST_BAR0, mcast_parity) {
-                        nanosleep(32);
-                    }
-                } else {
-                    while !mbarrier_try_wait_parity(&raw const MCAST_BAR1, mcast_parity) {
-                        nanosleep(32);
+            let rank0_bar0_addr = cluster::map_shared_rank(&raw const MCAST_BAR0, 0) as u64;
+            let rank0_bar1_addr = cluster::map_shared_rank(&raw const MCAST_BAR1, 0) as u64;
+
+            let is_rank0 = my_rank == 0;
+
+            cluster::cluster_sync();
+
+            let mut k: u32 = 0;
+            while k < num_iters {
+                let stage = k & 1;
+                let mcast_parity = (k >> 1) & 1;
+
+                // All CTAs: arrive at rank 0's MCAST_BAR for this stage
+                if tid == 0 {
+                    fence_proxy_async_shared_cta();
+                    if stage == 0 {
+                        mbarrier_arrive_cluster(rank0_bar0_addr);
+                    } else {
+                        mbarrier_arrive_cluster(rank0_bar1_addr);
                     }
                 }
+
+                // Rank 0: wait for all 4 CTAs to arrive
+                if is_rank0 {
+                    if stage == 0 {
+                        while !mbarrier_try_wait_parity(&raw const MCAST_BAR0, mcast_parity) {
+                            nanosleep(32);
+                        }
+                    } else {
+                        while !mbarrier_try_wait_parity(&raw const MCAST_BAR1, mcast_parity) {
+                            nanosleep(32);
+                        }
+                    }
+                }
+
+                cluster::cluster_sync();
+                k += 1;
             }
 
             cluster::cluster_sync();
-            k += 1;
-        }
 
-        cluster::cluster_sync();
-
-        // Write success: rank + iteration count
-        if tid == 0 {
-            let idx = my_rank as usize;
-            if idx < out.len() {
-                *out.get_unchecked_mut(idx) = num_iters;
+            // Write success: rank + iteration count
+            if tid == 0 {
+                let idx = my_rank as usize;
+                if idx < out.len() {
+                    *out.get_unchecked_mut(idx) = num_iters;
+                }
             }
         }
     }
@@ -119,6 +117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Loading PTX: {}", ptx_path.display());
     let module =
         ctx.load_module_from_file(ptx_path.to_str().ok_or("PTX path must be valid UTF-8")?)?;
+    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
     println!("PTX loaded\n");
 
     for &num_iters in &[4u32, 8, 16, 32, 64, 256, 1024] {
@@ -132,14 +131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             shared_mem_bytes: 0,
         };
 
-        cuda_launch! {
-            kernel: mcast_barrier_loop,
-            stream: stream,
-            module: module,
-            config: cfg,
-            cluster_dim: (CLUSTER_SIZE, 1, 1),
-            args: [slice_mut(dev_out), num_iters]
-        }?;
+        unsafe { module.mcast_barrier_loop((stream).as_ref(), cfg, &mut dev_out, num_iters) }?;
 
         stream.synchronize()?;
 

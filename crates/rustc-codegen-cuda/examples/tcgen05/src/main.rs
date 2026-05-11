@@ -29,7 +29,7 @@
 //! Build and run with:
 //!   cargo oxide run tcgen05
 
-use cuda_core::{CudaContext, CudaModule, CudaStream, DeviceBuffer, LaunchConfig, sys};
+use cuda_core::{CudaContext, CudaStream, DeviceBuffer, LaunchConfig, sys};
 use cuda_device::barrier::Barrier;
 use cuda_device::shared::SharedArray;
 use cuda_device::tcgen05::{
@@ -40,384 +40,352 @@ use cuda_device::tcgen05::{
     tcgen05_load_wait, tcgen05_mma_f16_cg2, tcgen05_mma_ws_f16,
 };
 use cuda_device::{DisjointSlice, cluster, cluster_launch, kernel, thread, warp};
-use cuda_host::cuda_launch;
+use cuda_host::cuda_module;
 use std::sync::Arc;
 
 // =============================================================================
 // KERNELS
 // =============================================================================
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-/// Test kernel for tcgen05 sync primitives (no MMA).
-///
-/// # Safety
-///
-/// Must run on SM100+ (Blackwell). The kernel allocates and reads
-/// `static mut SMEM` cooperatively; the thread-sync fences inside the
-/// kernel make that single-CTA access pattern sound.
-#[kernel]
-// `unused_unsafe` on host only: fence helpers are shims there; device needs the explicit block.
-#[allow(unused_unsafe)]
-pub unsafe fn tcgen05_fence_test(mut output: DisjointSlice<u64>) {
-    static mut SMEM: SharedArray<u8, 256, 128> = SharedArray::UNINIT;
+    /// Test kernel for tcgen05 sync primitives (no MMA).
+    #[kernel]
+    // `unused_unsafe` on host only: fence helpers are shims there; device needs the explicit block.
+    #[allow(unused_unsafe)]
+    pub unsafe fn tcgen05_fence_test(mut output: DisjointSlice<u64>) {
+        static mut SMEM: SharedArray<u8, 256, 128> = SharedArray::UNINIT;
 
-    unsafe {
-        let tid = thread::threadIdx_x();
-        let gid = thread::index_1d();
+        unsafe {
+            let tid = thread::threadIdx_x();
+            let gid = thread::index_1d();
 
-        // Test SMEM descriptor builder (single-thread)
-        let smem_addr = &raw const SMEM as *const u8 as u64;
-        let desc = Tcgen05SmemDescriptor::builder()
-            .address(smem_addr)
-            .leading_dim_bytes(128)
-            .stride_bytes(128)
-            .swizzle(Tcgen05SwizzleMode::Swizzle32B)
-            .build()
-            .raw();
+            // Test SMEM descriptor builder (single-thread)
+            let smem_addr = &raw const SMEM as *const u8 as u64;
+            let desc = Tcgen05SmemDescriptor::builder()
+                .address(smem_addr)
+                .leading_dim_bytes(128)
+                .stride_bytes(128)
+                .swizzle(Tcgen05SwizzleMode::Swizzle32B)
+                .build()
+                .raw();
 
-        // Test fence primitives (single-thread)
-        tcgen05_fence_before_thread_sync();
-        tcgen05_fence_after_thread_sync();
-
-        if tid == 0
-            && let Some(out_elem) = output.get_mut(gid)
-        {
-            *out_elem = desc;
-        }
-    }
-}
-
-/// Test kernel for tcgen05 TMEM allocation.
-///
-/// # Safety
-///
-/// Must run on SM100+ (Blackwell). Allocates one TMEM block via
-/// `tcgen05_alloc` and frees it before exit; the alloc/dealloc pair
-/// is what makes it sound.
-#[kernel]
-pub unsafe fn tcgen05_alloc_test(mut output: DisjointSlice<u32>) {
-    static mut TMEM_ADDR: SharedArray<u32, 1, 4> = SharedArray::UNINIT;
-
-    unsafe {
-        let tid = thread::threadIdx_x();
-        let gid = thread::index_1d();
-        let warp_id = warp::warp_id();
-
-        if tid == 0 {
-            *(&raw mut TMEM_ADDR as *mut u32) = 0xDEADBEEF;
-        }
-        thread::sync_threads();
-
-        if warp_id == 0 {
-            tcgen05_alloc(&raw mut TMEM_ADDR as *mut u32, 32);
-        }
-
-        thread::sync_threads();
-
-        let tmem_addr = *(&raw const TMEM_ADDR as *const u32);
-
-        if tid == 0
-            && let Some(out_elem) = output.get_mut(gid)
-        {
-            *out_elem = tmem_addr;
-        }
-
-        if warp_id == 0 && tmem_addr != 0xDEADBEEF {
-            tcgen05_dealloc(tmem_addr, 32);
-        }
-    }
-}
-
-/// Test kernel for tcgen05 commit with mbarrier.
-///
-/// # Safety
-///
-/// Must run on SM100+ (Blackwell). Initialises a `static mut Barrier`
-/// in-place, drives one commit/wait round-trip, then invalidates it.
-#[kernel]
-pub unsafe fn tcgen05_commit_test(mut output: DisjointSlice<u64>) {
-    static mut MBAR: Barrier = Barrier::UNINIT;
-    static mut SMEM: SharedArray<u8, 256, 128> = SharedArray::UNINIT;
-
-    unsafe {
-        let tid = thread::threadIdx_x();
-        let gid = thread::index_1d();
-
-        if tid == 0 {
-            cuda_device::barrier::mbarrier_init(&raw mut MBAR, 1);
-        }
-        thread::sync_threads();
-
-        let smem_addr = &raw const SMEM as *const u8 as u64;
-        let desc = Tcgen05SmemDescriptor::builder()
-            .address(smem_addr)
-            .leading_dim_bytes(128)
-            .stride_bytes(128)
-            .swizzle(Tcgen05SwizzleMode::None)
-            .build()
-            .raw();
-
-        if tid == 0 {
+            // Test fence primitives (single-thread)
             tcgen05_fence_before_thread_sync();
-            tcgen05_commit(&raw mut MBAR as *mut u64);
-        }
+            tcgen05_fence_after_thread_sync();
 
-        cuda_device::barrier::mbarrier_try_wait(&raw const MBAR, 0);
-
-        if tid == 0
-            && let Some(out_elem) = output.get_mut(gid)
-        {
-            *out_elem = desc;
-        }
-
-        if tid == 0 {
-            cuda_device::barrier::mbarrier_inval(&raw mut MBAR);
+            if tid == 0
+                && let Some(out_elem) = output.get_mut(gid)
+            {
+                *out_elem = desc;
+            }
         }
     }
-}
 
-/// Minimal MMA test kernel - full tcgen05 pipeline.
-///
-/// # Safety
-///
-/// Must run on SM100+ (Blackwell). Drives the full tcgen05 pipeline
-/// — alloc TMEM, issue MMA, wait for completion via mbarrier, dealloc
-/// TMEM — entirely within a single CTA.
-#[kernel]
-pub unsafe fn tcgen05_mma_minimal(mut output: DisjointSlice<u32>) {
-    static mut SMEM_A: SharedArray<u8, 4096, 128> = SharedArray::UNINIT;
-    static mut SMEM_B: SharedArray<u8, 4096, 128> = SharedArray::UNINIT;
-    static mut SMEM_D: SharedArray<u32, 32, 4> = SharedArray::UNINIT;
-    static mut TMEM_ADDR: SharedArray<u32, 1, 4> = SharedArray::UNINIT;
-    static mut MBAR: Barrier = Barrier::UNINIT;
+    /// Test kernel for tcgen05 TMEM allocation.
+    #[kernel]
+    pub unsafe fn tcgen05_alloc_test(mut output: DisjointSlice<u32>) {
+        static mut TMEM_ADDR: SharedArray<u32, 1, 4> = SharedArray::UNINIT;
 
-    unsafe {
-        let tid = thread::threadIdx_x();
-        let gid = thread::index_1d();
-        let gid_raw = gid.get();
-        let warp_id = warp::warp_id();
+        unsafe {
+            let tid = thread::threadIdx_x();
+            let gid = thread::index_1d();
+            let warp_id = warp::warp_id();
 
-        // Step 1: Initialize mbarrier
-        if tid == 0 {
-            cuda_device::barrier::mbarrier_init(&raw mut MBAR, 1);
-        }
-        thread::sync_threads();
+            if tid == 0 {
+                *(&raw mut TMEM_ADDR as *mut u32) = 0xDEADBEEF;
+            }
+            thread::sync_threads();
 
-        // Step 2: Allocate TMEM
-        if warp_id == 0 {
-            tcgen05_alloc(&raw mut TMEM_ADDR as *mut u32, 64);
-        }
-        thread::sync_threads();
+            if warp_id == 0 {
+                tcgen05_alloc(&raw mut TMEM_ADDR as *mut u32, 32);
+            }
 
-        let tmem_addr = *(&raw const TMEM_ADDR as *const u32);
+            thread::sync_threads();
 
-        // Step 3: Copy A from SMEM to TMEM
-        if tid == 0 {
-            let smem_a_addr = &raw const SMEM_A as *const u8 as u64;
-            let a_desc = Tcgen05SmemDescriptor::builder()
-                .address(smem_a_addr)
-                .leading_dim_bytes(1024)
-                .stride_bytes(128)
-                .swizzle(Tcgen05SwizzleMode::None)
-                .build()
-                .raw();
+            let tmem_addr = *(&raw const TMEM_ADDR as *const u32);
 
-            tcgen05_cp_smem_to_tmem(tmem_addr, a_desc);
-        }
-        thread::sync_threads();
+            if tid == 0
+                && let Some(out_elem) = output.get_mut(gid)
+            {
+                *out_elem = tmem_addr;
+            }
 
-        // Step 4: Issue MMA
-        if tid == 0 {
-            let smem_b_addr = &raw const SMEM_B as *const u8 as u64;
-            let b_desc = Tcgen05SmemDescriptor::builder()
-                .address(smem_b_addr)
-                .leading_dim_bytes(1024)
-                .stride_bytes(128)
-                .swizzle(Tcgen05SwizzleMode::None)
-                .build()
-                .raw();
-
-            let idesc = Tcgen05InstructionDescriptor::builder()
-                .shape(Tcgen05MmaShape::M64_N64)
-                .element_type(Tcgen05ElementType::F16)
-                .accumulator_type(Tcgen05AccumulatorType::F32)
-                .build()
-                .raw();
-
-            tcgen05_mma_ws_f16(tmem_addr, tmem_addr, 0, b_desc, idesc, false);
-
-            // Step 5: Signal completion
-            tcgen05_fence_before_thread_sync();
-            tcgen05_commit(&raw mut MBAR as *mut u64);
-        }
-
-        // Step 6: Wait for MMA
-        cuda_device::barrier::mbarrier_try_wait(&raw const MBAR, 0);
-
-        // Step 7: Read D from TMEM
-        if warp_id == 0 {
-            let regs = tcgen05_ld_16x256b_pure(tmem_addr);
-            tcgen05_load_wait();
-
-            let lane_id = tid & 31;
-            let smem_d_ptr = &raw mut SMEM_D as *mut f32;
-            *smem_d_ptr.add(lane_id as usize) = regs[0];
-        }
-        thread::sync_threads();
-
-        // Step 8: Output results
-        if tid == 0 {
-            let base_idx = gid_raw;
-            *output.get_unchecked_mut(base_idx) = tmem_addr;
-
-            let smem_d_ptr = &raw const SMEM_D as *const u32;
-            *output.get_unchecked_mut(base_idx + 1) = *smem_d_ptr;
-        }
-
-        // Step 9: Cleanup
-        thread::sync_threads();
-
-        if warp_id == 0 {
-            tcgen05_dealloc(tmem_addr, 64);
-        }
-
-        if tid == 0 {
-            cuda_device::barrier::mbarrier_inval(&raw mut MBAR);
+            if warp_id == 0 && tmem_addr != 0xDEADBEEF {
+                tcgen05_dealloc(tmem_addr, 32);
+            }
         }
     }
-}
 
-// =============================================================================
-// CTA Pair (cta_group::2) Test Kernels
-// =============================================================================
+    /// Test kernel for tcgen05 commit with mbarrier.
+    #[kernel]
+    pub unsafe fn tcgen05_commit_test(mut output: DisjointSlice<u64>) {
+        static mut MBAR: Barrier = Barrier::UNINIT;
+        static mut SMEM: SharedArray<u8, 256, 128> = SharedArray::UNINIT;
 
-/// Test TMEM alloc/dealloc with cta_group::2 (CTA pairs).
-///
-/// Launches 2 CTAs as a cluster (= 1 CTA pair on adjacent SMs).
-/// Both CTAs cooperatively allocate TMEM with tcgen05_alloc_cg2,
-/// verify they get a valid address, then deallocate.
-///
-/// # Safety
-///
-/// Must be launched as a 2-CTA cluster per `#[cluster_launch(2, 1, 1)]`
-/// on SM100+. The two CTAs participate in the same `tcgen05_alloc_cg2`
-/// round-trip; launching with any other cluster shape is UB.
-#[kernel]
-#[cluster_launch(2, 1, 1)]
-pub unsafe fn tcgen05_alloc_cg2_test(mut output: DisjointSlice<u32>) {
-    static mut TMEM_ADDR: SharedArray<u32, 1, 4> = SharedArray::UNINIT;
+        unsafe {
+            let tid = thread::threadIdx_x();
+            let gid = thread::index_1d();
 
-    unsafe {
-        let tid = thread::threadIdx_x();
-        let warp_id = warp::warp_id();
-        let block_rank = cluster::block_rank();
+            if tid == 0 {
+                cuda_device::barrier::mbarrier_init(&raw mut MBAR, 1);
+            }
+            thread::sync_threads();
 
-        if tid == 0 {
-            *(&raw mut TMEM_ADDR as *mut u32) = 0xDEADBEEF;
-        }
-        thread::sync_threads();
+            let smem_addr = &raw const SMEM as *const u8 as u64;
+            let desc = Tcgen05SmemDescriptor::builder()
+                .address(smem_addr)
+                .leading_dim_bytes(128)
+                .stride_bytes(128)
+                .swizzle(Tcgen05SwizzleMode::None)
+                .build()
+                .raw();
 
-        if warp_id == 0 {
-            tcgen05_alloc_cg2(&raw mut TMEM_ADDR as *mut u32, 32);
-        }
-        thread::sync_threads();
+            if tid == 0 {
+                tcgen05_fence_before_thread_sync();
+                tcgen05_commit(&raw mut MBAR as *mut u64);
+            }
 
-        let tmem_addr = *(&raw const TMEM_ADDR as *const u32);
+            cuda_device::barrier::mbarrier_try_wait(&raw const MBAR, 0);
 
-        if tid == 0 {
-            *output.get_unchecked_mut(block_rank as usize) = tmem_addr;
-        }
+            if tid == 0
+                && let Some(out_elem) = output.get_mut(gid)
+            {
+                *out_elem = desc;
+            }
 
-        if warp_id == 0 && tmem_addr != 0xDEADBEEF {
-            tcgen05_dealloc_cg2(tmem_addr, 32);
+            if tid == 0 {
+                cuda_device::barrier::mbarrier_inval(&raw mut MBAR);
+            }
         }
     }
-}
 
-/// Test MMA with cta_group::2 (CTA pairs).
-///
-/// Two CTAs form a CTA pair. Both allocate TMEM with cta_group::2, and
-/// a single issuing thread from the pair launches the cooperative MMA.
-/// The pair cooperates on a larger effective
-/// tile (each SM's tensor core handles its half of the rows).
-///
-/// # Safety
-///
-/// Must be launched as a 2-CTA cluster per `#[cluster_launch(2, 1, 1)]`
-/// on SM100+. The MMA issuing thread relies on both CTAs being present;
-/// launching with any other cluster shape is UB.
-#[kernel]
-#[cluster_launch(2, 1, 1)]
-pub unsafe fn tcgen05_mma_cg2_test(mut output: DisjointSlice<u32>) {
-    static mut SMEM_A: SharedArray<u8, 4096, 128> = SharedArray::UNINIT;
-    static mut SMEM_B: SharedArray<u8, 4096, 128> = SharedArray::UNINIT;
-    static mut TMEM_ADDR: SharedArray<u32, 1, 4> = SharedArray::UNINIT;
-    static mut MBAR: Barrier = Barrier::UNINIT;
+    /// Minimal MMA test kernel - full tcgen05 pipeline.
+    #[kernel]
+    pub unsafe fn tcgen05_mma_minimal(mut output: DisjointSlice<u32>) {
+        static mut SMEM_A: SharedArray<u8, 4096, 128> = SharedArray::UNINIT;
+        static mut SMEM_B: SharedArray<u8, 4096, 128> = SharedArray::UNINIT;
+        static mut SMEM_D: SharedArray<u32, 32, 4> = SharedArray::UNINIT;
+        static mut TMEM_ADDR: SharedArray<u32, 1, 4> = SharedArray::UNINIT;
+        static mut MBAR: Barrier = Barrier::UNINIT;
 
-    unsafe {
-        let tid = thread::threadIdx_x();
-        let warp_id = warp::warp_id();
-        let block_rank = cluster::block_rank();
+        unsafe {
+            let tid = thread::threadIdx_x();
+            let gid = thread::index_1d();
+            let warp_id = warp::warp_id();
 
-        if tid == 0 {
-            cuda_device::barrier::mbarrier_init(&raw mut MBAR, 1);
+            // Step 1: Initialize mbarrier
+            if tid == 0 {
+                cuda_device::barrier::mbarrier_init(&raw mut MBAR, 1);
+            }
+            thread::sync_threads();
+
+            // Step 2: Allocate TMEM
+            if warp_id == 0 {
+                tcgen05_alloc(&raw mut TMEM_ADDR as *mut u32, 64);
+            }
+            thread::sync_threads();
+
+            let tmem_addr = *(&raw const TMEM_ADDR as *const u32);
+
+            // Step 3: Copy A from SMEM to TMEM
+            if tid == 0 {
+                let smem_a_addr = &raw const SMEM_A as *const u8 as u64;
+                let a_desc = Tcgen05SmemDescriptor::builder()
+                    .address(smem_a_addr)
+                    .leading_dim_bytes(1024)
+                    .stride_bytes(128)
+                    .swizzle(Tcgen05SwizzleMode::None)
+                    .build()
+                    .raw();
+
+                tcgen05_cp_smem_to_tmem(tmem_addr, a_desc);
+            }
+            thread::sync_threads();
+
+            // Step 4: Issue MMA
+            if tid == 0 {
+                let smem_b_addr = &raw const SMEM_B as *const u8 as u64;
+                let b_desc = Tcgen05SmemDescriptor::builder()
+                    .address(smem_b_addr)
+                    .leading_dim_bytes(1024)
+                    .stride_bytes(128)
+                    .swizzle(Tcgen05SwizzleMode::None)
+                    .build()
+                    .raw();
+
+                let idesc = Tcgen05InstructionDescriptor::builder()
+                    .shape(Tcgen05MmaShape::M64_N64)
+                    .element_type(Tcgen05ElementType::F16)
+                    .accumulator_type(Tcgen05AccumulatorType::F32)
+                    .build()
+                    .raw();
+
+                tcgen05_mma_ws_f16(tmem_addr, tmem_addr, 0, b_desc, idesc, false);
+
+                // Step 5: Signal completion
+                tcgen05_fence_before_thread_sync();
+                tcgen05_commit(&raw mut MBAR as *mut u64);
+            }
+
+            // Step 6: Wait for MMA
+            cuda_device::barrier::mbarrier_try_wait(&raw const MBAR, 0);
+
+            // Step 7: Read D from TMEM
+            if warp_id == 0 {
+                let regs = tcgen05_ld_16x256b_pure(tmem_addr);
+                tcgen05_load_wait();
+
+                let lane_id = tid & 31;
+                let smem_d_ptr = &raw mut SMEM_D as *mut f32;
+                *smem_d_ptr.add(lane_id as usize) = regs[0];
+            }
+            thread::sync_threads();
+
+            // Step 8: Output results
+            if tid == 0 {
+                let base_idx = gid.get();
+                *output.get_unchecked_mut(base_idx) = tmem_addr;
+
+                let smem_d_ptr = &raw const SMEM_D as *const u32;
+                *output.get_unchecked_mut(base_idx + 1) = *smem_d_ptr;
+            }
+
+            // Step 9: Cleanup
+            thread::sync_threads();
+
+            if warp_id == 0 {
+                tcgen05_dealloc(tmem_addr, 64);
+            }
+
+            if tid == 0 {
+                cuda_device::barrier::mbarrier_inval(&raw mut MBAR);
+            }
         }
-        thread::sync_threads();
+    }
 
-        if warp_id == 0 {
-            tcgen05_alloc_cg2(&raw mut TMEM_ADDR as *mut u32, 512);
+    // =============================================================================
+    // CTA Pair (cta_group::2) Test Kernels
+    // =============================================================================
+
+    /// Test TMEM alloc/dealloc with cta_group::2 (CTA pairs).
+    ///
+    /// Launches 2 CTAs as a cluster (= 1 CTA pair on adjacent SMs).
+    /// Both CTAs cooperatively allocate TMEM with tcgen05_alloc_cg2,
+    /// verify they get a valid address, then deallocate.
+    #[kernel]
+    #[cluster_launch(2, 1, 1)]
+    pub unsafe fn tcgen05_alloc_cg2_test(mut output: DisjointSlice<u32>) {
+        static mut TMEM_ADDR: SharedArray<u32, 1, 4> = SharedArray::UNINIT;
+
+        unsafe {
+            let tid = thread::threadIdx_x();
+            let warp_id = warp::warp_id();
+            let block_rank = cluster::block_rank();
+
+            if tid == 0 {
+                *(&raw mut TMEM_ADDR as *mut u32) = 0xDEADBEEF;
+            }
+            thread::sync_threads();
+
+            if warp_id == 0 {
+                tcgen05_alloc_cg2(&raw mut TMEM_ADDR as *mut u32, 32);
+            }
+            thread::sync_threads();
+
+            let tmem_addr = *(&raw const TMEM_ADDR as *const u32);
+
+            if tid == 0 {
+                *output.get_unchecked_mut(block_rank as usize) = tmem_addr;
+            }
+
+            if warp_id == 0 && tmem_addr != 0xDEADBEEF {
+                tcgen05_dealloc_cg2(tmem_addr, 32);
+            }
         }
-        thread::sync_threads();
+    }
 
-        let tmem_addr = *(&raw const TMEM_ADDR as *const u32);
+    /// Test MMA with cta_group::2 (CTA pairs).
+    ///
+    /// Two CTAs form a CTA pair. Both allocate TMEM with cta_group::2, and
+    /// a single issuing thread from the pair launches the cooperative MMA.
+    /// The pair cooperates on a larger effective
+    /// tile (each SM's tensor core handles its half of the rows).
+    #[kernel]
+    #[cluster_launch(2, 1, 1)]
+    pub unsafe fn tcgen05_mma_cg2_test(mut output: DisjointSlice<u32>) {
+        static mut SMEM_A: SharedArray<u8, 4096, 128> = SharedArray::UNINIT;
+        static mut SMEM_B: SharedArray<u8, 4096, 128> = SharedArray::UNINIT;
+        static mut TMEM_ADDR: SharedArray<u32, 1, 4> = SharedArray::UNINIT;
+        static mut MBAR: Barrier = Barrier::UNINIT;
 
-        if tid == 0 && block_rank == 0 {
-            let smem_b_addr = &raw const SMEM_B as *const u8 as u64;
-            let b_desc = Tcgen05SmemDescriptor::builder()
-                .address(smem_b_addr)
-                .leading_dim_bytes(1024)
-                .stride_bytes(128)
-                .swizzle(Tcgen05SwizzleMode::None)
-                .build()
-                .raw();
+        unsafe {
+            let tid = thread::threadIdx_x();
+            let warp_id = warp::warp_id();
+            let block_rank = cluster::block_rank();
 
-            let idesc = Tcgen05InstructionDescriptor::builder()
-                .shape(Tcgen05MmaShape::M128_N128)
-                .element_type(Tcgen05ElementType::F16)
-                .accumulator_type(Tcgen05AccumulatorType::F32)
-                .build()
-                .raw();
+            if tid == 0 {
+                cuda_device::barrier::mbarrier_init(&raw mut MBAR, 1);
+            }
+            thread::sync_threads();
 
-            let a_smem_addr = &raw const SMEM_A as *const u8 as u64;
-            let a_desc = Tcgen05SmemDescriptor::builder()
-                .address(a_smem_addr)
-                .leading_dim_bytes(1024)
-                .stride_bytes(128)
-                .swizzle(Tcgen05SwizzleMode::None)
-                .build()
-                .raw();
+            if warp_id == 0 {
+                tcgen05_alloc_cg2(&raw mut TMEM_ADDR as *mut u32, 512);
+            }
+            thread::sync_threads();
 
-            tcgen05_mma_f16_cg2(tmem_addr, a_desc, b_desc, idesc, false);
+            let tmem_addr = *(&raw const TMEM_ADDR as *const u32);
 
-            tcgen05_fence_before_thread_sync();
-            // cta_group::2 commit is issued by one thread in the CTA pair and
-            // multicast to both CTAs' barriers (cluster ranks 0 and 1).
-            tcgen05_commit_multicast_cg2(&raw mut MBAR as *mut u64, 0b11u16);
-        }
+            if tid == 0 && block_rank == 0 {
+                let smem_b_addr = &raw const SMEM_B as *const u8 as u64;
+                let b_desc = Tcgen05SmemDescriptor::builder()
+                    .address(smem_b_addr)
+                    .leading_dim_bytes(1024)
+                    .stride_bytes(128)
+                    .swizzle(Tcgen05SwizzleMode::None)
+                    .build()
+                    .raw();
 
-        cuda_device::barrier::mbarrier_try_wait(&raw const MBAR, 0);
+                let idesc = Tcgen05InstructionDescriptor::builder()
+                    .shape(Tcgen05MmaShape::M128_N128)
+                    .element_type(Tcgen05ElementType::F16)
+                    .accumulator_type(Tcgen05AccumulatorType::F32)
+                    .build()
+                    .raw();
 
-        if tid == 0 {
-            *output.get_unchecked_mut(block_rank as usize) = tmem_addr;
-        }
+                let a_smem_addr = &raw const SMEM_A as *const u8 as u64;
+                let a_desc = Tcgen05SmemDescriptor::builder()
+                    .address(a_smem_addr)
+                    .leading_dim_bytes(1024)
+                    .stride_bytes(128)
+                    .swizzle(Tcgen05SwizzleMode::None)
+                    .build()
+                    .raw();
 
-        thread::sync_threads();
+                tcgen05_mma_f16_cg2(tmem_addr, a_desc, b_desc, idesc, false);
 
-        if warp_id == 0 && tmem_addr != 0xDEADBEEF {
-            tcgen05_dealloc_cg2(tmem_addr, 512);
-        }
+                tcgen05_fence_before_thread_sync();
+                // cta_group::2 commit is issued by one thread in the CTA pair and
+                // multicast to both CTAs' barriers (cluster ranks 0 and 1).
+                tcgen05_commit_multicast_cg2(&raw mut MBAR as *mut u64, 0b11u16);
+            }
 
-        if tid == 0 {
-            cuda_device::barrier::mbarrier_inval(&raw mut MBAR);
+            cuda_device::barrier::mbarrier_try_wait(&raw const MBAR, 0);
+
+            if tid == 0 {
+                *output.get_unchecked_mut(block_rank as usize) = tmem_addr;
+            }
+
+            thread::sync_threads();
+
+            if warp_id == 0 && tmem_addr != 0xDEADBEEF {
+                tcgen05_dealloc_cg2(tmem_addr, 512);
+            }
+
+            if tid == 0 {
+                cuda_device::barrier::mbarrier_inval(&raw mut MBAR);
+            }
         }
     }
 }
@@ -462,6 +430,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(e.into());
         }
     };
+    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
     println!("✓ PTX loaded successfully\n");
 
     run_tcgen05_fence_test(&stream, &module)?;
@@ -516,7 +485,7 @@ fn verify_ptx_only() -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_tcgen05_fence_test(
     stream: &Arc<CudaStream>,
-    module: &Arc<CudaModule>,
+    module: &kernels::LoadedModule,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Test: tcgen05 Fence Primitives ---\n");
 
@@ -528,13 +497,7 @@ fn run_tcgen05_fence_test(
     };
 
     println!("Launching tcgen05_fence_test kernel...");
-    cuda_launch! {
-        kernel: tcgen05_fence_test,
-        stream: stream,
-        module: module,
-        config: cfg,
-        args: [slice_mut(output)]
-    }?;
+    unsafe { module.tcgen05_fence_test((stream).as_ref(), cfg, &mut output) }?;
 
     stream.synchronize()?;
 
@@ -547,7 +510,7 @@ fn run_tcgen05_fence_test(
 
 fn run_tcgen05_alloc_test(
     stream: &Arc<CudaStream>,
-    module: &Arc<CudaModule>,
+    module: &kernels::LoadedModule,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Test: tcgen05 TMEM Allocation ---\n");
 
@@ -559,13 +522,7 @@ fn run_tcgen05_alloc_test(
     };
 
     println!("Launching tcgen05_alloc_test kernel...");
-    cuda_launch! {
-        kernel: tcgen05_alloc_test,
-        stream: stream,
-        module: module,
-        config: cfg,
-        args: [slice_mut(output)]
-    }?;
+    unsafe { module.tcgen05_alloc_test((stream).as_ref(), cfg, &mut output) }?;
 
     stream.synchronize()?;
 
@@ -586,7 +543,7 @@ fn run_tcgen05_alloc_test(
 
 fn run_tcgen05_commit_test(
     stream: &Arc<CudaStream>,
-    module: &Arc<CudaModule>,
+    module: &kernels::LoadedModule,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Test: tcgen05 Commit with mbarrier ---\n");
 
@@ -598,13 +555,7 @@ fn run_tcgen05_commit_test(
     };
 
     println!("Launching tcgen05_commit_test kernel...");
-    cuda_launch! {
-        kernel: tcgen05_commit_test,
-        stream: stream,
-        module: module,
-        config: cfg,
-        args: [slice_mut(output)]
-    }?;
+    unsafe { module.tcgen05_commit_test((stream).as_ref(), cfg, &mut output) }?;
 
     stream.synchronize()?;
 
@@ -617,7 +568,7 @@ fn run_tcgen05_commit_test(
 
 fn run_tcgen05_mma_minimal_test(
     stream: &Arc<CudaStream>,
-    module: &Arc<CudaModule>,
+    module: &kernels::LoadedModule,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Test: tcgen05 MMA Minimal ---\n");
 
@@ -629,13 +580,7 @@ fn run_tcgen05_mma_minimal_test(
     };
 
     println!("Launching tcgen05_mma_minimal kernel...");
-    cuda_launch! {
-        kernel: tcgen05_mma_minimal,
-        stream: stream,
-        module: module,
-        config: cfg,
-        args: [slice_mut(output)]
-    }?;
+    unsafe { module.tcgen05_mma_minimal((stream).as_ref(), cfg, &mut output) }?;
 
     stream.synchronize()?;
 
@@ -653,7 +598,7 @@ fn run_tcgen05_mma_minimal_test(
 
 fn run_tcgen05_alloc_cg2_test(
     stream: &Arc<CudaStream>,
-    module: &Arc<CudaModule>,
+    module: &kernels::LoadedModule,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Test: tcgen05 TMEM Alloc cta_group::2 ---\n");
 
@@ -665,14 +610,7 @@ fn run_tcgen05_alloc_cg2_test(
     };
 
     println!("Launching tcgen05_alloc_cg2_test (cluster=2x1x1)...");
-    cuda_launch! {
-        kernel: tcgen05_alloc_cg2_test,
-        stream: stream,
-        module: module,
-        config: cfg,
-        cluster_dim: (2, 1, 1),
-        args: [slice_mut(output)]
-    }?;
+    unsafe { module.tcgen05_alloc_cg2_test((stream).as_ref(), cfg, &mut output) }?;
 
     stream.synchronize()?;
 
@@ -693,7 +631,7 @@ fn run_tcgen05_alloc_cg2_test(
 
 fn run_tcgen05_mma_cg2_test(
     stream: &Arc<CudaStream>,
-    module: &Arc<CudaModule>,
+    module: &kernels::LoadedModule,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Test: tcgen05 MMA cta_group::2 ---\n");
 
@@ -705,14 +643,7 @@ fn run_tcgen05_mma_cg2_test(
     };
 
     println!("Launching tcgen05_mma_cg2_test (cluster=2x1x1)...");
-    cuda_launch! {
-        kernel: tcgen05_mma_cg2_test,
-        stream: stream,
-        module: module,
-        config: cfg,
-        cluster_dim: (2, 1, 1),
-        args: [slice_mut(output)]
-    }?;
+    unsafe { module.tcgen05_mma_cg2_test((stream).as_ref(), cfg, &mut output) }?;
 
     stream.synchronize()?;
 

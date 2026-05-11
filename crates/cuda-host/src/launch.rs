@@ -14,6 +14,10 @@
 //! - **Traits** (`CudaKernel`, `GenericCudaKernel`): Provide PTX entry-point
 //!   names for rust-analyzer and compile-time validation.
 
+use std::ffi::c_void;
+#[cfg(feature = "async")]
+use std::sync::Arc;
+
 // =============================================================================
 // Core Traits
 // =============================================================================
@@ -84,6 +88,239 @@ pub trait GenericCudaKernel {
     /// Unlike `CudaKernel::PTX_NAME`, this is a function because the name
     /// depends on the type parameters.
     fn ptx_name() -> &'static str;
+}
+
+// =============================================================================
+// Typed Kernel Arguments
+// =============================================================================
+
+/// Marker trait for values that may be passed to a CUDA kernel by value.
+///
+/// `#[cuda_module]` uses this trait for scalar kernel parameters. Any `Copy`
+/// value can be used here because cuda-oxide compiles the host and device
+/// instantiations from the same Rust type. Prefer `#[repr(C)]` for structs that
+/// must also interoperate with CUDA C/C++ code.
+pub trait KernelScalar: Copy {}
+
+impl<T: Copy> KernelScalar for T {}
+
+/// Pushes a by-value scalar kernel argument into a CUDA driver argument list.
+///
+/// The pointed-to value must remain alive until the launch submission call has
+/// returned. The generated `#[cuda_module]` launch methods create stack locals
+/// for this purpose before calling this helper.
+#[inline]
+#[doc(hidden)]
+pub fn push_kernel_scalar<T: KernelScalar>(args: &mut Vec<*mut c_void>, value: &mut T) {
+    args.push(value as *mut T as *mut c_void);
+}
+
+/// Returns the `(device pointer, element count)` pair used for read-only slice
+/// parameters such as `&[T]`.
+#[inline]
+#[doc(hidden)]
+pub fn read_only_device_buffer_arg<T>(
+    buffer: &cuda_core::DeviceBuffer<T>,
+) -> (cuda_core::sys::CUdeviceptr, u64) {
+    (buffer.cu_deviceptr(), buffer.len() as u64)
+}
+
+/// Returns the `(device pointer, element count)` pair used for writable slice
+/// parameters such as `&mut [T]` and `DisjointSlice<T>`.
+#[inline]
+#[doc(hidden)]
+pub fn writable_device_buffer_arg<T>(
+    buffer: &mut cuda_core::DeviceBuffer<T>,
+) -> (cuda_core::sys::CUdeviceptr, u64) {
+    (buffer.cu_deviceptr(), buffer.len() as u64)
+}
+
+/// Pushes a device slice argument pair into a CUDA driver argument list.
+///
+/// cuda-oxide device slices lower to two kernel parameters: `CUdeviceptr` and
+/// `u64` element count. Keeping that encoding here makes the generated
+/// `#[cuda_module]` methods target a stable helper instead of open-coding the
+/// ABI in every expansion.
+#[inline]
+#[doc(hidden)]
+pub fn push_kernel_device_slice(
+    args: &mut Vec<*mut c_void>,
+    ptr: &mut cuda_core::sys::CUdeviceptr,
+    len: &mut u64,
+) {
+    args.push(ptr as *mut cuda_core::sys::CUdeviceptr as *mut c_void);
+    args.push(len as *mut u64 as *mut c_void);
+}
+
+// =============================================================================
+// Typed Async Kernel Arguments
+// =============================================================================
+
+/// A typed device allocation that can be passed to an async kernel launch as a
+/// read-only device slice.
+#[cfg(feature = "async")]
+pub trait KernelSliceArg {
+    /// Element type stored in the allocation.
+    type Elem;
+
+    /// Returns the raw CUDA device pointer for the allocation.
+    fn cu_deviceptr(&self) -> cuda_core::sys::CUdeviceptr;
+
+    /// Returns the number of `T` elements in the allocation.
+    fn len(&self) -> usize;
+
+    /// Returns true when the allocation has zero elements.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// A typed device allocation that can be passed to an async kernel launch as a
+/// writable device slice.
+#[cfg(feature = "async")]
+pub trait KernelSliceArgMut: KernelSliceArg {}
+
+#[cfg(feature = "async")]
+impl<T> KernelSliceArg for cuda_core::DeviceBuffer<T> {
+    type Elem = T;
+
+    fn cu_deviceptr(&self) -> cuda_core::sys::CUdeviceptr {
+        self.cu_deviceptr()
+    }
+
+    fn len(&self) -> usize {
+        self.len()
+    }
+}
+
+#[cfg(feature = "async")]
+impl<T> KernelSliceArgMut for cuda_core::DeviceBuffer<T> {}
+
+#[cfg(feature = "async")]
+impl<T: Send> KernelSliceArg for cuda_async::device_box::DeviceBox<[T]> {
+    type Elem = T;
+
+    fn cu_deviceptr(&self) -> cuda_core::sys::CUdeviceptr {
+        self.cu_deviceptr()
+    }
+
+    fn len(&self) -> usize {
+        self.len()
+    }
+}
+
+#[cfg(feature = "async")]
+impl<T: Send> KernelSliceArgMut for cuda_async::device_box::DeviceBox<[T]> {}
+
+#[cfg(feature = "async")]
+impl<B> KernelSliceArg for Arc<B>
+where
+    B: KernelSliceArg + ?Sized,
+{
+    type Elem = B::Elem;
+
+    fn cu_deviceptr(&self) -> cuda_core::sys::CUdeviceptr {
+        self.as_ref().cu_deviceptr()
+    }
+
+    fn len(&self) -> usize {
+        self.as_ref().len()
+    }
+}
+
+#[doc(hidden)]
+#[cfg(feature = "async")]
+pub fn new_async_kernel_launch<'a>(
+    func: cuda_core::CudaFunction,
+    config: cuda_core::LaunchConfig,
+) -> cuda_async::launch::AsyncKernelLaunch<'a> {
+    let mut launch = cuda_async::launch::AsyncKernelLaunch::new(Arc::new(func));
+    launch.set_launch_config(config);
+    launch
+}
+
+#[doc(hidden)]
+#[cfg(feature = "async")]
+pub fn new_owned_async_kernel_launch<R: Send>(
+    launch: cuda_async::launch::AsyncKernelLaunch<'static>,
+    resources: R,
+) -> cuda_async::launch::OwnedAsyncKernelLaunch<R> {
+    cuda_async::launch::OwnedAsyncKernelLaunch::new(launch, resources)
+}
+
+#[doc(hidden)]
+#[cfg(feature = "async")]
+pub fn set_async_kernel_cluster_dim(
+    launch: &mut cuda_async::launch::AsyncKernelLaunch<'_>,
+    cluster_dim: (u32, u32, u32),
+) {
+    launch.set_cluster_dim(cluster_dim);
+}
+
+#[doc(hidden)]
+#[cfg(feature = "async")]
+pub fn push_async_kernel_scalar<'a, T: KernelScalar + 'a>(
+    launch: &mut cuda_async::launch::AsyncKernelLaunch<'a>,
+    value: T,
+) {
+    launch.push_scalar_arg(value);
+}
+
+#[doc(hidden)]
+#[cfg(feature = "async")]
+pub fn push_async_read_only_device_slice<B>(
+    launch: &mut cuda_async::launch::AsyncKernelLaunch<'_>,
+    buffer: &B,
+) where
+    B: KernelSliceArg + ?Sized,
+{
+    launch.push_scalar_arg(buffer.cu_deviceptr());
+    launch.push_scalar_arg(buffer.len() as u64);
+}
+
+#[doc(hidden)]
+#[cfg(feature = "async")]
+pub fn push_async_writable_device_slice<B>(
+    launch: &mut cuda_async::launch::AsyncKernelLaunch<'_>,
+    buffer: &mut B,
+) where
+    B: KernelSliceArgMut + ?Sized,
+{
+    launch.push_scalar_arg(buffer.cu_deviceptr());
+    launch.push_scalar_arg(buffer.len() as u64);
+}
+
+#[doc(hidden)]
+#[cfg(feature = "async")]
+pub fn load_cuda_module_from_async_context<F, R>(
+    device_id: usize,
+    f: F,
+) -> Result<R, cuda_async::error::DeviceError>
+where
+    F: FnOnce(&Arc<cuda_core::CudaContext>) -> Result<R, cuda_core::EmbeddedModuleError>,
+{
+    cuda_async::device_context::with_cuda_context(device_id, |ctx| f(ctx))?.map_err(|error| {
+        if let cuda_core::EmbeddedModuleError::Driver(error) = error {
+            cuda_async::error::DeviceError::Driver(error)
+        } else {
+            cuda_async::error::DeviceError::KernelCache(error.to_string())
+        }
+    })
+}
+
+/// Async-context counterpart of [`crate::load_kernel_module`].
+///
+/// Loads a kernel module by stem name on `device_id`, using the async device
+/// context map to find the underlying [`cuda_core::CudaContext`].
+#[cfg(feature = "async")]
+pub fn load_kernel_module_async(
+    name: &str,
+    device_id: usize,
+) -> Result<Arc<cuda_core::CudaModule>, cuda_async::error::DeviceError> {
+    cuda_async::device_context::with_cuda_context(device_id, |ctx| {
+        crate::ltoir::load_kernel_module(ctx, name)
+            .map_err(|error| cuda_async::error::DeviceError::KernelCache(error.to_string()))
+    })?
 }
 
 // =============================================================================
@@ -159,12 +396,22 @@ impl<T> HasLength for cuda_core::DeviceBuffer<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::c_void;
 
     // Dummy kernel marker for testing
     struct TestKernelMarker;
     impl CudaKernel for TestKernelMarker {
         const PTX_NAME: &'static str = "test_kernel"; // Original function name
     }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct TestParams {
+        scale: f32,
+        bias: i32,
+    }
+
+    fn assert_kernel_scalar<T: KernelScalar>() {}
 
     #[test]
     fn test_ptx_name_lookup() {
@@ -175,5 +422,73 @@ mod tests {
     fn test_scalar_wrapper() {
         let s = Scalar(42i32);
         assert_eq!(s.0, 42);
+    }
+
+    #[test]
+    fn test_kernel_scalar_accepts_copy_argument_kinds() {
+        assert_kernel_scalar::<f32>();
+        assert_kernel_scalar::<TestParams>();
+        assert_kernel_scalar::<*const f32>();
+        assert_kernel_scalar::<*mut f32>();
+
+        let offset = 7u32;
+        let copy_closure = move |x: u32| x + offset;
+        fn assert_value_is_kernel_scalar<T: KernelScalar>(_value: T) {}
+        assert_value_is_kernel_scalar(copy_closure);
+    }
+
+    #[test]
+    fn test_push_kernel_scalar_records_argument_address() {
+        let mut args = Vec::new();
+        let mut params = TestParams {
+            scale: 1.5,
+            bias: -2,
+        };
+        let expected = &mut params as *mut TestParams as *mut c_void;
+
+        push_kernel_scalar(&mut args, &mut params);
+
+        assert_eq!(args, vec![expected]);
+        assert_eq!(unsafe { *(args[0] as *const TestParams) }, params);
+    }
+
+    #[test]
+    fn test_push_kernel_scalar_accepts_copy_closure() {
+        let mut args = Vec::new();
+        let offset = 3u32;
+        let mut copy_closure = move |x: u32| x + offset;
+        let expected = &mut copy_closure as *mut _ as *mut c_void;
+
+        push_kernel_scalar(&mut args, &mut copy_closure);
+
+        assert_eq!(args, vec![expected]);
+    }
+
+    #[test]
+    fn test_push_kernel_scalar_accepts_raw_pointer() {
+        let mut args = Vec::new();
+        let value = 42f32;
+        let mut ptr = &value as *const f32;
+
+        push_kernel_scalar(&mut args, &mut ptr);
+
+        assert_eq!(args.len(), 1);
+        assert_eq!(unsafe { *(args[0] as *const *const f32) }, ptr);
+    }
+
+    #[test]
+    fn test_push_kernel_device_slice_records_pointer_and_len() {
+        let mut args = Vec::new();
+        let mut ptr: cuda_core::sys::CUdeviceptr = 0xfeed_beefu64;
+        let mut len = 1024u64;
+
+        push_kernel_device_slice(&mut args, &mut ptr, &mut len);
+
+        assert_eq!(args.len(), 2);
+        assert_eq!(
+            unsafe { *(args[0] as *const cuda_core::sys::CUdeviceptr) },
+            ptr
+        );
+        assert_eq!(unsafe { *(args[1] as *const u64) }, len);
     }
 }

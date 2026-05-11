@@ -28,184 +28,189 @@
 
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
 use cuda_device::{DisjointSlice, DynamicSharedArray, gpu_printf, kernel, thread};
-use cuda_host::cuda_launch;
+use cuda_host::cuda_module;
 
 // =============================================================================
 // KERNELS
 // =============================================================================
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-/// Test 1: Basic dynamic shared memory (default 16-byte alignment).
-///
-/// Each thread writes its value to dynamic shared memory, syncs,
-/// then reads from its neighbor.
-///
-/// PTX output: `.extern .shared .align 16 .b8 __dynamic_smem_dynamic_smem_basic[];`
-#[kernel]
-pub fn dynamic_smem_basic(data: &[f32], mut out: DisjointSlice<f32>) {
-    // Default alignment (16 bytes, matches nvcc)
-    let smem: *mut f32 = DynamicSharedArray::<f32>::get();
+    /// Test 1: Basic dynamic shared memory (default 16-byte alignment).
+    ///
+    /// Each thread writes its value to dynamic shared memory, syncs,
+    /// then reads from its neighbor.
+    ///
+    /// PTX output: `.extern .shared .align 16 .b8 __dynamic_smem_dynamic_smem_basic[];`
+    #[kernel]
+    pub fn dynamic_smem_basic(data: &[f32], mut out: DisjointSlice<f32>) {
+        // Default alignment (16 bytes, matches nvcc)
+        let smem: *mut f32 = DynamicSharedArray::<f32>::get();
 
-    let tid = thread::threadIdx_x() as usize;
-    let gid = thread::index_1d().get();
+        let tid = thread::threadIdx_x() as usize;
+        let gid = thread::index_1d().get();
 
-    // Print address from thread 0 (sanity check)
-    if tid == 0 {
-        gpu_printf!("[basic] smem addr: {:x} (align 16)\n", smem as u64);
-    }
+        // Print address from thread 0 (sanity check)
+        if tid == 0 {
+            gpu_printf!("[basic] smem addr: {:x} (align 16)\n", smem as u64);
+        }
 
-    unsafe {
-        *smem.add(tid) = data[gid];
-    }
+        unsafe {
+            *smem.add(tid) = data[gid];
+        }
 
-    thread::sync_threads();
+        thread::sync_threads();
 
-    unsafe {
-        let block_size = thread::blockDim_x() as usize;
-        let neighbor_idx = (tid + 1) % block_size;
-        if let Some(out_elem) = out.get_mut(thread::index_1d()) {
-            *out_elem = *smem.add(neighbor_idx);
+        unsafe {
+            let block_size = thread::blockDim_x() as usize;
+            let neighbor_idx = (tid + 1) % block_size;
+            if let Some(out_elem) = out.get_mut(thread::index_1d()) {
+                *out_elem = *smem.add(neighbor_idx);
+            }
         }
     }
-}
 
-/// Test 2: Dynamic shared memory with partitioning.
-///
-/// Uses `DynamicSharedArray::offset()` to partition the shared memory into
-/// two arrays (A and B).
-///
-/// Memory layout:
-/// ```text
-/// |<-- array_a (N f32s) -->|<-- array_b (N f32s) -->|
-/// |        offset 0        |    offset N*4 bytes    |
-/// ```
-///
-/// PTX output: `.extern .shared .align 16 .b8 __dynamic_smem_dynamic_smem_partition[];`
-#[kernel]
-pub fn dynamic_smem_partition(a: &[f32], b: &[f32], mut out: DisjointSlice<f32>) {
-    // First array at offset 0 (default alignment)
-    let smem_a: *mut f32 = DynamicSharedArray::<f32>::get();
+    /// Test 2: Dynamic shared memory with partitioning.
+    ///
+    /// Uses `DynamicSharedArray::offset()` to partition the shared memory into
+    /// two arrays (A and B).
+    ///
+    /// Memory layout:
+    /// ```text
+    /// |<-- array_a (N f32s) -->|<-- array_b (N f32s) -->|
+    /// |        offset 0        |    offset N*4 bytes    |
+    /// ```
+    ///
+    /// PTX output: `.extern .shared .align 16 .b8 __dynamic_smem_dynamic_smem_partition[];`
+    #[kernel]
+    pub fn dynamic_smem_partition(a: &[f32], b: &[f32], mut out: DisjointSlice<f32>) {
+        // First array at offset 0 (default alignment)
+        let smem_a: *mut f32 = DynamicSharedArray::<f32>::get();
 
-    // Second array at offset = N * sizeof(f32)
-    // For 256 elements: 256 * 4 = 1024 bytes
-    let smem_b: *mut f32 = DynamicSharedArray::<f32>::offset(1024);
+        // Second array at offset = N * sizeof(f32)
+        // For 256 elements: 256 * 4 = 1024 bytes
+        let smem_b: *mut f32 = DynamicSharedArray::<f32>::offset(1024);
 
-    let tid = thread::threadIdx_x() as usize;
-    let gid = thread::index_1d().get();
+        let tid = thread::threadIdx_x() as usize;
+        let gid = thread::index_1d().get();
 
-    // Print addresses from thread 0 (sanity check)
-    if tid == 0 {
-        gpu_printf!(
-            "[partition] smem_a: {:x}, smem_b: {:x} (diff={})\n",
-            smem_a as u64,
-            smem_b as u64,
-            (smem_b as u64) - (smem_a as u64)
-        );
-    }
+        // Print addresses from thread 0 (sanity check)
+        if tid == 0 {
+            gpu_printf!(
+                "[partition] smem_a: {:x}, smem_b: {:x} (diff={})\n",
+                smem_a as u64,
+                smem_b as u64,
+                (smem_b as u64) - (smem_a as u64)
+            );
+        }
 
-    unsafe {
-        *smem_a.add(tid) = a[gid];
-        *smem_b.add(tid) = b[gid];
-    }
+        unsafe {
+            *smem_a.add(tid) = a[gid];
+            *smem_b.add(tid) = b[gid];
+        }
 
-    thread::sync_threads();
+        thread::sync_threads();
 
-    unsafe {
-        let block_size = thread::blockDim_x() as usize;
-        let neighbor_idx = (tid + 1) % block_size;
-        if let Some(out_elem) = out.get_mut(thread::index_1d()) {
-            *out_elem = *smem_a.add(neighbor_idx) + *smem_b.add(neighbor_idx);
+        unsafe {
+            let block_size = thread::blockDim_x() as usize;
+            let neighbor_idx = (tid + 1) % block_size;
+            if let Some(out_elem) = out.get_mut(thread::index_1d()) {
+                *out_elem = *smem_a.add(neighbor_idx) + *smem_b.add(neighbor_idx);
+            }
         }
     }
-}
 
-/// Test 3: Explicit 128-byte alignment (TMA-compatible).
-///
-/// Demonstrates explicit alignment specification for TMA operations.
-///
-/// PTX output: `.extern .shared .align 128 .b8 __dynamic_smem_dynamic_smem_explicit_align[];`
-#[kernel]
-pub fn dynamic_smem_explicit_align(data: &[f32], mut out: DisjointSlice<f32>) {
-    // Explicit 128-byte alignment (required for TMA)
-    let smem: *mut f32 = DynamicSharedArray::<f32, 128>::get();
+    /// Test 3: Explicit 128-byte alignment (TMA-compatible).
+    ///
+    /// Demonstrates explicit alignment specification for TMA operations.
+    ///
+    /// PTX output: `.extern .shared .align 128 .b8 __dynamic_smem_dynamic_smem_explicit_align[];`
+    #[kernel]
+    pub fn dynamic_smem_explicit_align(data: &[f32], mut out: DisjointSlice<f32>) {
+        // Explicit 128-byte alignment (required for TMA)
+        let smem: *mut f32 = DynamicSharedArray::<f32, 128>::get();
 
-    let tid = thread::threadIdx_x() as usize;
-    let gid = thread::index_1d().get();
+        let tid = thread::threadIdx_x() as usize;
+        let gid = thread::index_1d().get();
 
-    // Print address from thread 0 (sanity check - should be 128-byte aligned)
-    if tid == 0 {
-        let addr = smem as u64;
-        gpu_printf!(
-            "[explicit] smem addr: {:x} (align 128, mod128={})\n",
-            addr,
-            addr % 128
-        );
-    }
+        // Print address from thread 0 (sanity check - should be 128-byte aligned)
+        if tid == 0 {
+            let addr = smem as u64;
+            gpu_printf!(
+                "[explicit] smem addr: {:x} (align 128, mod128={})\n",
+                addr,
+                addr % 128
+            );
+        }
 
-    unsafe {
-        *smem.add(tid) = data[gid] * 2.0;
-    }
+        unsafe {
+            *smem.add(tid) = data[gid] * 2.0;
+        }
 
-    thread::sync_threads();
+        thread::sync_threads();
 
-    unsafe {
-        let block_size = thread::blockDim_x() as usize;
-        let neighbor_idx = (tid + 1) % block_size;
-        if let Some(out_elem) = out.get_mut(thread::index_1d()) {
-            *out_elem = *smem.add(neighbor_idx);
+        unsafe {
+            let block_size = thread::blockDim_x() as usize;
+            let neighbor_idx = (tid + 1) % block_size;
+            if let Some(out_elem) = out.get_mut(thread::index_1d()) {
+                *out_elem = *smem.add(neighbor_idx);
+            }
         }
     }
-}
 
-/// Test 4: Mixed alignments within same kernel (uses maximum).
-///
-/// This kernel has multiple DynamicSharedArray calls with different alignments.
-/// The compiler pre-pass computes max(16, 128, 256) = 256 and uses that.
-///
-/// PTX output: `.extern .shared .align 256 .b8 __dynamic_smem_dynamic_smem_mixed_align[];`
-#[kernel]
-pub fn dynamic_smem_mixed_align(a: &[f32], b: &[f32], c: &[f32], mut out: DisjointSlice<f32>) {
-    // Three partitions with different alignment requirements
-    // The compiler uses max(16, 128, 256) = 256 for the global
-    let smem_a: *mut f32 = DynamicSharedArray::<f32>::get(); // ALIGN = 16 (default)
-    let smem_b: *mut f32 = DynamicSharedArray::<f32, 128>::offset(1024); // ALIGN = 128
-    let smem_c: *mut f32 = DynamicSharedArray::<f32, 256>::offset(2048); // ALIGN = 256
+    /// Test 4: Mixed alignments within same kernel (uses maximum).
+    ///
+    /// This kernel has multiple DynamicSharedArray calls with different alignments.
+    /// The compiler pre-pass computes max(16, 128, 256) = 256 and uses that.
+    ///
+    /// PTX output: `.extern .shared .align 256 .b8 __dynamic_smem_dynamic_smem_mixed_align[];`
+    #[kernel]
+    pub fn dynamic_smem_mixed_align(a: &[f32], b: &[f32], c: &[f32], mut out: DisjointSlice<f32>) {
+        // Three partitions with different alignment requirements
+        // The compiler uses max(16, 128, 256) = 256 for the global
+        let smem_a: *mut f32 = DynamicSharedArray::<f32>::get(); // ALIGN = 16 (default)
+        let smem_b: *mut f32 = DynamicSharedArray::<f32, 128>::offset(1024); // ALIGN = 128
+        let smem_c: *mut f32 = DynamicSharedArray::<f32, 256>::offset(2048); // ALIGN = 256
 
-    let tid = thread::threadIdx_x() as usize;
-    let gid = thread::index_1d().get();
+        let tid = thread::threadIdx_x() as usize;
+        let gid = thread::index_1d().get();
 
-    // Print addresses from thread 0 (sanity check - base should be 256-byte aligned)
-    if tid == 0 {
-        let addr_a = smem_a as u64;
-        let addr_b = smem_b as u64;
-        let addr_c = smem_c as u64;
-        gpu_printf!("[mixed] smem_a: {:x} (mod256={})\n", addr_a, addr_a % 256);
-        gpu_printf!(
-            "[mixed] smem_b: {:x} (offset={})\n",
-            addr_b,
-            addr_b - addr_a
-        );
-        gpu_printf!(
-            "[mixed] smem_c: {:x} (offset={})\n",
-            addr_c,
-            addr_c - addr_a
-        );
-    }
+        // Print addresses from thread 0 (sanity check - base should be 256-byte aligned)
+        if tid == 0 {
+            let addr_a = smem_a as u64;
+            let addr_b = smem_b as u64;
+            let addr_c = smem_c as u64;
+            gpu_printf!("[mixed] smem_a: {:x} (mod256={})\n", addr_a, addr_a % 256);
+            gpu_printf!(
+                "[mixed] smem_b: {:x} (offset={})\n",
+                addr_b,
+                addr_b - addr_a
+            );
+            gpu_printf!(
+                "[mixed] smem_c: {:x} (offset={})\n",
+                addr_c,
+                addr_c - addr_a
+            );
+        }
 
-    unsafe {
-        *smem_a.add(tid) = a[gid];
-        *smem_b.add(tid) = b[gid];
-        *smem_c.add(tid) = c[gid];
-    }
+        unsafe {
+            *smem_a.add(tid) = a[gid];
+            *smem_b.add(tid) = b[gid];
+            *smem_c.add(tid) = c[gid];
+        }
 
-    thread::sync_threads();
+        thread::sync_threads();
 
-    unsafe {
-        let block_size = thread::blockDim_x() as usize;
-        let neighbor_idx = (tid + 1) % block_size;
-        // Sum all three neighbors
-        if let Some(out_elem) = out.get_mut(thread::index_1d()) {
-            *out_elem =
-                *smem_a.add(neighbor_idx) + *smem_b.add(neighbor_idx) + *smem_c.add(neighbor_idx);
+        unsafe {
+            let block_size = thread::blockDim_x() as usize;
+            let neighbor_idx = (tid + 1) % block_size;
+            // Sum all three neighbors
+            if let Some(out_elem) = out.get_mut(thread::index_1d()) {
+                *out_elem = *smem_a.add(neighbor_idx)
+                    + *smem_b.add(neighbor_idx)
+                    + *smem_c.add(neighbor_idx);
+            }
         }
     }
 }
@@ -227,6 +232,7 @@ fn main() {
     let module = ctx
         .load_module_from_file("dynamic_smem.ptx")
         .expect("Failed to load PTX module");
+    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
 
     // ===== Test 1: Basic Dynamic Shared Memory (default 16-byte alignment) =====
     println!("=== Test 1: Basic DynamicSharedArray (default alignment) ===");
@@ -244,14 +250,9 @@ fn main() {
             shared_mem_bytes: (N * core::mem::size_of::<f32>()) as u32,
         };
 
-        cuda_launch! {
-            kernel: dynamic_smem_basic,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(data_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .dynamic_smem_basic((stream).as_ref(), cfg, &data_dev, &mut out_dev)
+            .expect("Kernel launch failed");
 
         let out_result = out_dev.to_host_vec(&stream).unwrap();
         println!("Output out[0..5] = {:?}", &out_result[0..5]);
@@ -291,14 +292,9 @@ fn main() {
             shared_mem_bytes: (2 * N * core::mem::size_of::<f32>()) as u32,
         };
 
-        cuda_launch! {
-            kernel: dynamic_smem_partition,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(a_dev), slice(b_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .dynamic_smem_partition((stream).as_ref(), cfg, &a_dev, &b_dev, &mut out_dev)
+            .expect("Kernel launch failed");
 
         let out_result = out_dev.to_host_vec(&stream).unwrap();
         println!("Output out[0..5] = {:?}", &out_result[0..5]);
@@ -334,14 +330,9 @@ fn main() {
             shared_mem_bytes: (N * core::mem::size_of::<f32>()) as u32,
         };
 
-        cuda_launch! {
-            kernel: dynamic_smem_explicit_align,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(data_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .dynamic_smem_explicit_align((stream).as_ref(), cfg, &data_dev, &mut out_dev)
+            .expect("Kernel launch failed");
 
         let out_result = out_dev.to_host_vec(&stream).unwrap();
         println!("Output out[0..5] = {:?}", &out_result[0..5]);
@@ -384,14 +375,9 @@ fn main() {
             shared_mem_bytes: (3 * N * core::mem::size_of::<f32>()) as u32,
         };
 
-        cuda_launch! {
-            kernel: dynamic_smem_mixed_align,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(a_dev), slice(b_dev), slice(c_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .dynamic_smem_mixed_align((stream).as_ref(), cfg, &a_dev, &b_dev, &c_dev, &mut out_dev)
+            .expect("Kernel launch failed");
 
         let out_result = out_dev.to_host_vec(&stream).unwrap();
         println!("Output out[0..5] = {:?}", &out_result[0..5]);

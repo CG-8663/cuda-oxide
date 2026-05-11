@@ -35,14 +35,15 @@ pub fn add<T: Copy + Add<Output = T>>(a: &[T], b: &[T], mut c: DisjointSlice<T>)
 ### Monomorphization Trigger
 
 ```rust
-// Type parameter in cuda_launch! forces monomorphization
-cuda_launch! {
-    kernel: scale::<f32>,  // <-- Creates scale_f32 variant
-    stream: stream,
-    module: module,
-    config: LaunchConfig::for_num_elems(N as u32),
-    args: [factor, slice(input_dev), slice_mut(output_dev)]
-}
+// Type parameter on the typed module method forces monomorphization.
+let module = kernels::load(&ctx)?;
+module.scale::<f32>(
+    &stream,
+    LaunchConfig::for_num_elems(N as u32),
+    factor,
+    &input_dev,
+    &mut output_dev,
+)?;
 ```
 
 ### How It Works
@@ -99,9 +100,9 @@ pub fn saxpy<T: Copy + Mul<Output = T> + Add<Output = T>>(
 }
 
 // Use with different types (fields abbreviated for clarity)
-// cuda_launch! { kernel: saxpy::<f32>, stream: ..., module: ..., config: ..., args: [...] }
-// cuda_launch! { kernel: saxpy::<f64>, ... }
-// cuda_launch! { kernel: saxpy::<i32>, ... }
+// module.saxpy::<f32>(&stream, config, a, &x, &y, &mut out)?;
+// module.saxpy::<f64>(&stream, config, a, &x, &y, &mut out)?;
+// module.saxpy::<i32>(&stream, config, a, &x, &y, &mut out)?;
 ```
 
 ### With Closures

@@ -20,7 +20,7 @@
 //!   cargo oxide run tma_multicast
 
 use cuda_core::{
-    CudaContext, CudaModule, CudaStream, DeviceBuffer, LaunchConfig,
+    CudaContext, CudaStream, DeviceBuffer, LaunchConfig,
     sys::{
         self as cuda_sys, CUtensorMap, CUtensorMapDataType_enum_CU_TENSOR_MAP_DATA_TYPE_FLOAT32,
         CUtensorMapFloatOOBfill_enum_CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE,
@@ -36,91 +36,95 @@ use cuda_device::barrier::{
 use cuda_device::cluster;
 use cuda_device::tma::{TmaDescriptor, cp_async_bulk_tensor_2d_g2s_multicast};
 use cuda_device::{DisjointSlice, SharedArray, cluster_launch, kernel, thread};
-use cuda_host::cuda_launch;
+use cuda_host::cuda_module;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 
 // =============================================================================
 // KERNEL
 // =============================================================================
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-/// TMA multicast test kernel — one TMA load delivers a tile to ALL CTAs in the cluster.
-///
-/// Launched with a cluster of CLUSTER_SIZE CTAs. Only CTA-0 thread-0 issues
-/// the multicast TMA, but every CTA's shared memory receives the tile.
-/// Each CTA then writes its shared tile to a disjoint slice of `out` for
-/// host-side verification.
-#[kernel]
-#[cluster_launch(4, 1, 1)]
-pub fn tma_multicast_test(
-    tensor_map: *const TmaDescriptor,
-    mut out: DisjointSlice<f32>,
-    tile_x: i32,
-    tile_y: i32,
-) {
-    const TILE_SIZE: usize = 64 * 64;
-    const TILE_BYTES: u32 = (TILE_SIZE * 4) as u32;
-    static mut TILE: SharedArray<f32, TILE_SIZE, 128> = SharedArray::UNINIT;
-    static mut BAR: Barrier = Barrier::UNINIT;
+    /// TMA multicast test kernel — one TMA load delivers a tile to ALL CTAs in the cluster.
+    ///
+    /// Launched with a cluster of CLUSTER_SIZE CTAs. Only CTA-0 thread-0 issues
+    /// the multicast TMA, but every CTA's shared memory receives the tile.
+    /// Each CTA then writes its shared tile to a disjoint slice of `out` for
+    /// host-side verification.
+    #[kernel]
+    #[cluster_launch(4, 1, 1)]
+    pub fn tma_multicast_test(
+        tensor_map: *const TmaDescriptor,
+        mut out: DisjointSlice<f32>,
+        tile_x: i32,
+        tile_y: i32,
+    ) {
+        const TILE_SIZE: usize = 64 * 64;
+        const TILE_BYTES: u32 = (TILE_SIZE * 4) as u32;
+        static mut TILE: SharedArray<f32, TILE_SIZE, 128> = SharedArray::UNINIT;
+        static mut BAR: Barrier = Barrier::UNINIT;
 
-    let tid = thread::threadIdx_x();
-    let block_size = thread::blockDim_x();
-    let rank = cluster::block_rank();
+        let tid = thread::threadIdx_x();
+        let block_size = thread::blockDim_x();
+        let rank = cluster::block_rank();
 
-    // Every CTA initializes its own barrier
-    if tid == 0 {
-        unsafe {
-            mbarrier_init(&raw mut BAR, block_size);
-            fence_proxy_async_shared_cta();
-        }
-    }
-    thread::sync_threads();
-
-    // Cluster-wide barrier: all CTAs must have their mbarrier initialized
-    // before the multicast TMA fires (it writes to ALL CTAs' shared memory
-    // and signals ALL their barriers).
-    cluster::cluster_sync();
-
-    // ALL threads in ALL CTAs arrive at their local barrier
-    let token = unsafe {
+        // Every CTA initializes its own barrier
         if tid == 0 {
-            mbarrier_arrive_expect_tx(&raw const BAR, 1, TILE_BYTES)
-        } else {
-            mbarrier_arrive(&raw const BAR)
-        }
-    };
-
-    // Only CTA-0 thread-0 issues the multicast TMA copy
-    if rank == 0 && tid == 0 {
-        let cta_mask: u16 = 0b1111; // deliver to all 4 CTAs
-        unsafe {
-            cp_async_bulk_tensor_2d_g2s_multicast(
-                &raw mut TILE as *mut u8,
-                tensor_map,
-                tile_x,
-                tile_y,
-                &raw mut BAR,
-                cta_mask,
-            );
-        }
-    }
-
-    // Wait for TMA completion on every CTA
-    unsafe { while !mbarrier_try_wait(&raw const BAR, token) {} }
-    thread::sync_threads();
-
-    // Each CTA writes its tile to out[rank * TILE_SIZE .. (rank+1) * TILE_SIZE]
-    let stride = block_size as usize;
-    let mut i = tid as usize;
-    while i < TILE_SIZE {
-        let val = unsafe { TILE[i] };
-        let global_idx = rank as usize * TILE_SIZE + i;
-        if global_idx < out.len() {
             unsafe {
-                *out.get_unchecked_mut(global_idx) = val;
+                mbarrier_init(&raw mut BAR, block_size);
+                fence_proxy_async_shared_cta();
             }
         }
-        i += stride;
+        thread::sync_threads();
+
+        // Cluster-wide barrier: all CTAs must have their mbarrier initialized
+        // before the multicast TMA fires (it writes to ALL CTAs' shared memory
+        // and signals ALL their barriers).
+        cluster::cluster_sync();
+
+        // ALL threads in ALL CTAs arrive at their local barrier
+        let token = unsafe {
+            if tid == 0 {
+                mbarrier_arrive_expect_tx(&raw const BAR, 1, TILE_BYTES)
+            } else {
+                mbarrier_arrive(&raw const BAR)
+            }
+        };
+
+        // Only CTA-0 thread-0 issues the multicast TMA copy
+        if rank == 0 && tid == 0 {
+            let cta_mask: u16 = 0b1111; // deliver to all 4 CTAs
+            unsafe {
+                cp_async_bulk_tensor_2d_g2s_multicast(
+                    &raw mut TILE as *mut u8,
+                    tensor_map,
+                    tile_x,
+                    tile_y,
+                    &raw mut BAR,
+                    cta_mask,
+                );
+            }
+        }
+
+        // Wait for TMA completion on every CTA
+        unsafe { while !mbarrier_try_wait(&raw const BAR, token) {} }
+        thread::sync_threads();
+
+        // Each CTA writes its tile to out[rank * TILE_SIZE .. (rank+1) * TILE_SIZE]
+        let stride = block_size as usize;
+        let mut i = tid as usize;
+        while i < TILE_SIZE {
+            let val = unsafe { TILE[i] };
+            let global_idx = rank as usize * TILE_SIZE + i;
+            if global_idx < out.len() {
+                unsafe {
+                    *out.get_unchecked_mut(global_idx) = val;
+                }
+            }
+            i += stride;
+        }
     }
 }
 
@@ -162,6 +166,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match ctx.load_module_from_file(ptx_file) {
         Ok(module) => {
+            let module =
+                kernels::from_module(module).expect("Failed to initialize typed CUDA module");
             println!("✓ PTX loaded successfully\n");
             run_tma_multicast_test(&stream, &module)?;
         }
@@ -179,7 +185,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_tma_multicast_test(
     stream: &Arc<CudaStream>,
-    module: &Arc<CudaModule>,
+    module: &kernels::LoadedModule,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("--- TMA Multicast (tma_multicast_test) ---\n");
 
@@ -222,14 +228,14 @@ fn run_tma_multicast_test(
 
     let tensor_map_ptr = dev_tensor_map.cu_deviceptr() as *const TmaDescriptor;
 
-    cuda_launch! {
-        kernel: tma_multicast_test,
-        stream: stream,
-        module: module,
-        config: cfg,
-        cluster_dim: (CLUSTER_SIZE as u32, 1, 1),
-        args: [tensor_map_ptr, slice_mut(dev_output), tile_x, tile_y]
-    }?;
+    module.tma_multicast_test(
+        (stream).as_ref(),
+        cfg,
+        tensor_map_ptr,
+        &mut dev_output,
+        tile_x,
+        tile_y,
+    )?;
 
     stream.synchronize()?;
 

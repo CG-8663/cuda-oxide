@@ -978,7 +978,7 @@ edition = "2024"
 
 [dependencies]
 cuda-device = {{ git = "{GIT_REPO}" }}
-cuda-host = {{ git = "{GIT_REPO}" }}
+cuda-host = {{ git = "{GIT_REPO}", features = ["async"] }}
 cuda-core = {{ git = "{GIT_REPO}" }}
 cuda-async = {{ git = "{GIT_REPO}" }}
 cuda-bindings = {{ git = "{GIT_REPO}" }}
@@ -990,7 +990,7 @@ tokio = {{ version = "1", features = ["rt", "rt-multi-thread", "macros"] }}
             r#"[package]
 name = "{name}"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [workspace]
 
@@ -1003,42 +1003,43 @@ cuda-core = {{ git = "{GIT_REPO}" }}
     };
 
     let main_rs = if async_mode {
-        format!(
-            r#"use cuda_device::{{kernel, thread, DisjointSlice}};
-use cuda_host::cuda_launch_async;
-use cuda_async::device_context::{{init_device_contexts, load_kernel_module_async}};
+        r#"use cuda_device::{kernel, thread, DisjointSlice};
+use cuda_host::cuda_module;
+use cuda_async::device_context::init_device_contexts;
 use cuda_async::device_operation::DeviceOperation;
 use cuda_core::LaunchConfig;
 
-#[kernel]
-pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {{
-    let idx = thread::index_1d();
-    let idx_raw = idx.get();
-    if let Some(c_elem) = c.get_mut(idx) {{
-        *c_elem = a[idx_raw] + b[idx_raw];
-    }}
-}}
+#[cuda_module]
+mod kernels {
+    use super::*;
+
+    #[kernel]
+    pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
+        let idx = thread::index_1d();
+        let idx_raw = idx.get();
+        if let Some(c_elem) = c.get_mut(idx) {
+            *c_elem = a[idx_raw] + b[idx_raw];
+        }
+    }
+}
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {{
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use cuda_async::device_box::DeviceBox;
-    use cuda_core::memory::{{malloc_async, memcpy_dtoh_async, memcpy_htod_async}};
+    use cuda_core::memory::{malloc_async, memcpy_dtoh_async, memcpy_htod_async};
     use std::mem;
 
     init_device_contexts(0, 1)?;
-    // Loads `{name}.ptx` directly when cuda-oxide produced PTX, or builds a
-    // cubin from `{name}.ll` when cuda-oxide auto-detected libdevice math
-    // (`sin`, `pow`, `exp`, ...). Requires CUDA Toolkit on the host.
-    let module = load_kernel_module_async("{name}", 0)?;
+    let module = kernels::load_async(0)?;
 
     const N: usize = 1024;
     let a_host: Vec<f32> = (0..N).map(|i| i as f32).collect();
     let b_host: Vec<f32> = (0..N).map(|i| (i * 2) as f32).collect();
 
-    let (a_dev, b_dev, mut c_dev) = cuda_async::device_context::with_cuda_context(0, |ctx| {{
+    let (a_dev, b_dev, mut c_dev) = cuda_async::device_context::with_cuda_context(0, |ctx| {
         let stream = ctx.default_stream();
         let num_bytes = N * mem::size_of::<f32>();
-        unsafe {{
+        unsafe {
             let a = malloc_async(stream.cu_stream(), num_bytes).unwrap();
             let b = malloc_async(stream.cu_stream(), num_bytes).unwrap();
             let c = malloc_async(stream.cu_stream(), num_bytes).unwrap();
@@ -1050,21 +1051,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {{
                 DeviceBox::<[f32]>::from_raw_parts(b, N, 0),
                 DeviceBox::<[f32]>::from_raw_parts(c, N, 0),
             )
-        }}
-    }})?;
+        }
+    })?;
 
-    cuda_launch_async! {{
-        kernel: vecadd,
-        module: module,
-        config: LaunchConfig::for_num_elems(N as u32),
-        args: [slice(a_dev), slice(b_dev), slice_mut(c_dev)]
-    }}
-    .sync()?;
+    module
+        .vecadd_async(
+            LaunchConfig::for_num_elems(N as u32),
+            &a_dev,
+            &b_dev,
+            &mut c_dev,
+        )?
+        .sync()?;
 
     let mut c_host = vec![0.0f32; N];
-    cuda_async::device_context::with_cuda_context(0, |ctx| {{
+    cuda_async::device_context::with_cuda_context(0, |ctx| {
         let stream = ctx.default_stream();
-        unsafe {{
+        unsafe {
             memcpy_dtoh_async(
                 c_host.as_mut_ptr(),
                 c_dev.cu_deviceptr(),
@@ -1073,39 +1075,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {{
             )
             .unwrap();
             stream.synchronize().unwrap();
-        }}
-    }})?;
+        }
+    })?;
 
     let errors = (0..N)
         .filter(|&i| (c_host[i] - (a_host[i] + b_host[i])).abs() > 1e-5)
         .count();
 
-    if errors == 0 {{
-        println!("PASSED: all {{}} elements correct", N);
-    }} else {{
-        eprintln!("FAILED: {{}} errors", errors);
+    if errors == 0 {
+        println!("PASSED: all {} elements correct", N);
+    } else {
+        eprintln!("FAILED: {} errors", errors);
         std::process::exit(1);
-    }}
+    }
 
     Ok(())
-}}
+}
 "#
-        )
+        .to_string()
     } else {
-        format!(
-            r#"use cuda_device::{{kernel, thread, DisjointSlice}};
-use cuda_core::{{CudaContext, DeviceBuffer, LaunchConfig}};
-use cuda_host::{{cuda_launch, load_kernel_module}};
+        r#"use cuda_device::{kernel, thread, DisjointSlice};
+use cuda_host::cuda_module;
+use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
 
-#[kernel]
-pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {{
-    let idx = thread::index_1d();
-    let idx_raw = idx.get();
-    if let Some(c_elem) = c.get_mut(idx) {{
-        *c_elem = a[idx_raw] + b[idx_raw];
-    }}
-}}
-fn main() {{
+#[cuda_module]
+mod kernels {
+    use super::*;
+
+    #[kernel]
+    pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
+        let idx = thread::index_1d();
+        let idx_raw = idx.get();
+        if let Some(c_elem) = c.get_mut(idx) {
+            *c_elem = a[idx_raw] + b[idx_raw];
+        }
+    }
+}
+fn main() {
     let ctx = CudaContext::new(0).expect("Failed to create CUDA context");
     let stream = ctx.default_stream();
 
@@ -1117,20 +1123,16 @@ fn main() {{
     let b_dev = DeviceBuffer::from_host(&stream, &b_host).unwrap();
     let mut c_dev = DeviceBuffer::<f32>::zeroed(&stream, N).unwrap();
 
-    // Loads `{name}.ptx` directly when cuda-oxide produced PTX, or builds a
-    // cubin from `{name}.ll` when cuda-oxide auto-detected libdevice math
-    // (`sin`, `pow`, `exp`, ...). Requires CUDA Toolkit on the host.
-    let module = load_kernel_module(&ctx, "{name}")
-        .expect("Failed to load kernel module");
-
-    cuda_launch! {{
-        kernel: vecadd,
-        stream: stream,
-        module: module,
-        config: LaunchConfig::for_num_elems(N as u32),
-        args: [slice(a_dev), slice(b_dev), slice_mut(c_dev)]
-    }}
-    .expect("Kernel launch failed");
+    let module = kernels::load(&ctx).expect("Failed to load embedded CUDA module");
+    module
+        .vecadd(
+            &stream,
+            LaunchConfig::for_num_elems(N as u32),
+            &a_dev,
+            &b_dev,
+            &mut c_dev,
+        )
+        .expect("Kernel launch failed");
 
     let c_host = c_dev.to_host_vec(&stream).unwrap();
 
@@ -1138,15 +1140,15 @@ fn main() {{
         .filter(|&i| (c_host[i] - (a_host[i] + b_host[i])).abs() > 1e-5)
         .count();
 
-    if errors == 0 {{
-        println!("PASSED: all {{}} elements correct", N);
-    }} else {{
-        eprintln!("FAILED: {{}} errors", errors);
+    if errors == 0 {
+        println!("PASSED: all {} elements correct", N);
+    } else {
+        eprintln!("FAILED: {} errors", errors);
         std::process::exit(1);
-    }}
-}}
+    }
+}
 "#
-        )
+        .to_string()
     };
 
     std::fs::write(project_dir.join("Cargo.toml"), cargo_toml).expect("Failed to write Cargo.toml");
