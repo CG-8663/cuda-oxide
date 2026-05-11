@@ -117,6 +117,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cuda-bindings",
+ "half",
  "oxide-artifacts",
 ]
 
