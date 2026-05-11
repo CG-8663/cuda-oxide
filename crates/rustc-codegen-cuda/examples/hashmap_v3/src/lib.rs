@@ -59,7 +59,7 @@ use std::sync::Arc;
 
 use cuda_core::{CudaModule, CudaStream, DeviceBuffer, LaunchConfig};
 use cuda_device::atomic::{AtomicOrdering, DeviceAtomicU32, DeviceAtomicU64};
-use cuda_device::cooperative_groups::{ThreadGroup, WarpCollective, this_grid, this_thread_block};
+use cuda_device::cooperative_groups::{ThreadGroup, WarpCollective, this_thread_block};
 use cuda_device::{DisjointSlice, kernel, thread};
 use cuda_host::cuda_launch;
 
@@ -91,6 +91,14 @@ pub const GROUP: usize = 4;
 /// consecutive 16-byte sub-tiles before the triangular advance, so the
 /// same table is queryable by either tile size.
 pub const PROBE_TILE: usize = 32;
+
+/// Maximum number of threads used by the non-cooperative rehash launch.
+///
+/// Resize walks the old table with a grid-stride loop, so correctness does
+/// not depend on launching one thread per slot. Keeping the launch bounded
+/// avoids cooperative-launch resident-block limits while still giving enough
+/// parallelism for large tables.
+pub const REHASH_MAX_THREADS: usize = 65_536;
 
 /// Tag byte = "this slot is free". All slots start as `EMPTY_TAG`. The
 /// initial all-`0xFF` ctrl array gives us this for free via
@@ -312,37 +320,21 @@ pub fn insert_kernel_dedup(ctrl: &[u32], slots: &[u64], keys: &[u32], values: &[
     }
 }
 
-/// `rehash_kernel` — single-kernel rehash via `grid.sync()`.
-///
-/// Cooperative-launch only. Phase 1: each thread reads its assigned
-/// slot in the old table and stashes the `(key, value)` pair (or a
-/// "not live" marker) into registers. After `grid.sync()`, Phase 2:
-/// each thread that read a `FULL(h2)` slot re-inserts its pair into
-/// the new table via [`insert_into_table_core`].
-///
-/// The grid barrier costs a single `cudaCGSync()` and lets one kernel
-/// invocation replace the "two launches plus a stream sync" pattern
-/// that would otherwise be needed: it sequences the entire read
-/// phase before any write into the destination buffer with no
-/// host-side coordination.
+/// `rehash_kernel` — single-kernel two-buffer rehash.
 ///
 /// v3 ships the two-buffer mode only (`old != new`); the new buffer
-/// is `memset`-cleared by the host before launch. In-place
-/// compaction (`old == new`, which would also need a clear step
-/// between read and re-insert) is a future extension; the grid
-/// barrier is in place so that extension can land without rewriting
-/// the kernel.
-///
-/// Launch with one thread per old slot:
-/// `LaunchConfig::for_num_elems(old_capacity as u32)`. The host
-/// wrapper [`GpuSwissMap::resize_to`] passes `cooperative: true` to
-/// `cuda_launch!`.
+/// is `memset`-cleared by the host before launch, and the old buffer
+/// remains read-only for the duration of the kernel. That means no
+/// grid-wide barrier is required: each thread can read a live old
+/// slot and immediately insert it into the new table. Threads stride
+/// across the old table so the host can bound the launch size without
+/// depending on cooperative-launch residency limits.
 #[kernel]
 pub fn rehash_kernel(old_ctrl: &[u32], old_slots: &[u64], new_ctrl: &[u32], new_slots: &[u64]) {
-    let grid = this_grid();
-    let tid = thread::index_1d().get();
+    let mut tid = thread::index_1d().get();
+    let stride = (thread::gridDim_x() * thread::blockDim_x()) as usize;
 
-    let (live, key, value) = if tid < old_slots.len() {
+    while tid < old_slots.len() {
         let ctrl_word_idx = tid / GROUP;
         let byte_in_word = tid % GROUP;
         let ctrl_atomic =
@@ -353,18 +345,16 @@ pub fn rehash_kernel(old_ctrl: &[u32], old_slots: &[u64], new_ctrl: &[u32], new_
             let slot_atomic =
                 unsafe { DeviceAtomicU64::from_ptr(old_slots.as_ptr().add(tid).cast_mut()) };
             let slot = slot_atomic.load(AtomicOrdering::Acquire);
-            (true, unpack_key(slot), unpack_value(slot))
-        } else {
-            (false, 0u32, 0u32)
+            let _ = insert_into_table_core(
+                new_ctrl,
+                new_slots,
+                unpack_key(slot),
+                unpack_value(slot),
+                true,
+            );
         }
-    } else {
-        (false, 0u32, 0u32)
-    };
 
-    grid.sync();
-
-    if live {
-        let _ = insert_into_table_core(new_ctrl, new_slots, key, value, true);
+        tid += stride;
     }
 }
 
@@ -1322,20 +1312,18 @@ impl GpuSwissMap {
 
     /// Reallocate `ctrl` and `slots` to `new_capacity` slots and
     /// rehash all live entries from the old buffers into the new
-    /// via the cooperative-launch [`rehash_kernel`] (one thread per
-    /// old slot, single grid barrier between read and re-insert).
+    /// via the strided two-buffer [`rehash_kernel`].
     ///
     /// Both growing and shrinking are supported. `new_capacity` must
     /// be a power of two and at least `PROBE_TILE`. After this call,
     /// the old buffers are dropped (freed once the launch completes
     /// and the borrowed device pointers go out of scope).
     ///
-    /// Cooperative launch caveat: the kernel runs with one thread per
-    /// old slot, so `self.capacity()` must fit the GPU's cooperative-
-    /// launch resident-block budget. On modern GPUs this comfortably
-    /// covers tables up to ~1 M slots. Larger tables would need a
-    /// strided variant (each thread handles multiple slots in a
-    /// chunked loop) — out of scope for v3.
+    /// The old buffers are read-only and the new buffers start empty,
+    /// so rehash does not require a cooperative grid-wide barrier.
+    /// The launch size is capped and each thread handles a strided
+    /// subset of old slots, which keeps resize portable across GPUs
+    /// with smaller cooperative-launch residency budgets.
     pub fn resize_to(
         &mut self,
         new_capacity: usize,
@@ -1368,13 +1356,13 @@ impl GpuSwissMap {
             )?;
         }
 
-        let cfg = LaunchConfig::for_num_elems(self.capacity as u32);
+        let rehash_threads = self.capacity.min(REHASH_MAX_THREADS) as u32;
+        let cfg = LaunchConfig::for_num_elems(rehash_threads);
         cuda_launch! {
             kernel: rehash_kernel,
             stream: stream,
             module: module,
             config: cfg,
-            cooperative: true,
             args: [
                 slice(self.ctrl), slice(self.slots),
                 slice(new_ctrl), slice(new_slots)

@@ -13,7 +13,7 @@ capabilities that v2 did not have:
 | Sub-warp find tile            | `find_bulk_tile_16`      | Two queries per warp    |
 | Intra-warp insert dedup       | `insert_bulk_dedup`      | Duplicate-heavy inputs  |
 | `DELETED`-slot reclaim        | Every insert path        | Churn at high load      |
-| Single-kernel rehash + resize | `resize_to` / grow path  | Cooperative auto-resize |
+| Single-kernel rehash + resize | `resize_to` / grow path  | Strided auto-resize |
 
 - `WarpTile<16>` is 1.2-1.3x faster than the full-warp tile at
   moderate load.
@@ -78,7 +78,7 @@ let by_subwarp = map.find_bulk_tile_16(&query, &module, &stream)?;     // 2 keys
 // Tombstone delete (FULL(h2) -> DELETED). Subsequent inserts may reclaim.
 let deleted = map.delete_bulk(&keys, &module, &stream)?;       // Vec<bool>
 
-// Resize: cooperative-launch rehash kernel into freshly memset'd buffers.
+// Resize: strided rehash kernel into freshly memset'd buffers.
 map.resize_to(new_capacity, &module, &stream)?;
 
 // Auto-resize wrapper: doubles capacity in a loop until projected load
@@ -163,27 +163,21 @@ insert may reclaim the slot via the handshake above.
 
 1. Allocate fresh `ctrl` and `slots` for `new_capacity`,
    `memset_d8_async(0xFF, ...)` so they read all-`EMPTY`.
-2. Cooperative-launch `rehash_kernel(old_ctrl, old_slots, new_ctrl, new_slots)`
-   with one thread per old slot.
-3. Phase 1 of `rehash_kernel`: each thread reads its old slot. If
-   `FULL(h2)`, hold `(key, value)` in registers; otherwise mark "not
-   live".
-4. `grid.sync()` — every read happens before any new-table write.
-5. Phase 2: each "live" thread re-inserts `(key, value)` into the new
-   table via the standard `insert_into_table_core`.
-6. Replace `self.ctrl` / `self.slots` / `self.capacity` with the new
+2. Launch `rehash_kernel(old_ctrl, old_slots, new_ctrl, new_slots)`.
+   The launch is capped, and each thread walks old slots in a grid-stride loop.
+3. Each thread reads a live old slot and immediately re-inserts `(key, value)`
+   into the new table via the standard `insert_into_table_core`.
+4. Replace `self.ctrl` / `self.slots` / `self.capacity` with the new
    buffers; old buffers drop.
+
+Because resize always rehashes into separate freshly cleared buffers, no
+cooperative grid-wide barrier is needed: the old table is read-only while the
+new table is being populated.
 
 `insert_bulk_grow` is a thin wrapper: doubles `capacity` (in a loop)
 until the projected post-insert load would stay under 7/8, then runs
 `insert_bulk`. Each doubling increments `resize_count` so stress tests
 can verify the trigger.
-
-Cooperative-launch caveat: `rehash_kernel` runs with one thread per
-old slot, so `capacity()` must fit the GPU's cooperative-launch
-resident-block budget. On modern GPUs this comfortably covers tables
-up to ~1 M slots; larger tables need a strided variant (each thread
-handles multiple slots in a chunked loop) — out of scope for v3.
 
 ## Bench Snapshot — RTX 5090, sm\_120
 

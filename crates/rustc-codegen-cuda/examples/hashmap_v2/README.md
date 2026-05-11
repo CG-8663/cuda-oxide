@@ -335,8 +335,8 @@ Default capacity is `1 << 14` slots.
 - **DELETED slot reclaim on insert** — v2 leaves tombstones in place;
   with enough delete-insert churn the table fragments and effective
   capacity shrinks. Reclaim and rehash ship in `hashmap_v3`.
-- **Resize / rehash** — v2 has no resize path. Cooperative-launch
-  grid-wide rehash ships in `hashmap_v3`.
+- **Resize / rehash** — v2 has no resize path. Strided two-buffer
+  rehash ships in `hashmap_v3`.
 - **Generic `<K, V>`** — deferred for API design reasons.
 - **Float keys** — PTX has no `compare_exchange` for floats.
 - **Single-launch dedup under Protocol A** — best-effort by design;
@@ -390,8 +390,8 @@ faster, find ratios are tighter on misses than hits — stays the same.
 - **`hashmap_v3`** — the next iteration of this design. Same SwissTable
   storage layout and probe shape; adds 16-lane sub-warp find tiles via
   `WarpTile<16>`, intra-warp insert dedup via `tile.match_any`,
-  `DELETED`-slot reclaim on insert, and a single-kernel `grid.sync()`
-  rehash with auto-resize. v2 stays in tree as the frozen baseline.
+  `DELETED`-slot reclaim on insert, and a strided two-buffer rehash
+  with auto-resize. v2 stays in tree as the frozen baseline.
 
 ## What v2 Ships in One Crate
 
