@@ -650,7 +650,8 @@ fn write_ptx_artifact_object(
     functions: &[collector::CollectedFunction<'_>],
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let ptx_name = format!("{output_name}.ptx");
-    let mut spec = oxide_artifacts::ArtifactBundleSpec::new(output_name, &result.target)
+    let bundle_name = std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| output_name.to_string());
+    let mut spec = oxide_artifacts::ArtifactBundleSpec::new(&bundle_name, &result.target)
         .with_payload(oxide_artifacts::ArtifactPayloadSpec::new(
             oxide_artifacts::ArtifactPayloadKind::Ptx,
             &ptx_name,

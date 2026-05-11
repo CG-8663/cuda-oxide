@@ -14,7 +14,7 @@
 //! ## What This Tests
 //!
 //! 1. Generic kernel definition: `fn scale<T>(factor: T, ...)`
-//! 2. Monomorphization: When called with `scale::<f32>`, rustc creates a specific version
+//! 2. Monomorphization: `scale::<f32>` and `scale::<i32>` create separate versions
 //! 3. Collection: Does our collector find the monomorphized instance?
 //! 4. PTX generation: Does the backend generate valid PTX?
 //!
@@ -32,8 +32,8 @@ use std::ops::{Add, Mul};
 
 /// Generic scale kernel - multiplies each element by a factor.
 ///
-/// This kernel is generic over T. When called with `scale::<f32>`, rustc
-/// monomorphizes it to a concrete f32 version.
+/// This kernel is generic over T. Each typed module method call
+/// monomorphizes it to a concrete device entry point.
 #[allow(dead_code)]
 #[cuda_module]
 mod kernels {
@@ -42,8 +42,9 @@ mod kernels {
     #[kernel]
     pub fn scale<T: Copy + Mul<Output = T>>(factor: T, input: &[T], mut out: DisjointSlice<T>) {
         let idx = thread::index_1d();
+        let idx_raw = idx.get();
         if let Some(out_elem) = out.get_mut(idx) {
-            *out_elem = input[idx.get()] * factor;
+            *out_elem = input[idx_raw] * factor;
         }
     }
 
@@ -51,8 +52,9 @@ mod kernels {
     #[kernel]
     pub fn add<T: Copy + Add<Output = T>>(a: &[T], b: &[T], mut c: DisjointSlice<T>) {
         let idx = thread::index_1d();
+        let idx_raw = idx.get();
         if let Some(c_elem) = c.get_mut(idx) {
-            *c_elem = a[idx.get()] + b[idx.get()];
+            *c_elem = a[idx_raw] + b[idx_raw];
         }
     }
 }
@@ -70,14 +72,7 @@ fn main() {
     let ctx = CudaContext::new(0).expect("Failed to create CUDA context");
     let stream = ctx.default_stream();
 
-    // Test data
     const N: usize = 1024;
-    let factor: f32 = 2.5;
-    let input_data: Vec<f32> = (0..N).map(|i| i as f32).collect();
-
-    let input_dev = DeviceBuffer::from_host(&stream, &input_data).expect("Failed to copy input");
-    let mut output_dev = DeviceBuffer::<f32>::zeroed(&stream, N).expect("Failed to alloc output");
-
     let module = kernels::load(&ctx).expect("Failed to load embedded CUDA module");
 
     // =========================================================================
@@ -89,30 +84,60 @@ fn main() {
     // making it visible to the backend's collector.
 
     println!("\nLaunching scale::<f32> kernel...");
-    println!("  factor = {}", factor);
-    println!("  N = {}", N);
+    {
+        let factor: f32 = 2.5;
+        let input_data: Vec<f32> = (0..N).map(|i| i as f32).collect();
+        let input_dev =
+            DeviceBuffer::from_host(&stream, &input_data).expect("Failed to copy f32 input");
+        let mut output_dev =
+            DeviceBuffer::<f32>::zeroed(&stream, N).expect("Failed to alloc f32 output");
 
-    module
-        .scale::<f32>(
-            &stream,
-            LaunchConfig::for_num_elems(N as u32),
-            factor,
-            &input_dev,
-            &mut output_dev,
-        )
-        .expect("Kernel launch failed");
+        module
+            .scale::<f32>(
+                &stream,
+                LaunchConfig::for_num_elems(N as u32),
+                factor,
+                &input_dev,
+                &mut output_dev,
+            )
+            .expect("scale::<f32> launch failed");
 
-    let output_host = output_dev
-        .to_host_vec(&stream)
-        .expect("Failed to copy output back");
-
-    let errors = (0..N)
-        .filter(|&i| (output_host[i] - input_data[i] * factor).abs() > 1e-5)
-        .count();
-
-    if errors == 0 {
-        println!("\n✓ SUCCESS: All {} elements correct!", N);
-    } else {
-        println!("\n✗ FAILED: {} errors", errors);
+        let output_host = output_dev
+            .to_host_vec(&stream)
+            .expect("Failed to copy f32 output back");
+        let errors = (0..N)
+            .filter(|&i| (output_host[i] - input_data[i] * factor).abs() > 1e-5)
+            .count();
+        assert_eq!(errors, 0, "scale::<f32> produced {errors} errors");
     }
+
+    println!("Launching scale::<i32> kernel...");
+    {
+        let factor: i32 = 3;
+        let input_data: Vec<i32> = (0..N as i32).collect();
+        let input_dev =
+            DeviceBuffer::from_host(&stream, &input_data).expect("Failed to copy i32 input");
+        let mut output_dev =
+            DeviceBuffer::<i32>::zeroed(&stream, N).expect("Failed to alloc i32 output");
+
+        module
+            .scale::<i32>(
+                &stream,
+                LaunchConfig::for_num_elems(N as u32),
+                factor,
+                &input_dev,
+                &mut output_dev,
+            )
+            .expect("scale::<i32> launch failed");
+
+        let output_host = output_dev
+            .to_host_vec(&stream)
+            .expect("Failed to copy i32 output back");
+        let errors = (0..N)
+            .filter(|&i| output_host[i] != input_data[i] * factor)
+            .count();
+        assert_eq!(errors, 0, "scale::<i32> produced {errors} errors");
+    }
+
+    println!("\n✓ SUCCESS: typed generic launches worked for f32 and i32");
 }

@@ -20,9 +20,9 @@ This example demonstrates the simplest possible CUDA kernel: element-wise vector
 
 #[kernel]
 pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
-    let idx = thread::index_1d();
-    if let Some(c_elem) = c.get_mut(idx) {
-        *c_elem = a[idx.get()] + b[idx.get()];
+    if let Some((c_elem, idx)) = c.get_mut_indexed() {
+        let i = idx.get();
+        *c_elem = a[i] + b[i];
     }
 }
 ```
@@ -32,14 +32,15 @@ generates the typed host-side loader and launch method.
 
 ### Thread Indexing
 
-- `thread::index_1d()` returns a `BoundedIdx` that provides safe bounds checking
-- `idx.in_bounds(len)` checks if thread is within valid range
-- `idx.get()` returns the raw `usize` index
+- `c.get_mut_indexed()` is the one-call form: it mints the per-thread `ThreadIndex` and resolves it to a `&mut T` in a single shot, returning `None` for out-of-bounds threads.
+- The explicit two-step form `let idx = thread::index_1d(); c.get_mut(idx)` is also available when you need the index to address other slices.
+- `idx.get()` returns the raw `usize` index for use against regular slices like `a` and `b`.
 
 ### Memory Safety
 
-- `DisjointSlice<T>` provides mutable access with the guarantee that each thread writes to a unique location
-- Input slices `&[f32]` are read-only on the device
+- `DisjointSlice<T, IndexSpace>` provides mutable access with the guarantee that each thread writes to a unique location.
+- The `ThreadIndex` witness is `!Send + !Sync + !Copy + !Clone` and `'kernel`-scoped, so it can't be smuggled across threads.
+- Input slices `&[f32]` are read-only on the device.
 
 ### Typed Module Loading
 
@@ -85,11 +86,11 @@ Output vector (first 5 elements):
 
 ## Potential Errors
 
-| Error                      | Cause                  | Solution                                      |
-|----------------------------|------------------------|-----------------------------------------------|
-| `CUDA_ERROR_NO_DEVICE`     | No GPU found           | Ensure NVIDIA driver is installed             |
-| `Failed to load embedded CUDA module`| Embedded PTX was not found | Build through `cargo oxide run vecadd` |
-| `Kernel launch failed`     | Invalid launch config  | Ensure grid/block dims don't exceed limits    |
+| Error                                | Cause                      | Solution                                  |
+|--------------------------------------|----------------------------|-------------------------------------------|
+| `CUDA_ERROR_NO_DEVICE`               | No GPU found               | Ensure NVIDIA driver is installed         |
+| `Failed to load embedded CUDA module`| Embedded PTX was not found | Build through `cargo oxide run vecadd`    |
+| `Kernel launch failed`               | Invalid launch config      | Ensure grid/block dims don't exceed limits|
 
 ## How It Works Under the Hood
 

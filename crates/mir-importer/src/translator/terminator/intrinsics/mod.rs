@@ -10,7 +10,7 @@
 //!
 //! | Module      | Intrinsics                                          |
 //! |-------------|-----------------------------------------------------|
-//! | `indexing`  | `threadIdx_*`, `blockIdx_*`, `index_1d`, `index_2d` |
+//! | `indexing`  | `threadIdx_*`, `blockIdx_*`, `index_1d`, `index_2d::<S>`, `index_2d_runtime` |
 //! | `sync`      | `sync_threads`, `mbarrier_*`, `fence_*`             |
 //! | `cluster`   | `cluster_ctaidX`, `cluster_sync`, `map_shared_rank` |
 //! | `warp`      | `shuffle_*`, `vote_*`, `lane_id`                    |

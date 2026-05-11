@@ -30,7 +30,32 @@ jobs:
           method: network
           sub-packages: '["nvcc", "cudart-dev"]'
 
-      - name: Run clippy
+      - name: Run clippy (workspace crates)
         env:
           CUDA_TOOLKIT_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
         run: cargo clippy --workspace -- -D warnings
+
+      # `rustc-codegen-cuda` has its own [workspace] because it links
+      # against the rustc-private dylibs. The root --workspace clippy
+      # doesn't see it.
+      - name: Run clippy (rustc-codegen-cuda)
+        env:
+          CUDA_TOOLKIT_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
+        working-directory: crates/rustc-codegen-cuda
+        run: cargo clippy --all-targets -- -D warnings
+
+      # Each example under examples/ is its own standalone workspace
+      # (so the codegen backend can be swapped in via RUSTFLAGS). They're
+      # invisible to the root --workspace clippy too, so loop here.
+      - name: Run clippy (rustc-codegen-cuda examples)
+        env:
+          CUDA_TOOLKIT_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
+        run: |
+          set -e
+          for ex in crates/rustc-codegen-cuda/examples/*/; do
+            if [ ! -f "$ex/Cargo.toml" ]; then continue; fi
+            name=$(basename "$ex")
+            echo "::group::clippy: $name"
+            (cd "$ex" && cargo clippy --all-targets -- -D warnings)
+            echo "::endgroup::"
+          done

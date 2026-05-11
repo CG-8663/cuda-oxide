@@ -51,10 +51,10 @@ mod kernels {
             wgmma_commit_group();
             wgmma_wait_group::<0>();
 
-            if tid == 0 {
-                if let Some(output_elem) = output.get_mut(gid) {
-                    *output_elem = desc;
-                }
+            if tid == 0
+                && let Some(output_elem) = output.get_mut(gid)
+            {
+                *output_elem = desc;
             }
         }
     }
@@ -133,7 +133,7 @@ fn run_wgmma_sync_test(
     println!("--- Test: WGMMA Sync Primitives ---\n");
 
     // Allocate output buffer (1 u64 for descriptor)
-    let mut dev_output = DeviceBuffer::<u64>::zeroed(&stream, 1)?;
+    let mut dev_output = DeviceBuffer::<u64>::zeroed(stream, 1)?;
 
     // Launch with 128 threads (1 warpgroup)
     let cfg = LaunchConfig {
@@ -148,7 +148,7 @@ fn run_wgmma_sync_test(
     stream.synchronize()?;
 
     // Read back result
-    let host_output = dev_output.to_host_vec(&stream)?;
+    let host_output = dev_output.to_host_vec(stream)?;
 
     println!("SMEM descriptor: 0x{:016x}", host_output[0]);
 

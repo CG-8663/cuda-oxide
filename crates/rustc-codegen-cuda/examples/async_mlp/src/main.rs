@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
+
 //! Async MLP Pipeline Example
 //!
 //! Demonstrates the full `cuda-async` execution model with a multi-kernel
@@ -64,21 +66,21 @@ mod kernels {
         a: &[f32],
         b: &[f32],
         beta: f32,
-        mut c: DisjointSlice<f32>,
+        mut c: DisjointSlice<f32, thread::Runtime2DIndex>,
     ) {
         let row = thread::index_2d_row();
         let col = thread::index_2d_col();
 
-        if let Some(c_idx) = thread::index_2d(n as usize) {
-            // col < n guaranteed by index_2d returning Some
+        if let Some(c_idx) = unsafe { thread::index_2d_runtime(n as usize) } {
+            // col < n guaranteed by index_2d_runtime returning Some
             if row < m as usize {
                 let n_sz = n as usize;
                 let k_sz = k as usize;
                 let mut sum = 0.0f32;
                 let mut i = 0usize;
                 while i < k_sz {
-                    sum = sum + a[row * k_sz + i] * b[i * n_sz + col];
-                    i = i + 1;
+                    sum += a[row * k_sz + i] * b[i * n_sz + col];
+                    i += 1;
                 }
                 if let Some(c_elem) = c.get_mut(c_idx) {
                     *c_elem = alpha * sum + beta * (*c_elem);
@@ -98,13 +100,14 @@ mod kernels {
         mut vec_out: DisjointSlice<f32>,
     ) {
         let row = thread::index_1d();
+        let row_raw = row.get();
         if let Some(out_elem) = vec_out.get_mut(row) {
             let n_sz = n as usize;
             let mut sum = 0.0f32;
             let mut j = 0usize;
             while j < n_sz {
-                sum = sum + mat[row.get() * n_sz + j] * vec_in[j];
-                j = j + 1;
+                sum += mat[row_raw * n_sz + j] * vec_in[j];
+                j += 1;
             }
             *out_elem = sum;
         }
@@ -243,8 +246,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let gemm_cfg = LaunchConfig {
             grid_dim: (
-                (DIM as u32 + BLOCK - 1) / BLOCK,
-                (DIM as u32 + BLOCK - 1) / BLOCK,
+                (DIM as u32).div_ceil(BLOCK),
+                (DIM as u32).div_ceil(BLOCK),
                 1,
             ),
             block_dim: (BLOCK, BLOCK, 1),

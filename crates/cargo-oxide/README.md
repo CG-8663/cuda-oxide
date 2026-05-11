@@ -82,7 +82,7 @@ Builds with debug info (`-C debuginfo=2`) and launches cuda-gdb. Supports `--tui
 
 ### `cargo oxide new <name> [--async]`
 
-Scaffolds a new standalone cuda-oxide project with `Cargo.toml`, `rust-toolchain.toml`, and a working `src/main.rs` containing a vector addition kernel. The default template uses synchronous `cuda-host` / `cuda-core`; `--async` generates a template with `tokio`, `cuda-async`, and the `DeviceOperation` pattern instead.
+Scaffolds a new standalone cuda-oxide project with `Cargo.toml`, `rust-toolchain.toml`, and a working `src/main.rs` containing a vector addition kernel. The default template uses `#[cuda_module]` with typed synchronous launch methods; `--async` generates a template with `tokio`, `cuda-async`, and typed lazy `DeviceOperation` launches.
 
 ```bash
 cargo oxide new my_kernel

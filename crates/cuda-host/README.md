@@ -114,6 +114,18 @@ Scalar arguments for owned async launches must be `'static`.
 low-level migration path for cuda-oxide kernels, but new host code should prefer
 `#[cuda_module]`.
 
+`cuda_launch_async!` is also lower-level. It can describe lazy work from raw
+device pointers, so callers must ensure the pointed-to allocations outlive the
+operation. Generated borrowed async methods encode that requirement as Rust
+borrows, and generated owned async methods move buffers into the operation for
+spawned tasks.
+
+`#[cuda_module]` owns launch ergonomics, not target-selection policy. It loads
+whatever embedded payload the compiler produced for the current crate. LTOIR,
+fatbin, or multi-architecture packaging decisions belong in the compiler and
+artifact layers, so the typed launch API does not need to change when those
+payload formats evolve.
+
 ## Tiling Utilities (tcgen05)
 
 Host-side layout transformations for Blackwell tensor cores. tcgen05 requires

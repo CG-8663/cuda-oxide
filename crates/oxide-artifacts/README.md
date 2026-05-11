@@ -7,6 +7,12 @@ The crate is deliberately accelerator-neutral. It knows how to describe bundles
 of generated PTX payloads, but it does not know how to compile or launch them.
 Runtime crates can parse bundles and decide whether they can consume them.
 
+`oxide-artifacts` also does not decide target policy. Choices such as PTX versus
+LTOIR, cubin versus fatbin, or single-arch versus multi-arch packaging belong to
+the compiler and runtime loader layers. The container only records the payloads
+and entry metadata it is given, so higher-level launch APIs can stay stable as
+the payload strategy evolves.
+
 ## Design
 
 An artifact bundle is a small binary blob stored in a retained host-object

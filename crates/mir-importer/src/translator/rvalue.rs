@@ -1089,17 +1089,47 @@ pub fn translate_rvalue(
                     match adt_kind {
                         AdtKind::Struct => {
                             // Check if the translated type is a struct type.
-                            // Newtypes like ThreadIndex(usize) are translated to their inner type,
-                            // so we should just return the inner value directly.
+                            // Scalar-lowered newtypes like ThreadIndex are translated to
+                            // their single runtime field type. They may still have ZST
+                            // marker fields in MIR, so select the one field whose
+                            // translated value matches the scalar result type.
                             let is_struct_type = {
                                 let ty_obj = adt_ty.deref(ctx);
                                 ty_obj.is::<dialect_mir::types::MirStructType>()
                                     || ty_obj.is::<dialect_mir::types::MirTupleType>()
                             };
 
-                            if !is_struct_type && field_values.len() == 1 {
-                                // Newtype wrapper - just pass through the inner value
-                                Ok((None, field_values[0], current_prev_op))
+                            if !is_struct_type {
+                                // Scalar-lowered ADT: layout collapsed to a single runtime
+                                // value. The MIR Aggregate may still list ZST fields
+                                // (PhantomData, etc.) -- those translate to types other
+                                // than `adt_ty`, so filtering by "type matches the
+                                // collapsed scalar" reliably picks the one runtime field.
+                                //
+                                // This works for shapes like
+                                //     ThreadIndex { raw: usize, _kernel: PhantomData<...>, ... }
+                                // where exactly one field shares the scalar type. If a
+                                // future scalar-lowered ADT has two runtime fields with
+                                // the same type, the filter returns >1 match and we bail
+                                // -- the assumption is wrong and the translator needs an
+                                // explicit story for that shape.
+                                let runtime_fields: Vec<Value> = field_values
+                                    .iter()
+                                    .copied()
+                                    .filter(|value| value.get_type(ctx) == adt_ty)
+                                    .collect();
+
+                                if runtime_fields.len() == 1 {
+                                    Ok((None, runtime_fields[0], current_prev_op))
+                                } else {
+                                    input_err!(
+                                        loc,
+                                        TranslationErr::unsupported(format!(
+                                            "Scalar-lowered ADT expected exactly one runtime field, found {}",
+                                            runtime_fields.len()
+                                        ))
+                                    )
+                                }
                             } else {
                                 // Cast field values to expected types (address space normalization)
                                 // This handles cases where field values have specific address spaces

@@ -26,32 +26,35 @@ The v0.1.0 release is an early-stage alpha: **expect bugs, incomplete features, 
 ## 🚀 Quick start
 
 ```rust
-use cuda_device::{kernel, thread, DisjointSlice};
+use cuda_device::{cuda_module, kernel, thread, DisjointSlice};
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
-use cuda_host::{cuda_launch, load_kernel_module};
 
-#[kernel]
-fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
-    let idx = thread::index_1d();
-    if let Some(c_elem) = c.get_mut(idx) {
-        *c_elem = a[idx.get()] + b[idx.get()];
+#[cuda_module]
+mod kernels {
+    use super::*;
+
+    #[kernel]
+    fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        if let Some(c_elem) = c.get_mut(idx) {
+            *c_elem = a[i] + b[i];
+        }
     }
 }
 
 fn main() {
     let ctx = CudaContext::new(0).unwrap();
     let stream = ctx.default_stream();
-    let module = load_kernel_module(&ctx, "vecadd").unwrap();
+    let module = kernels::load(&ctx).unwrap();
 
     let a = DeviceBuffer::from_host(&stream, &[1.0f32; 1024]).unwrap();
     let b = DeviceBuffer::from_host(&stream, &[2.0f32; 1024]).unwrap();
     let mut c = DeviceBuffer::<f32>::zeroed(&stream, 1024).unwrap();
 
-    cuda_launch! {
-        kernel: vecadd, stream: stream, module: module,
-        config: LaunchConfig::for_num_elems(1024),
-        args: [slice(a), slice(b), slice_mut(c)]
-    }.unwrap();
+    module
+        .vecadd(&stream, LaunchConfig::for_num_elems(1024), &a, &b, &mut c)
+        .unwrap();
 
     let result = c.to_host_vec(&stream).unwrap();
     assert_eq!(result[0], 3.0);
@@ -61,8 +64,10 @@ fn main() {
 Build and run with `cargo oxide run vecadd` upon installing the [prerequisites](getting-started/installation.md).
 
 :::{note}
-The module name passed to `load_kernel_module` is the kernel artifact basename;
-for workspace examples that is the example name.
+`#[cuda_module]` embeds the generated device artifact into the host binary and
+generates a typed `kernels::load` function plus one launch method per kernel.
+The lower-level `load_kernel_module` and `cuda_launch!` APIs remain available
+when you need to load a specific sidecar artifact or build custom launch code.
 :::
 
 ---

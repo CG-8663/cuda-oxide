@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#![allow(clippy::too_many_arguments)]
+
 //! Unified Tiled GEMM with Shared Memory
 //!
 //! Demonstrates a high-performance matrix multiplication using:
@@ -41,7 +43,7 @@ mod kernels {
         a: &[f32], // M x K matrix
         b: &[f32], // K x N matrix
         beta: f32,
-        mut c: DisjointSlice<f32>, // M x N matrix (output)
+        mut c: DisjointSlice<f32, thread::Runtime2DIndex>, // M x N matrix (output)
     ) {
         // Shared memory tiles for A and B (16x16 = 256 elements each)
         static mut TILE_A: SharedArray<f32, 256> = SharedArray::UNINIT;
@@ -59,7 +61,7 @@ mod kernels {
         let k_size = k as usize;
 
         // Number of tiles along K dimension
-        let num_tiles = (k_size + TILE_SIZE - 1) / TILE_SIZE;
+        let num_tiles = k_size.div_ceil(TILE_SIZE);
 
         // Accumulator for dot product
         let mut sum = 0.0f32;
@@ -98,24 +100,24 @@ mod kernels {
             unsafe {
                 let mut i = 0usize;
                 while i < TILE_SIZE {
-                    sum = sum + TILE_A[ty * TILE_SIZE + i] * TILE_B[i * TILE_SIZE + tx];
-                    i = i + 1;
+                    sum += TILE_A[ty * TILE_SIZE + i] * TILE_B[i * TILE_SIZE + tx];
+                    i += 1;
                 }
             }
 
             // Wait before loading next tile
             thread::sync_threads();
 
-            tile = tile + 1;
+            tile += 1;
         }
 
         // Write result to global memory
-        if let Some(c_idx) = thread::index_2d(n_size) {
-            // col < n_size guaranteed by index_2d returning Some
-            if row < m_size {
-                if let Some(c_elem) = c.get_mut(c_idx) {
-                    *c_elem = alpha * sum + beta * (*c_elem);
-                }
+        if let Some(c_idx) = unsafe { thread::index_2d_runtime(n_size) } {
+            // col < n_size guaranteed by index_2d_runtime returning Some
+            if row < m_size
+                && let Some(c_elem) = c.get_mut(c_idx)
+            {
+                *c_elem = alpha * sum + beta * (*c_elem);
             }
         }
     }
@@ -168,8 +170,8 @@ fn main() {
 
     // Configure launch: 16x16 threads per block (matches TILE_SIZE)
     let block_size = 16u32;
-    let grid_x = (N as u32 + block_size - 1) / block_size;
-    let grid_y = (M as u32 + block_size - 1) / block_size;
+    let grid_x = (N as u32).div_ceil(block_size);
+    let grid_y = (M as u32).div_ceil(block_size);
 
     println!(
         "Grid: ({}, {}), Block: ({}, {})",

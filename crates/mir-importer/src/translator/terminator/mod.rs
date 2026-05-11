@@ -46,7 +46,7 @@
 //!
 //! - [`helpers`]: Common utilities (`emit_goto`, `emit_function_call`)
 //! - [`intrinsics`]: GPU intrinsic handlers organized by category:
-//!   - `indexing`: Thread/block IDs, `index_1d`, `index_2d`
+//!   - `indexing`: Thread/block IDs, `index_1d`, `index_2d::<S>`, `index_2d_runtime`
 //!   - `sync`: Barriers, mbarrier operations
 //!   - `warp`: Shuffle, vote primitives
 //!   - `wgmma`: Hopper matrix operations
@@ -1475,7 +1475,7 @@ fn extract_func_info(
 /// | Category          | Examples                                          |
 /// |-------------------|---------------------------------------------------|
 /// | Thread Position   | `threadIdx_x`, `blockIdx_y`, `blockDim_x`         |
-/// | Index Helpers     | `index_1d`, `index_2d_row`, `index_2d_col`        |
+/// | Index Helpers     | `index_1d`, `index_2d::<S>`, `index_2d_runtime`, `index_2d_row`, `index_2d_col` |
 /// | Synchronization   | `sync_threads`, `mbarrier_*`, `fence_*`           |
 /// | Warp Primitives   | `shuffle_*`, `vote_*`, `lane_id`                  |
 /// | WGMMA (Hopper)    | `wgmma_fence`, `wgmma_mma_*`, `make_smem_desc`    |
@@ -1766,7 +1766,9 @@ fn try_dispatch_intrinsic(
         // reliable, these can be removed along with emit_index_1d_expansion,
         // emit_index_2d_row, and emit_index_2d_col in intrinsics/indexing.rs.
         // =================================================================
-        "cuda_device::index_1d" | "cuda_device::thread::index_1d" => {
+        "cuda_device::thread::__internal::index_1d"
+        | "cuda_device::index_1d"
+        | "cuda_device::thread::index_1d" => {
             Ok(Some(intrinsics::indexing::emit_index_1d_expansion(
                 ctx,
                 destination,
@@ -1805,7 +1807,12 @@ fn try_dispatch_intrinsic(
         // index_2d returns Option<ThreadIndex> with an internal col < stride check.
         // It is compiled as a normal function (not expanded inline) so that the
         // Option construction and branch are handled by the standard MIR translator.
-        "cuda_device::index_2d" | "cuda_device::thread::index_2d" => Ok(None),
+        "cuda_device::thread::__internal::index_2d"
+        | "cuda_device::thread::__internal::index_2d_runtime"
+        | "cuda_device::index_2d"
+        | "cuda_device::thread::index_2d"
+        | "cuda_device::index_2d_runtime"
+        | "cuda_device::thread::index_2d_runtime" => Ok(None),
 
         // =================================================================
         // Synchronization (from intrinsics::sync)

@@ -22,6 +22,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Each entry must be a workspace crate whose `cargo test --all-targets`
+        # is runnable on a stock `ubuntu-latest` runner — i.e. no live GPU and
+        # no full CUDA toolchain. Crates that need a GPU at runtime (e.g.
+        # `cuda-core`'s VMM/P2P integration test) are intentionally not in
+        # this matrix; they're covered by the GPU-enabled examples flow.
         package:
           - dialect-llvm
           - dialect-mir
@@ -30,12 +35,28 @@ jobs:
           - mir-lower
           - reserved-oxide-symbols
           - cuda-macros
+          - cuda-device   # trybuild compile-fail suite for ThreadIndex / DisjointSlice safety
+          - cuda-host     # pure-Rust kernel-launch helpers + tcgen05 tiling tables
 
     steps:
       - name: Clone repository
         uses: actions/checkout@v4
 
+      # Only `cuda-host` transitively pulls in `cuda-bindings`, whose
+      # build script invokes bindgen against `cuda.h`. Skip the install
+      # for the other matrix entries to keep their jobs lean.
+      - name: Install CUDA toolkit (cuda-host only)
+        if: matrix.package == 'cuda-host'
+        uses: Jimver/cuda-toolkit@v0.2.35
+        id: cuda-toolkit
+        with:
+          cuda: "13.0.0"
+          method: network
+          sub-packages: '["nvcc", "cudart-dev"]'
+
       - name: Run crate unit tests
+        env:
+          CUDA_TOOLKIT_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
         run: |
           sysroot="$(rustc --print sysroot)"
           export LIBRARY_PATH="${sysroot}/lib:${LIBRARY_PATH:-}"

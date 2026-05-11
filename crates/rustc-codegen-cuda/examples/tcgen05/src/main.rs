@@ -75,10 +75,10 @@ mod kernels {
             tcgen05_fence_before_thread_sync();
             tcgen05_fence_after_thread_sync();
 
-            if tid == 0 {
-                if let Some(out_elem) = output.get_mut(gid) {
-                    *out_elem = desc;
-                }
+            if tid == 0
+                && let Some(out_elem) = output.get_mut(gid)
+            {
+                *out_elem = desc;
             }
         }
     }
@@ -106,10 +106,10 @@ mod kernels {
 
             let tmem_addr = *(&raw const TMEM_ADDR as *const u32);
 
-            if tid == 0 {
-                if let Some(out_elem) = output.get_mut(gid) {
-                    *out_elem = tmem_addr;
-                }
+            if tid == 0
+                && let Some(out_elem) = output.get_mut(gid)
+            {
+                *out_elem = tmem_addr;
             }
 
             if warp_id == 0 && tmem_addr != 0xDEADBEEF {
@@ -149,10 +149,10 @@ mod kernels {
 
             cuda_device::barrier::mbarrier_try_wait(&raw const MBAR, 0);
 
-            if tid == 0 {
-                if let Some(out_elem) = output.get_mut(gid) {
-                    *out_elem = desc;
-                }
+            if tid == 0
+                && let Some(out_elem) = output.get_mut(gid)
+            {
+                *out_elem = desc;
             }
 
             if tid == 0 {
@@ -489,7 +489,7 @@ fn run_tcgen05_fence_test(
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Test: tcgen05 Fence Primitives ---\n");
 
-    let mut output = DeviceBuffer::<u64>::zeroed(&stream, 1)?;
+    let mut output = DeviceBuffer::<u64>::zeroed(stream, 1)?;
     let cfg = LaunchConfig {
         block_dim: (32, 1, 1),
         grid_dim: (1, 1, 1),
@@ -501,7 +501,7 @@ fn run_tcgen05_fence_test(
 
     stream.synchronize()?;
 
-    let host_output = output.to_host_vec(&stream)?;
+    let host_output = output.to_host_vec(stream)?;
     println!("SMEM descriptor: 0x{:016x}", host_output[0]);
     println!("✓ Fence primitives executed successfully\n");
 
@@ -514,7 +514,7 @@ fn run_tcgen05_alloc_test(
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Test: tcgen05 TMEM Allocation ---\n");
 
-    let mut output = DeviceBuffer::<u32>::zeroed(&stream, 1)?;
+    let mut output = DeviceBuffer::<u32>::zeroed(stream, 1)?;
     let cfg = LaunchConfig {
         block_dim: (32, 1, 1),
         grid_dim: (1, 1, 1),
@@ -526,7 +526,7 @@ fn run_tcgen05_alloc_test(
 
     stream.synchronize()?;
 
-    let host_output = output.to_host_vec(&stream)?;
+    let host_output = output.to_host_vec(stream)?;
     println!("TMEM address: 0x{:08x}", host_output[0]);
 
     if host_output[0] == 0xDEADBEEF {
@@ -547,7 +547,7 @@ fn run_tcgen05_commit_test(
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Test: tcgen05 Commit with mbarrier ---\n");
 
-    let mut output = DeviceBuffer::<u64>::zeroed(&stream, 1)?;
+    let mut output = DeviceBuffer::<u64>::zeroed(stream, 1)?;
     let cfg = LaunchConfig {
         block_dim: (32, 1, 1),
         grid_dim: (1, 1, 1),
@@ -559,7 +559,7 @@ fn run_tcgen05_commit_test(
 
     stream.synchronize()?;
 
-    let host_output = output.to_host_vec(&stream)?;
+    let host_output = output.to_host_vec(stream)?;
     println!("SMEM descriptor: 0x{:016x}", host_output[0]);
     println!("✓ Commit with mbarrier executed successfully\n");
 
@@ -572,7 +572,7 @@ fn run_tcgen05_mma_minimal_test(
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Test: tcgen05 MMA Minimal ---\n");
 
-    let mut output = DeviceBuffer::<u32>::zeroed(&stream, 3)?;
+    let mut output = DeviceBuffer::<u32>::zeroed(stream, 3)?;
     let cfg = LaunchConfig {
         block_dim: (32, 1, 1),
         grid_dim: (1, 1, 1),
@@ -584,7 +584,7 @@ fn run_tcgen05_mma_minimal_test(
 
     stream.synchronize()?;
 
-    let host_output = output.to_host_vec(&stream)?;
+    let host_output = output.to_host_vec(stream)?;
     println!("TMEM address: 0x{:08x}", host_output[0]);
 
     let d0_bits = host_output[1];
@@ -602,7 +602,7 @@ fn run_tcgen05_alloc_cg2_test(
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Test: tcgen05 TMEM Alloc cta_group::2 ---\n");
 
-    let mut output = DeviceBuffer::<u32>::zeroed(&stream, 2)?;
+    let mut output = DeviceBuffer::<u32>::zeroed(stream, 2)?;
     let cfg = LaunchConfig {
         block_dim: (32, 1, 1),
         grid_dim: (2, 1, 1),
@@ -614,7 +614,7 @@ fn run_tcgen05_alloc_cg2_test(
 
     stream.synchronize()?;
 
-    let host_output = output.to_host_vec(&stream)?;
+    let host_output = output.to_host_vec(stream)?;
     println!("  CTA rank 0 TMEM addr: 0x{:08x}", host_output[0]);
     println!("  CTA rank 1 TMEM addr: 0x{:08x}", host_output[1]);
 
@@ -635,7 +635,7 @@ fn run_tcgen05_mma_cg2_test(
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Test: tcgen05 MMA cta_group::2 ---\n");
 
-    let mut output = DeviceBuffer::<u32>::zeroed(&stream, 2)?;
+    let mut output = DeviceBuffer::<u32>::zeroed(stream, 2)?;
     let cfg = LaunchConfig {
         block_dim: (32, 1, 1),
         grid_dim: (2, 1, 1),
@@ -647,7 +647,7 @@ fn run_tcgen05_mma_cg2_test(
 
     stream.synchronize()?;
 
-    let host_output = output.to_host_vec(&stream)?;
+    let host_output = output.to_host_vec(stream)?;
     println!("  CTA rank 0 TMEM addr: 0x{:08x}", host_output[0]);
     println!("  CTA rank 1 TMEM addr: 0x{:08x}", host_output[1]);
 

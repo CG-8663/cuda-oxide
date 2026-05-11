@@ -26,6 +26,8 @@ crates/dialect-mir/src/passes/
 **/*.long-type-*.txt
 
 # GPU compilation artifacts
+.oxide-artifacts/
+**/.oxide-artifacts/
 *.cubin
 *.gpu
 *.fatbin

@@ -133,11 +133,12 @@ mod kernels {
         mut out_signed: DisjointSlice<i32>,
         mut out_unsigned: DisjointSlice<u32>,
     ) {
-        let idx = thread::index_1d();
-        if let Some(s) = out_signed.get_mut(idx) {
+        let signed_idx = thread::index_1d();
+        if let Some(s) = out_signed.get_mut(signed_idx) {
             *s = signed_a / signed_b;
         }
-        if let Some(u) = out_unsigned.get_mut(idx) {
+        let unsigned_idx = thread::index_1d();
+        if let Some(u) = out_unsigned.get_mut(unsigned_idx) {
             *u = unsigned_a / unsigned_b;
         }
     }

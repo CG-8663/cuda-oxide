@@ -183,7 +183,7 @@ mod kernels {
                 rank += 1;
             }
 
-            if output.len() > 0 {
+            if !output.is_empty() {
                 unsafe { *output.get_unchecked_mut(0) = total };
             }
         }

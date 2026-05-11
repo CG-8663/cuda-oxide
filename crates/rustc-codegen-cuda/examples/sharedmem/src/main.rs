@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// Shared memory is accessed by thread-derived index, not an iterator.
+#![allow(clippy::needless_range_loop)]
+
 //! Unified Shared Memory Example
 //!
 //! Demonstrates SharedArray for block-level cooperation:

@@ -101,19 +101,23 @@ them.
 ```rust
 use cuda_device::{kernel, thread, DisjointSlice};
 
+use cuda_device::thread::Runtime2DIndex;
+
 #[kernel]
 pub fn sgemm_naive(
     m: u32, n: u32, k: u32,
     alpha: f32, a: &[f32], b: &[f32],
-    beta: f32, mut c: DisjointSlice<f32>,
+    beta: f32, mut c: DisjointSlice<f32, Runtime2DIndex>,
 ) {
+    let n_sz = n as usize;
     let row = thread::index_2d_row();
     let col = thread::index_2d_col();
 
-    if let Some(c_idx) = thread::index_2d(n as usize) {
-        // col < n guaranteed by index_2d returning Some
+    // SAFETY: every thread sees the same `n_sz` (same kernel arg).
+    if let Some(c_idx) = unsafe { thread::index_2d_runtime(n_sz) } {
+        // col < n_sz guaranteed by `Some` -- no manual check needed
         if row < m as usize {
-            let (n_sz, k_sz) = (n as usize, k as usize);
+            let k_sz = k as usize;
             let mut sum = 0.0f32;
             let mut i = 0usize;
             while i < k_sz {
@@ -191,7 +195,7 @@ A few patterns that recur across all three kernels:
 
 | Pattern                                   | What it does                                                                                               |
 | :---------------------------------------- | :----------------------------------------------------------------------------------------------------------|
-| `thread::index_1d()` / `index_2d(stride)` | Computes the global thread index from block/grid dimensions                                                |
+| `thread::index_1d()` / `index_2d::<S>()`  | Computes the global thread index from block/grid dimensions                                                |
 | `DisjointSlice<f32>`                      | Safe mutable output — compiler guarantees no aliasing                                                      |
 | `if let Some(elem) = slice.get_mut(idx)`  | Bounds check that silences threads beyond the data size                                                    |
 | `while` loops instead of `for`            | Stylistic choice — `for` loops with ranges also work on device, but `while` makes the loop bounds explicit |
@@ -300,13 +304,13 @@ const BLOCK: u32 = 16;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_device_contexts(0, 1)?;
-    let module = load_kernel_module_async("async_mlp", 0)?;
+    let module = kernels::load_async(0)?;
 ```
 
 `init_device_contexts(0, 1)` sets device 0 as the default and initializes
 the device context map (capacity 1). The round-robin stream pool is created
-lazily on first use. The PTX module — compiled from our `#[kernel]`
-functions — is loaded once and shared via `Arc<CudaModule>`.
+lazily on first use. The embedded module compiled from our `#[kernel]`
+functions is loaded once and shared by the typed module handle.
 
 ### Step 2: Upload shared weights
 

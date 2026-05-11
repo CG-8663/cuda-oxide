@@ -177,29 +177,20 @@ let cfg = LaunchConfig {
 };
 ```
 
-Then pass it to `cuda_launch!`:
+Then pass it to the generated launch method:
 
 ```rust
-cuda_launch! {
-    kernel: vecadd,
-    stream: stream,
-    module: module,
-    config: LaunchConfig::for_num_elems(N as u32),
-    args: [slice(a_dev), slice(b_dev), slice_mut(c_dev)]
-}
-.expect("Kernel launch failed");
+module
+    .vecadd(&stream, LaunchConfig::for_num_elems(N as u32), &a_dev, &b_dev, &mut c_dev)
+    .expect("Kernel launch failed");
 ```
 
 Or with the async API:
 
 ```rust
-cuda_launch_async! {
-    kernel: vecadd,
-    module: module,
-    config: LaunchConfig::for_num_elems(N as u32),
-    args: [slice(a_dev), slice(b_dev), slice_mut(c_dev)]
-}
-.sync()?;
+module
+    .vecadd_async(LaunchConfig::for_num_elems(N as u32), &a_dev, &b_dev, &mut c_dev)?
+    .sync()?;
 ```
 
 (execution-choosing-block-size)=

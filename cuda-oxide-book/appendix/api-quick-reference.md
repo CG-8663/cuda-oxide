@@ -59,57 +59,63 @@ gpu_assert!(val >= 0.0);
 ```rust
 use cuda_device::thread;
 
-let idx   = thread::index_1d();                // ThreadIndex (1D grids)
-let idx2d = thread::index_2d(row_stride);      // Option<ThreadIndex> (2D grids)
+let idx     = thread::index_1d();                            // ThreadIndex<'_, Index1D>
+let idx2d   = thread::index_2d::<128>();                     // Option<ThreadIndex<'_, Index2D<128>>>
+let idx2d_r = unsafe { thread::index_2d_runtime(stride) };   // Option<ThreadIndex<'_, Runtime2DIndex>>
 
-let tid_x = thread::threadIdx_x();      // u32
-let bid_x = thread::blockIdx_x();       // u32
-let bdim_x = thread::blockDim_x();      // u32
+let tid_x  = thread::threadIdx_x();    // u32
+let bid_x  = thread::blockIdx_x();     // u32
+let bdim_x = thread::blockDim_x();     // u32
 ```
 
-| Function                       | Returns               | Description                                       |
-|:-------------------------------|:----------------------|:--------------------------------------------------|
-| `thread::index_1d()`           | `ThreadIndex`         | Unique linear index (1D grids)                    |
-| `thread::index_2d(row_stride)` | `Option<ThreadIndex>` | Linear index (2D grids) -- **unsound**, see below |
-| `thread::index_2d_row()`       | `usize`               | 2D row index                                      |
-| `thread::index_2d_col()`       | `usize`               | 2D column index                                   |
-| `thread::threadIdx_{x,y}()`    | `u32`                 | Thread index within block                         |
-| `thread::blockIdx_{x,y}()`     | `u32`                 | Block index within grid                           |
-| `thread::blockDim_{x,y}()`     | `u32`                 | Block dimensions                                  |
+| Function                                    | Returns                                          | Description                                                |
+|:--------------------------------------------|:-------------------------------------------------|:-----------------------------------------------------------|
+| `thread::index_1d()`                        | `ThreadIndex<'_, Index1D>`                       | Unique linear index (1D grids)                             |
+| `thread::index_2d::<S>()`                   | `Option<ThreadIndex<'_, Index2D<S>>>`            | Const-stride 2D index; mismatched strides are a type error |
+| `unsafe thread::index_2d_runtime(s)`        | `Option<ThreadIndex<'_, Runtime2DIndex>>`        | Runtime-stride 2D index; caller asserts `s` is uniform     |
+| `thread::index_2d_row()`                    | `usize`                                          | 2D row index                                               |
+| `thread::index_2d_col()`                    | `usize`                                          | 2D column index                                            |
+| `thread::threadIdx_{x,y,z}()`               | `u32`                                            | Thread index within block                                  |
+| `thread::blockIdx_{x,y,z}()`                | `u32`                                            | Block index within grid                                    |
+| `thread::blockDim_{x,y,z}()`                | `u32`                                            | Block dimensions                                           |
 
-`thread::index_2d` returns `None` when the computed column exceeds
-`row_stride` — use it to skip the right-edge tail in non-aligned 2D kernels.
+`thread::index_2d::<S>()` and `thread::index_2d_runtime(s)` return `None`
+when the computed column exceeds the stride — use it to skip the
+right-edge tail in non-aligned 2D kernels.
 
-:::{warning}
-`index_2d(row_stride)` is **currently unsound**: it does not enforce
-that every thread in the kernel passes the same `row_stride`, so two
-threads can mint colliding `ThreadIndex` values. Until the principled
-fix lands, bind the stride to a single `let` and pass that binding to
-every `index_2d` call in the kernel. Full discussion in
-[The Safety Model](../gpu-safety/the-safety-model.md#index-2d-stride-is-currently-unsound).
-:::
+`index_2d::<S>` is the safe default; the const generic encodes the stride
+in the witness type so two threads can't mint colliding indices by
+passing different strides. `index_2d_runtime` is the escape hatch for
+launches whose stride is only known at runtime; the caller takes on the
+"every thread used the same stride" obligation by writing `unsafe`. Full
+discussion in [The Safety Model](../gpu-safety/the-safety-model.md).
 
 ---
 
 ## Safe Parallel Writes — DisjointSlice
 
 ```rust
-use cuda_device::{DisjointSlice, thread};
+use cuda_device::{DisjointSlice, kernel};
 
 #[kernel]
 pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
-    let idx = thread::index_1d();
-    if let Some(elem) = c.get_mut(idx) {
-        *elem = a[idx.get()] + b[idx.get()];
+    if let Some((c_elem, idx)) = c.get_mut_indexed() {
+        let i = idx.get();
+        *c_elem = a[i] + b[i];
     }
 }
 ```
 
-| Method               | Signature                          | Description                    |
-|:---------------------|:-----------------------------------|:-------------------------------|
-| `get_mut`            | `(ThreadIndex) -> Option<&mut T>`  | Bounds-checked mutable access  |
-| `get_unchecked_mut`  | `(usize) -> &mut T`                | Unsafe, unchecked access       |
-| `len`                | `() -> usize`                      | Number of elements             |
+| Method                  | Signature                                        | Description                                                          |
+|:------------------------|:-------------------------------------------------|:---------------------------------------------------------------------|
+| `get_mut_indexed`       | `() -> Option<(&mut T, ThreadIndex<'_, IS>)>`    | One-call form: mints the witness and resolves it. Index1D / Index2D. |
+| `get_mut`               | `(ThreadIndex<'_, IS>) -> Option<&mut T>`        | Bounds-checked mutable access from an explicit witness               |
+| `get_unchecked_mut`     | `(usize) -> &mut T`                              | Unsafe, unchecked access                                             |
+| `len`                   | `() -> usize`                                    | Number of elements                                                   |
+
+`get_mut_indexed` is gated on `IndexSpace: IndexFormula` (impl'd by
+`Index1D` and `Index2D<S>`). For `Runtime2DIndex` slices, use the
+explicit `unsafe { thread::index_2d_runtime(s) }` + `get_mut(idx)` pair.
 
 ---
 
@@ -319,45 +325,36 @@ N_COLS must be a power of 2 in the range [32, 512].
 
 ## Host-Side: Kernel Launch
 
-### Synchronous
+### Typed Synchronous
 
 ```rust
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
-use cuda_host::{cuda_launch, load_kernel_module};
 
 let ctx = CudaContext::new(0).unwrap();
 let stream = ctx.default_stream();
-let module = load_kernel_module(&ctx, "vecadd").unwrap();
+let module = kernels::load(&ctx).unwrap();
 
 let a = DeviceBuffer::from_host(&stream, &a_host).unwrap();
 let b = DeviceBuffer::from_host(&stream, &b_host).unwrap();
 let mut output = DeviceBuffer::<f32>::zeroed(&stream, n).unwrap();
 
-cuda_launch! {
-    kernel: vecadd,
-    stream: stream,
-    module: module,
-    config: LaunchConfig::for_num_elems(n),
-    args: [slice(a), slice(b), slice_mut(output)]
-}.unwrap();
+module.vecadd(&stream, LaunchConfig::for_num_elems(n), &a, &b, &mut output).unwrap();
 ```
 
-### Async
+### Typed Async
 
 ```rust
 use cuda_async::device_operation::DeviceOperation;
-use cuda_host::cuda_launch_async;
 
-let op = cuda_launch_async! {
-    kernel: vecadd,
-    module: module,
-    config: LaunchConfig::for_num_elems(n),
-    args: [slice(a), slice(b), slice_mut(output)]
-};
+let module = kernels::load_async(0)?;
+let op = module.vecadd_async(LaunchConfig::for_num_elems(n), &a, &b, &mut output)?;
 
 op.sync()?;       // blocking
 // or: op.await?;  // async with tokio
 ```
+
+`cuda_launch!` and `cuda_launch_async!` remain available as lower-level APIs for
+explicit module loading and custom launch code.
 
 ### LaunchConfig
 
@@ -411,7 +408,7 @@ debug::prof_trigger::<7>();     // Nsight profiler trigger
 |:------------------|:-----------------------------------------------------------------------|
 | `cuda-device`     | Device intrinsics and types (`#![no_std]`)                             |
 | `cuda-macros`     | Proc macros (`#[kernel]`, `#[device]`, `gpu_printf!`)                  |
-| `cuda-host`       | `cuda_launch!` and `cuda_launch_async!`                                |
+| `cuda-host`       | Typed module loading plus low-level launch helpers                     |
 | `cuda-core`       | Safe RAII wrappers (`CudaContext`, `CudaStream`, `DeviceBuffer<T>`)    |
 | `cuda-async`      | `DeviceOperation`, `DeviceFuture`, `DeviceBox<T>`                      |
 | `cuda-bindings`   | Raw `bindgen` FFI to `cuda.h`                                          |

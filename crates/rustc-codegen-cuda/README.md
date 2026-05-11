@@ -7,13 +7,13 @@ A custom rustc codegen backend that enables single-source CUDA programming in Ru
 The alternative is split compilation: kernels live in a separate crate compiled with `#[cfg(cuda_device)]`, requiring two compilation passes, careful type coordination, and `instantiate!` macros for generics. With `rustc-codegen-cuda`, everything compiles in **one pass** -- host code and `#[kernel]` functions coexist in the same crate, share types naturally, and generics just work.
 
 ```rust
-use cuda_device::{kernel, thread, DisjointSlice};
+use cuda_device::{kernel, DisjointSlice};
 
 #[kernel]
 pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
-    let idx = thread::index_1d();
-    if let Some(c_elem) = c.get_mut(idx) {
-        *c_elem = a[idx.get()] + b[idx.get()];
+    if let Some((c_elem, idx)) = c.get_mut_indexed() {
+        let i = idx.get();
+        *c_elem = a[i] + b[i];
     }
 }
 
@@ -106,6 +106,8 @@ The `examples/` directory contains standalone kernel crates that exercise differ
 |------------------------------|------------------------------------------------------|
 | `vecadd`                     | Basic vector addition -- the "hello world" kernel    |
 | `generic`                    | Generic kernels (`scale<T>`)                         |
+| `manual_launch_generic`      | Lower-level generic launch API regression            |
+| `cuda_module_contract`       | Typed launch ABI argument marshalling                |
 | `abi_hmm`                    | HMM pointers, struct layout, closures                |
 | `device_closures`            | Move and non-move closures passed to kernels         |
 | `cross_crate_kernel`         | Kernels defined in a library crate                   |

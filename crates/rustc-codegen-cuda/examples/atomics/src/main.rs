@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#![allow(clippy::approx_constant)]
+
 //! Unified Atomics Test Example
 //!
 //! Comprehensive test suite for sound atomic operations:

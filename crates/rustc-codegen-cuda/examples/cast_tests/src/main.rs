@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#![allow(clippy::approx_constant)]
+
 //! Cast Operations Test Suite
 //!
 //! Tests MIR cast kind handling in the codegen backend. Exercises each
@@ -324,10 +326,11 @@ mod kernels {
     #[kernel]
     pub fn test_unsize_array_to_slice(mut out: DisjointSlice<f32>) {
         let idx = thread::index_1d();
+        let idx_raw = idx.get();
         if let Some(out_elem) = out.get_mut(idx) {
             let arr: [f32; 4] = [10.0, 20.0, 30.0, 40.0];
             let slice: &[f32] = &arr;
-            let i = idx.get() % 4;
+            let i = idx_raw % 4;
             *out_elem = slice[i];
         }
     }
@@ -336,10 +339,11 @@ mod kernels {
     #[kernel]
     pub fn test_unsize_array_as_slice(mut out: DisjointSlice<f32>) {
         let idx = thread::index_1d();
+        let idx_raw = idx.get();
         if let Some(out_elem) = out.get_mut(idx) {
             let arr: [f32; 4] = [100.0, 200.0, 300.0, 400.0];
             let slice = arr.as_slice();
-            let i = idx.get() % 4;
+            let i = idx_raw % 4;
             *out_elem = slice[i];
         }
     }
@@ -368,9 +372,10 @@ mod kernels {
     #[kernel]
     pub fn test_unsize_f64_as_slice(mut out: DisjointSlice<f64>) {
         let idx = thread::index_1d();
+        let idx_raw = idx.get();
         if let Some(out_elem) = out.get_mut(idx) {
             let slice = [1., 2., 3.].as_slice();
-            let i = idx.get() % 3;
+            let i = idx_raw % 3;
             *out_elem = slice[i];
         }
     }
@@ -379,10 +384,11 @@ mod kernels {
     #[kernel]
     pub fn test_unsize_f64_explicit(mut out: DisjointSlice<f64>) {
         let idx = thread::index_1d();
+        let idx_raw = idx.get();
         if let Some(out_elem) = out.get_mut(idx) {
             let arr: [f64; 3] = [1.0, 2.0, 3.0];
             let slice: &[f64] = &arr;
-            let i = idx.get() % 3;
+            let i = idx_raw % 3;
             *out_elem = slice[i];
         }
     }

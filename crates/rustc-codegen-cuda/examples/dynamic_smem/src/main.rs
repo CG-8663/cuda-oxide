@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// Shared memory is accessed by thread-derived index, not an iterator.
+#![allow(clippy::needless_range_loop)]
+
 //! Unified Dynamic Shared Memory Example
 //!
 //! Demonstrates `DynamicSharedArray<T, ALIGN>` for runtime-sized shared memory.

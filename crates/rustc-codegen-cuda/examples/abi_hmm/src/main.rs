@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#![allow(clippy::not_unsafe_ptr_arg_deref, clippy::missing_safety_doc)]
+
 //! Unified ABI + HMM Test Example
 //!
 //! This example replicates the nvc++ test from rustc-codegen-cuda-plan.md:
@@ -79,7 +81,7 @@ mod kernels {
 
                 // Access host memory via HMM
                 // Device must read at offset 16 (same as host) for this to work
-                (*p).b = (*p).b * scale;
+                (*p).b *= scale;
             }
         }
     }
@@ -213,7 +215,7 @@ fn main() {
             LaunchConfig::for_num_elems(1),
             data_ptr,
             device_ran_ptr,
-            move |p: *mut Extreme| unsafe { (*p).b = (*p).b * scale },
+            move |p: *mut Extreme| unsafe { (*p).b *= scale },
         );
 
         stream.synchronize().expect("sync failed");
@@ -281,7 +283,7 @@ fn main() {
             |p: *mut Extreme| unsafe {
                 // `scale` here is actually `*(&scale)` - dereferencing the captured reference
                 // GPU accesses host memory (&scale) via HMM to read the value
-                (*p).b = (*p).b * scale
+                (*p).b *= scale
             },
         );
 
@@ -362,7 +364,7 @@ fn main() {
     }
 
     println!("\n=== Tests Complete ===");
-    println!("");
+    println!();
     println!("Summary:");
     println!("  Test 1: HMM direct host memory access ✓");
     println!("  Test 2: HMM + move closure (scale by value, struct ptr via HMM) ✓");

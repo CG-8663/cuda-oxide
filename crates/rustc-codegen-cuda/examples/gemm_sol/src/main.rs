@@ -3,6 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#![allow(
+    clippy::not_unsafe_ptr_arg_deref,
+    clippy::needless_range_loop,
+    clippy::unnecessary_cast,
+    clippy::too_many_arguments
+)]
+
 //! GEMM Speed-of-Light kernels (SM100+ / Blackwell)
 //!
 //! Eight kernels that implement GEMM on arbitrary M×N×K matrices:
@@ -331,7 +338,7 @@ mod kernels {
             let row_stride_bytes = TILE_N * 2; // 128 bf16 = 256 bytes per row
 
             let row_within_8 = (lane_id % 8) as usize;
-            let is_second_matrix = lane_id >= 8 && lane_id < 16;
+            let is_second_matrix = (8..16).contains(&lane_id);
             let col_offset_for_matrix2 = if is_second_matrix { 16usize } else { 0usize };
 
             let mut tmem_row_block = 0u32;
@@ -579,7 +586,7 @@ mod kernels {
             let row_stride_bytes = TILE_N * 2;
 
             let row_within_8 = (lane_id % 8) as usize;
-            let is_second_matrix = lane_id >= 8 && lane_id < 16;
+            let is_second_matrix = (8..16).contains(&lane_id);
             let col_offset_for_matrix2 = if is_second_matrix { 16usize } else { 0usize };
 
             let mut tmem_row_block = 0u32;
@@ -890,7 +897,7 @@ mod kernels {
             let row_stride_bytes = TILE_N * 2;
 
             let row_within_8 = (lane_id % 8) as usize;
-            let is_second_matrix = lane_id >= 8 && lane_id < 16;
+            let is_second_matrix = (8..16).contains(&lane_id);
             let col_offset_for_matrix2 = if is_second_matrix { 16usize } else { 0usize };
 
             let mut tmem_row_block = 0u32;
@@ -1232,7 +1239,7 @@ mod kernels {
                 let row_stride_bytes = TILE_N * 2;
 
                 let row_within_8 = (lane_id % 8) as usize;
-                let is_second_matrix = lane_id >= 8 && lane_id < 16;
+                let is_second_matrix = (8..16).contains(&lane_id);
                 let col_offset_for_matrix2 = if is_second_matrix { 16usize } else { 0usize };
 
                 let mut tmem_row_block = 0u32;
@@ -1679,7 +1686,7 @@ mod kernels {
                 let warp_row_base = (warp_id * 32) as usize;
                 let row_stride_bytes = TILE_N * 2;
                 let row_within_8 = (lane_id % 8) as usize;
-                let is_second_matrix = lane_id >= 8 && lane_id < 16;
+                let is_second_matrix = (8..16).contains(&lane_id);
                 let col_offset_for_matrix2 = if is_second_matrix { 16usize } else { 0usize };
 
                 loop {
@@ -2262,7 +2269,7 @@ mod kernels {
                 let warp_row_base = (warp_id * 32) as usize;
                 let row_stride_bytes = TILE_N * 2;
                 let row_within_8 = (lane_id % 8) as usize;
-                let is_second_matrix = lane_id >= 8 && lane_id < 16;
+                let is_second_matrix = (8..16).contains(&lane_id);
                 let col_offset_for_matrix2 = if is_second_matrix { 16usize } else { 0usize };
 
                 loop {
@@ -2922,7 +2929,7 @@ mod kernels {
                 let warp_row_base = (warp_id * 32) as usize;
                 let row_stride_bytes = TILE_N * 2;
                 let row_within_8 = (lane_id % 8) as usize;
-                let is_second_matrix = lane_id >= 8 && lane_id < 16;
+                let is_second_matrix = (8..16).contains(&lane_id);
                 let col_offset_for_matrix2 = if is_second_matrix { 16usize } else { 0usize };
 
                 loop {
@@ -3440,20 +3447,13 @@ mod kernels {
                     let accum_stage = tile_iter % NUM_ACCUM_STAGES;
                     let tmem_stage_offset = accum_stage * ACCUM_STAGE_COLS;
 
-                    if elect_one_cta {
-                        if tile_iter >= NUM_ACCUM_STAGES {
-                            let empty_parity =
-                                ((tile_iter - NUM_ACCUM_STAGES) / NUM_ACCUM_STAGES) & 1;
-                            if accum_stage == 0 {
-                                while !mbarrier_try_wait_parity(
-                                    &raw const ACCUM_EMPTY0,
-                                    empty_parity,
-                                ) {}
-                            } else {
-                                while !mbarrier_try_wait_parity(
-                                    &raw const ACCUM_EMPTY1,
-                                    empty_parity,
-                                ) {}
+                    if elect_one_cta && tile_iter >= NUM_ACCUM_STAGES {
+                        let empty_parity = ((tile_iter - NUM_ACCUM_STAGES) / NUM_ACCUM_STAGES) & 1;
+                        if accum_stage == 0 {
+                            while !mbarrier_try_wait_parity(&raw const ACCUM_EMPTY0, empty_parity) {
+                            }
+                        } else {
+                            while !mbarrier_try_wait_parity(&raw const ACCUM_EMPTY1, empty_parity) {
                             }
                         }
                     }
@@ -3544,19 +3544,17 @@ mod kernels {
                         k_idx += 1;
                     }
 
-                    if elect_one_cta {
-                        if is_lane0 {
-                            if accum_stage == 0 {
-                                tcgen05_commit_multicast_cg2(
-                                    &raw mut ACCUM_FULL0 as *mut u64,
-                                    CTA_MASK_PAIR,
-                                );
-                            } else {
-                                tcgen05_commit_multicast_cg2(
-                                    &raw mut ACCUM_FULL1 as *mut u64,
-                                    CTA_MASK_PAIR,
-                                );
-                            }
+                    if elect_one_cta && is_lane0 {
+                        if accum_stage == 0 {
+                            tcgen05_commit_multicast_cg2(
+                                &raw mut ACCUM_FULL0 as *mut u64,
+                                CTA_MASK_PAIR,
+                            );
+                        } else {
+                            tcgen05_commit_multicast_cg2(
+                                &raw mut ACCUM_FULL1 as *mut u64,
+                                CTA_MASK_PAIR,
+                            );
                         }
                     }
 
@@ -3581,7 +3579,7 @@ mod kernels {
                 let warp_row_base = (warp_id * 32) as usize;
                 let row_stride_bytes = TILE_N * 2;
                 let row_within_8 = (lane_id % 8) as usize;
-                let is_second_matrix = lane_id >= 8 && lane_id < 16;
+                let is_second_matrix = (8..16).contains(&lane_id);
                 let col_offset_for_matrix2 = if is_second_matrix { 16usize } else { 0usize };
 
                 loop {
@@ -3918,7 +3916,7 @@ fn run_correctness_test(
     n: usize,
     k: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert!(m % 128 == 0 && n % 128 == 0 && k % 64 == 0);
+    assert!(m.is_multiple_of(128) && n.is_multiple_of(128) && k.is_multiple_of(64));
 
     println!("Matrix: {}x{}x{} (f16 -> bf16)", m, n, k);
     println!("No pre-tiling. Flat row-major buffers.");
@@ -3944,8 +3942,8 @@ fn run_correctness_test(
     println!("Expected: C[i,j] = (i%8+1)*(j%8+1)*K\n");
 
     // Upload to GPU
-    let dev_a = DeviceBuffer::from_host(&stream, &host_a)?;
-    let dev_b = DeviceBuffer::from_host(&stream, &host_b)?;
+    let dev_a = DeviceBuffer::from_host(stream, &host_a)?;
+    let dev_b = DeviceBuffer::from_host(stream, &host_b)?;
 
     let a_ptr = dev_a.cu_deviceptr();
     let b_ptr = dev_b.cu_deviceptr();
@@ -3958,8 +3956,8 @@ fn run_correctness_test(
     let b_tma =
         create_tma_descriptor_f16(b_ptr as *mut std::ffi::c_void, k as u64, n as u64, 8, 128)?;
 
-    let dev_a_tma = DeviceBuffer::from_host(&stream, &a_tma.opaque)?;
-    let dev_b_tma = DeviceBuffer::from_host(&stream, &b_tma.opaque)?;
+    let dev_a_tma = DeviceBuffer::from_host(stream, &a_tma.opaque)?;
+    let dev_b_tma = DeviceBuffer::from_host(stream, &b_tma.opaque)?;
 
     // Grid tiling: one CTA per 128×128 output tile
     let grid_m = (m / 128) as u32;
@@ -3979,7 +3977,7 @@ fn run_correctness_test(
     println!("K-loop: {} outer iters (BK=64, 4 MMAs each)", k / 64);
 
     let output_u32_count = m * n / 2;
-    let mut dev_output = DeviceBuffer::<u32>::zeroed(&stream, output_u32_count)?;
+    let mut dev_output = DeviceBuffer::<u32>::zeroed(stream, output_u32_count)?;
 
     let a_tma_ptr = dev_a_tma.cu_deviceptr();
     let b_tma_ptr = dev_b_tma.cu_deviceptr();
@@ -4005,7 +4003,7 @@ fn run_correctness_test(
     stream.synchronize()?;
 
     // Verify a sample of output values
-    let host_output: Vec<u32> = dev_output.to_host_vec(&stream)?;
+    let host_output: Vec<u32> = dev_output.to_host_vec(stream)?;
 
     // Expected value at (row, col): C[i,j] = (i%8+1)*(j%8+1)*K
     let expected = |row: usize, col: usize| -> f32 { ((row % 8 + 1) * (col % 8 + 1) * k) as f32 };
@@ -4013,7 +4011,7 @@ fn run_correctness_test(
         let packed_idx = row * (n / 2) + col / 2;
         let packed = host_output[packed_idx];
         let (lo, hi) = unpack_bf16_pair(packed);
-        if col % 2 == 0 { lo } else { hi }
+        if col.is_multiple_of(2) { lo } else { hi }
     };
 
     // ── Optional: dump 16×16 sub-matrices (comment out when not needed) ──
@@ -4088,7 +4086,7 @@ fn print_16x16_got_vs_expected(host_output: &[u32], n: usize, k: usize) {
         let packed_idx = row * (n / 2) + col / 2;
         let packed = host_output[packed_idx];
         let (lo, hi) = unpack_bf16_pair(packed);
-        if col % 2 == 0 { lo } else { hi }
+        if col.is_multiple_of(2) { lo } else { hi }
     };
 
     println!("\n── Got (first 16 rows × 16 cols) ──");
@@ -4132,11 +4130,11 @@ fn run_benchmark(
     const WARMUP: usize = 10;
     const ITERS: usize = 100;
 
-    assert!(m % 128 == 0 && n % 128 == 0 && k % 64 == 0);
+    assert!(m.is_multiple_of(128) && n.is_multiple_of(128) && k.is_multiple_of(64));
 
     // Allocate device memory (zeros — values don't matter for timing)
-    let dev_a = DeviceBuffer::<u16>::zeroed(&stream, m * k)?;
-    let dev_b = DeviceBuffer::<u16>::zeroed(&stream, n * k)?;
+    let dev_a = DeviceBuffer::<u16>::zeroed(stream, m * k)?;
+    let dev_b = DeviceBuffer::<u16>::zeroed(stream, n * k)?;
 
     let a_ptr = dev_a.cu_deviceptr();
     let b_ptr = dev_b.cu_deviceptr();
@@ -4147,8 +4145,8 @@ fn run_benchmark(
     let b_tma =
         create_tma_descriptor_f16(b_ptr as *mut std::ffi::c_void, k as u64, n as u64, 8, 128)?;
 
-    let dev_a_tma = DeviceBuffer::from_host(&stream, &a_tma.opaque)?;
-    let dev_b_tma = DeviceBuffer::from_host(&stream, &b_tma.opaque)?;
+    let dev_a_tma = DeviceBuffer::from_host(stream, &a_tma.opaque)?;
+    let dev_b_tma = DeviceBuffer::from_host(stream, &b_tma.opaque)?;
     let a_tma_ptr = dev_a_tma.cu_deviceptr();
     let b_tma_ptr = dev_b_tma.cu_deviceptr();
     let a_tma_ptr = a_tma_ptr as *const TmaDescriptor;
@@ -4165,7 +4163,7 @@ fn run_benchmark(
     };
 
     let output_u32_count = m * n / 2;
-    let mut dev_output = DeviceBuffer::<u32>::zeroed(&stream, output_u32_count)?;
+    let mut dev_output = DeviceBuffer::<u32>::zeroed(stream, output_u32_count)?;
 
     // ── Warmup ──
     for _ in 0..WARMUP {
@@ -4253,7 +4251,7 @@ fn run_correctness_test_swizzled(
     n: usize,
     k: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert!(m % 128 == 0 && n % 128 == 0 && k % 64 == 0);
+    assert!(m.is_multiple_of(128) && n.is_multiple_of(128) && k.is_multiple_of(64));
 
     println!("Matrix: {}x{}x{} (f16 -> bf16)", m, n, k);
     println!("SWIZZLE_128B: single TMA copy per matrix per K-tile.");
@@ -4276,8 +4274,8 @@ fn run_correctness_test_swizzled(
     println!("A[i,k] = (i%8+1), B[n,k] = (n%8+1)");
     println!("Expected: C[i,j] = (i%8+1)*(j%8+1)*K\n");
 
-    let dev_a = DeviceBuffer::from_host(&stream, &host_a)?;
-    let dev_b = DeviceBuffer::from_host(&stream, &host_b)?;
+    let dev_a = DeviceBuffer::from_host(stream, &host_a)?;
+    let dev_b = DeviceBuffer::from_host(stream, &host_b)?;
 
     let a_ptr = dev_a.cu_deviceptr();
     let b_ptr = dev_b.cu_deviceptr();
@@ -4287,8 +4285,8 @@ fn run_correctness_test_swizzled(
     let b_tma =
         create_tma_descriptor_f16_swizzled(b_ptr as *mut std::ffi::c_void, k as u64, n as u64)?;
 
-    let dev_a_tma = DeviceBuffer::from_host(&stream, &a_tma.opaque)?;
-    let dev_b_tma = DeviceBuffer::from_host(&stream, &b_tma.opaque)?;
+    let dev_a_tma = DeviceBuffer::from_host(stream, &a_tma.opaque)?;
+    let dev_b_tma = DeviceBuffer::from_host(stream, &b_tma.opaque)?;
 
     let grid_m = (m / 128) as u32;
     let grid_n = (n / 128) as u32;
@@ -4307,7 +4305,7 @@ fn run_correctness_test_swizzled(
     println!("K-loop: {} outer iters (BK=64, 4 MMAs each)", k / 64);
 
     let output_u32_count = m * n / 2;
-    let mut dev_output = DeviceBuffer::<u32>::zeroed(&stream, output_u32_count)?;
+    let mut dev_output = DeviceBuffer::<u32>::zeroed(stream, output_u32_count)?;
 
     let a_tma_ptr = dev_a_tma.cu_deviceptr();
     let b_tma_ptr = dev_b_tma.cu_deviceptr();
@@ -4332,14 +4330,14 @@ fn run_correctness_test_swizzled(
 
     stream.synchronize()?;
 
-    let host_output: Vec<u32> = dev_output.to_host_vec(&stream)?;
+    let host_output: Vec<u32> = dev_output.to_host_vec(stream)?;
 
     let expected = |row: usize, col: usize| -> f32 { ((row % 8 + 1) * (col % 8 + 1) * k) as f32 };
     let read_c = |row: usize, col: usize| -> f32 {
         let packed_idx = row * (n / 2) + col / 2;
         let packed = host_output[packed_idx];
         let (lo, hi) = unpack_bf16_pair(packed);
-        if col % 2 == 0 { lo } else { hi }
+        if col.is_multiple_of(2) { lo } else { hi }
     };
 
     // ── Optional: dump 16×16 sub-matrices (comment out when not needed) ──
@@ -4414,10 +4412,10 @@ fn run_benchmark_swizzled(
     const WARMUP: usize = 10;
     const ITERS: usize = 100;
 
-    assert!(m % 128 == 0 && n % 128 == 0 && k % 64 == 0);
+    assert!(m.is_multiple_of(128) && n.is_multiple_of(128) && k.is_multiple_of(64));
 
-    let dev_a = DeviceBuffer::<u16>::zeroed(&stream, m * k)?;
-    let dev_b = DeviceBuffer::<u16>::zeroed(&stream, n * k)?;
+    let dev_a = DeviceBuffer::<u16>::zeroed(stream, m * k)?;
+    let dev_b = DeviceBuffer::<u16>::zeroed(stream, n * k)?;
 
     let a_ptr = dev_a.cu_deviceptr();
     let b_ptr = dev_b.cu_deviceptr();
@@ -4427,8 +4425,8 @@ fn run_benchmark_swizzled(
     let b_tma =
         create_tma_descriptor_f16_swizzled(b_ptr as *mut std::ffi::c_void, k as u64, n as u64)?;
 
-    let dev_a_tma = DeviceBuffer::from_host(&stream, &a_tma.opaque)?;
-    let dev_b_tma = DeviceBuffer::from_host(&stream, &b_tma.opaque)?;
+    let dev_a_tma = DeviceBuffer::from_host(stream, &a_tma.opaque)?;
+    let dev_b_tma = DeviceBuffer::from_host(stream, &b_tma.opaque)?;
     let a_tma_ptr = dev_a_tma.cu_deviceptr();
     let b_tma_ptr = dev_b_tma.cu_deviceptr();
     let a_tma_ptr = a_tma_ptr as *const TmaDescriptor;
@@ -4445,7 +4443,7 @@ fn run_benchmark_swizzled(
     };
 
     let output_u32_count = m * n / 2;
-    let mut dev_output = DeviceBuffer::<u32>::zeroed(&stream, output_u32_count)?;
+    let mut dev_output = DeviceBuffer::<u32>::zeroed(stream, output_u32_count)?;
 
     for _ in 0..WARMUP {
         unsafe {
@@ -4534,7 +4532,7 @@ fn run_correctness_test_pipelined(
     n: usize,
     k: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert!(m % 128 == 0 && n % 128 == 0 && k % 64 == 0);
+    assert!(m.is_multiple_of(128) && n.is_multiple_of(128) && k.is_multiple_of(64));
 
     println!("Matrix: {}x{}x{} (f16 -> bf16)", m, n, k);
     println!("Double-buffered SMEM, TMA/MMA overlap.");
@@ -4557,8 +4555,8 @@ fn run_correctness_test_pipelined(
     println!("A[i,k] = (i%8+1), B[n,k] = (n%8+1)");
     println!("Expected: C[i,j] = (i%8+1)*(j%8+1)*K\n");
 
-    let dev_a = DeviceBuffer::from_host(&stream, &host_a)?;
-    let dev_b = DeviceBuffer::from_host(&stream, &host_b)?;
+    let dev_a = DeviceBuffer::from_host(stream, &host_a)?;
+    let dev_b = DeviceBuffer::from_host(stream, &host_b)?;
 
     let a_ptr = dev_a.cu_deviceptr();
     let b_ptr = dev_b.cu_deviceptr();
@@ -4568,8 +4566,8 @@ fn run_correctness_test_pipelined(
     let b_tma =
         create_tma_descriptor_f16_swizzled(b_ptr as *mut std::ffi::c_void, k as u64, n as u64)?;
 
-    let dev_a_tma = DeviceBuffer::from_host(&stream, &a_tma.opaque)?;
-    let dev_b_tma = DeviceBuffer::from_host(&stream, &b_tma.opaque)?;
+    let dev_a_tma = DeviceBuffer::from_host(stream, &a_tma.opaque)?;
+    let dev_b_tma = DeviceBuffer::from_host(stream, &b_tma.opaque)?;
 
     let grid_m = (m / 128) as u32;
     let grid_n = (n / 128) as u32;
@@ -4588,7 +4586,7 @@ fn run_correctness_test_pipelined(
     println!("K-loop: {} outer iters (BK=64, 4 MMAs each)", k / 64);
 
     let output_u32_count = m * n / 2;
-    let mut dev_output = DeviceBuffer::<u32>::zeroed(&stream, output_u32_count)?;
+    let mut dev_output = DeviceBuffer::<u32>::zeroed(stream, output_u32_count)?;
 
     let a_tma_ptr = dev_a_tma.cu_deviceptr();
     let b_tma_ptr = dev_b_tma.cu_deviceptr();
@@ -4613,14 +4611,14 @@ fn run_correctness_test_pipelined(
 
     stream.synchronize()?;
 
-    let host_output: Vec<u32> = dev_output.to_host_vec(&stream)?;
+    let host_output: Vec<u32> = dev_output.to_host_vec(stream)?;
 
     let expected = |row: usize, col: usize| -> f32 { ((row % 8 + 1) * (col % 8 + 1) * k) as f32 };
     let read_c = |row: usize, col: usize| -> f32 {
         let packed_idx = row * (n / 2) + col / 2;
         let packed = host_output[packed_idx];
         let (lo, hi) = unpack_bf16_pair(packed);
-        if col % 2 == 0 { lo } else { hi }
+        if col.is_multiple_of(2) { lo } else { hi }
     };
 
     let check_positions = [
@@ -4692,10 +4690,10 @@ fn run_benchmark_pipelined(
     const WARMUP: usize = 10;
     const ITERS: usize = 100;
 
-    assert!(m % 128 == 0 && n % 128 == 0 && k % 64 == 0);
+    assert!(m.is_multiple_of(128) && n.is_multiple_of(128) && k.is_multiple_of(64));
 
-    let dev_a = DeviceBuffer::<u16>::zeroed(&stream, m * k)?;
-    let dev_b = DeviceBuffer::<u16>::zeroed(&stream, n * k)?;
+    let dev_a = DeviceBuffer::<u16>::zeroed(stream, m * k)?;
+    let dev_b = DeviceBuffer::<u16>::zeroed(stream, n * k)?;
 
     let a_ptr = dev_a.cu_deviceptr();
     let b_ptr = dev_b.cu_deviceptr();
@@ -4705,8 +4703,8 @@ fn run_benchmark_pipelined(
     let b_tma =
         create_tma_descriptor_f16_swizzled(b_ptr as *mut std::ffi::c_void, k as u64, n as u64)?;
 
-    let dev_a_tma = DeviceBuffer::from_host(&stream, &a_tma.opaque)?;
-    let dev_b_tma = DeviceBuffer::from_host(&stream, &b_tma.opaque)?;
+    let dev_a_tma = DeviceBuffer::from_host(stream, &a_tma.opaque)?;
+    let dev_b_tma = DeviceBuffer::from_host(stream, &b_tma.opaque)?;
     let a_tma_ptr = dev_a_tma.cu_deviceptr();
     let b_tma_ptr = dev_b_tma.cu_deviceptr();
     let a_tma_ptr = a_tma_ptr as *const TmaDescriptor;
@@ -4723,7 +4721,7 @@ fn run_benchmark_pipelined(
     };
 
     let output_u32_count = m * n / 2;
-    let mut dev_output = DeviceBuffer::<u32>::zeroed(&stream, output_u32_count)?;
+    let mut dev_output = DeviceBuffer::<u32>::zeroed(stream, output_u32_count)?;
 
     for _ in 0..WARMUP {
         unsafe {
@@ -4811,7 +4809,7 @@ fn run_correctness_test_warp_spec(
     n: usize,
     k: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert!(m % 128 == 0 && n % 128 == 0 && k % 64 == 0);
+    assert!(m.is_multiple_of(128) && n.is_multiple_of(128) && k.is_multiple_of(64));
 
     println!("Matrix: {}x{}x{} (f16 -> bf16)", m, n, k);
     println!("Warp-specialized pipeline: warp 4 = TMA, warp 5 = MMA, warps 0-3 = epilogue.");
@@ -4834,8 +4832,8 @@ fn run_correctness_test_warp_spec(
     println!("A[i,k] = (i%8+1), B[n,k] = (n%8+1)");
     println!("Expected: C[i,j] = (i%8+1)*(j%8+1)*K\n");
 
-    let dev_a = DeviceBuffer::from_host(&stream, &host_a)?;
-    let dev_b = DeviceBuffer::from_host(&stream, &host_b)?;
+    let dev_a = DeviceBuffer::from_host(stream, &host_a)?;
+    let dev_b = DeviceBuffer::from_host(stream, &host_b)?;
 
     let a_ptr = dev_a.cu_deviceptr();
     let b_ptr = dev_b.cu_deviceptr();
@@ -4845,8 +4843,8 @@ fn run_correctness_test_warp_spec(
     let b_tma =
         create_tma_descriptor_f16_swizzled(b_ptr as *mut std::ffi::c_void, k as u64, n as u64)?;
 
-    let dev_a_tma = DeviceBuffer::from_host(&stream, &a_tma.opaque)?;
-    let dev_b_tma = DeviceBuffer::from_host(&stream, &b_tma.opaque)?;
+    let dev_a_tma = DeviceBuffer::from_host(stream, &a_tma.opaque)?;
+    let dev_b_tma = DeviceBuffer::from_host(stream, &b_tma.opaque)?;
 
     let grid_m = (m / 128) as u32;
     let grid_n = (n / 128) as u32;
@@ -4865,7 +4863,7 @@ fn run_correctness_test_warp_spec(
     println!("K-loop: {} outer iters (BK=64, 4 MMAs each)", k / 64);
 
     let output_u32_count = m * n / 2;
-    let mut dev_output = DeviceBuffer::<u32>::zeroed(&stream, output_u32_count)?;
+    let mut dev_output = DeviceBuffer::<u32>::zeroed(stream, output_u32_count)?;
 
     let a_tma_ptr = dev_a_tma.cu_deviceptr();
     let b_tma_ptr = dev_b_tma.cu_deviceptr();
@@ -4890,14 +4888,14 @@ fn run_correctness_test_warp_spec(
 
     stream.synchronize()?;
 
-    let host_output: Vec<u32> = dev_output.to_host_vec(&stream)?;
+    let host_output: Vec<u32> = dev_output.to_host_vec(stream)?;
 
     let expected = |row: usize, col: usize| -> f32 { ((row % 8 + 1) * (col % 8 + 1) * k) as f32 };
     let read_c = |row: usize, col: usize| -> f32 {
         let packed_idx = row * (n / 2) + col / 2;
         let packed = host_output[packed_idx];
         let (lo, hi) = unpack_bf16_pair(packed);
-        if col % 2 == 0 { lo } else { hi }
+        if col.is_multiple_of(2) { lo } else { hi }
     };
 
     let check_positions = [
@@ -4969,10 +4967,10 @@ fn run_benchmark_warp_spec(
     const WARMUP: usize = 10;
     const ITERS: usize = 100;
 
-    assert!(m % 128 == 0 && n % 128 == 0 && k % 64 == 0);
+    assert!(m.is_multiple_of(128) && n.is_multiple_of(128) && k.is_multiple_of(64));
 
-    let dev_a = DeviceBuffer::<u16>::zeroed(&stream, m * k)?;
-    let dev_b = DeviceBuffer::<u16>::zeroed(&stream, n * k)?;
+    let dev_a = DeviceBuffer::<u16>::zeroed(stream, m * k)?;
+    let dev_b = DeviceBuffer::<u16>::zeroed(stream, n * k)?;
 
     let a_ptr = dev_a.cu_deviceptr();
     let b_ptr = dev_b.cu_deviceptr();
@@ -4982,8 +4980,8 @@ fn run_benchmark_warp_spec(
     let b_tma =
         create_tma_descriptor_f16_swizzled(b_ptr as *mut std::ffi::c_void, k as u64, n as u64)?;
 
-    let dev_a_tma = DeviceBuffer::from_host(&stream, &a_tma.opaque)?;
-    let dev_b_tma = DeviceBuffer::from_host(&stream, &b_tma.opaque)?;
+    let dev_a_tma = DeviceBuffer::from_host(stream, &a_tma.opaque)?;
+    let dev_b_tma = DeviceBuffer::from_host(stream, &b_tma.opaque)?;
     let a_tma_ptr = dev_a_tma.cu_deviceptr();
     let b_tma_ptr = dev_b_tma.cu_deviceptr();
     let a_tma_ptr = a_tma_ptr as *const TmaDescriptor;
@@ -5000,7 +4998,7 @@ fn run_benchmark_warp_spec(
     };
 
     let output_u32_count = m * n / 2;
-    let mut dev_output = DeviceBuffer::<u32>::zeroed(&stream, output_u32_count)?;
+    let mut dev_output = DeviceBuffer::<u32>::zeroed(stream, output_u32_count)?;
 
     for _ in 0..WARMUP {
         unsafe {
@@ -5088,7 +5086,7 @@ fn run_correctness_test_persistent(
     n: usize,
     k: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert!(m % 128 == 0 && n % 128 == 0 && k % 64 == 0);
+    assert!(m.is_multiple_of(128) && n.is_multiple_of(128) && k.is_multiple_of(64));
 
     println!("Matrix: {}x{}x{} (f16 -> bf16)", m, n, k);
     println!("Persistent kernel: TMEM accum pipeline (2 stages).");
@@ -5112,8 +5110,8 @@ fn run_correctness_test_persistent(
     println!("A[i,k] = (i%8+1), B[n,k] = (n%8+1)");
     println!("Expected: C[i,j] = (i%8+1)*(j%8+1)*K\n");
 
-    let dev_a = DeviceBuffer::from_host(&stream, &host_a)?;
-    let dev_b = DeviceBuffer::from_host(&stream, &host_b)?;
+    let dev_a = DeviceBuffer::from_host(stream, &host_a)?;
+    let dev_b = DeviceBuffer::from_host(stream, &host_b)?;
 
     let a_ptr = dev_a.cu_deviceptr();
     let b_ptr = dev_b.cu_deviceptr();
@@ -5123,8 +5121,8 @@ fn run_correctness_test_persistent(
     let b_tma =
         create_tma_descriptor_f16_swizzled(b_ptr as *mut std::ffi::c_void, k as u64, n as u64)?;
 
-    let dev_a_tma = DeviceBuffer::from_host(&stream, &a_tma.opaque)?;
-    let dev_b_tma = DeviceBuffer::from_host(&stream, &b_tma.opaque)?;
+    let dev_a_tma = DeviceBuffer::from_host(stream, &a_tma.opaque)?;
+    let dev_b_tma = DeviceBuffer::from_host(stream, &b_tma.opaque)?;
 
     let tiles_m = (m / 128) as u32;
     let tiles_n = (n / 128) as u32;
@@ -5155,10 +5153,10 @@ fn run_correctness_test_persistent(
     println!("K-loop: {} outer iters (BK=64, 4 MMAs each)", k / 64);
 
     let output_u32_count = m * n / 2;
-    let mut dev_output = DeviceBuffer::<u32>::zeroed(&stream, output_u32_count)?;
+    let mut dev_output = DeviceBuffer::<u32>::zeroed(stream, output_u32_count)?;
 
     // Tile counter: single u32 initialized to 0
-    let dev_tile_counter = DeviceBuffer::from_host(&stream, &[0u32])?;
+    let dev_tile_counter = DeviceBuffer::from_host(stream, &[0u32])?;
 
     let a_tma_ptr = dev_a_tma.cu_deviceptr();
     let b_tma_ptr = dev_b_tma.cu_deviceptr();
@@ -5188,14 +5186,14 @@ fn run_correctness_test_persistent(
 
     stream.synchronize()?;
 
-    let host_output: Vec<u32> = dev_output.to_host_vec(&stream)?;
+    let host_output: Vec<u32> = dev_output.to_host_vec(stream)?;
 
     let expected = |row: usize, col: usize| -> f32 { ((row % 8 + 1) * (col % 8 + 1) * k) as f32 };
     let read_c = |row: usize, col: usize| -> f32 {
         let packed_idx = row * (n / 2) + col / 2;
         let packed = host_output[packed_idx];
         let (lo, hi) = unpack_bf16_pair(packed);
-        if col % 2 == 0 { lo } else { hi }
+        if col.is_multiple_of(2) { lo } else { hi }
     };
 
     let check_positions = [
@@ -5266,10 +5264,10 @@ fn run_benchmark_persistent(
     const WARMUP: usize = 10;
     const ITERS: usize = 100;
 
-    assert!(m % 128 == 0 && n % 128 == 0 && k % 64 == 0);
+    assert!(m.is_multiple_of(128) && n.is_multiple_of(128) && k.is_multiple_of(64));
 
-    let dev_a = DeviceBuffer::<u16>::zeroed(&stream, m * k)?;
-    let dev_b = DeviceBuffer::<u16>::zeroed(&stream, n * k)?;
+    let dev_a = DeviceBuffer::<u16>::zeroed(stream, m * k)?;
+    let dev_b = DeviceBuffer::<u16>::zeroed(stream, n * k)?;
 
     let a_ptr = dev_a.cu_deviceptr();
     let b_ptr = dev_b.cu_deviceptr();
@@ -5279,8 +5277,8 @@ fn run_benchmark_persistent(
     let b_tma =
         create_tma_descriptor_f16_swizzled(b_ptr as *mut std::ffi::c_void, k as u64, n as u64)?;
 
-    let dev_a_tma = DeviceBuffer::from_host(&stream, &a_tma.opaque)?;
-    let dev_b_tma = DeviceBuffer::from_host(&stream, &b_tma.opaque)?;
+    let dev_a_tma = DeviceBuffer::from_host(stream, &a_tma.opaque)?;
+    let dev_b_tma = DeviceBuffer::from_host(stream, &b_tma.opaque)?;
     let a_tma_ptr = dev_a_tma.cu_deviceptr();
     let b_tma_ptr = dev_b_tma.cu_deviceptr();
     let a_tma_ptr = a_tma_ptr as *const TmaDescriptor;
@@ -5302,8 +5300,8 @@ fn run_benchmark_persistent(
     };
 
     let output_u32_count = m * n / 2;
-    let mut dev_output = DeviceBuffer::<u32>::zeroed(&stream, output_u32_count)?;
-    let dev_tile_counter = DeviceBuffer::<u32>::zeroed(&stream, 1)?;
+    let mut dev_output = DeviceBuffer::<u32>::zeroed(stream, output_u32_count)?;
+    let dev_tile_counter = DeviceBuffer::<u32>::zeroed(stream, 1)?;
 
     let counter_ptr = {
         let ptr = dev_tile_counter.cu_deviceptr();
@@ -5418,7 +5416,7 @@ fn run_correctness_test_clc(
     n: usize,
     k: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert!(m % 128 == 0 && n % 128 == 0 && k % 64 == 0);
+    assert!(m.is_multiple_of(128) && n.is_multiple_of(128) && k.is_multiple_of(64));
 
     println!("Matrix: {}x{}x{} (f16 -> bf16)", m, n, k);
     println!("CLC tile scheduling + TMEM accum pipeline.");
@@ -5442,8 +5440,8 @@ fn run_correctness_test_clc(
     println!("A[i,k] = (i%8+1), B[n,k] = (n%8+1)");
     println!("Expected: C[i,j] = (i%8+1)*(j%8+1)*K\n");
 
-    let dev_a = DeviceBuffer::from_host(&stream, &host_a)?;
-    let dev_b = DeviceBuffer::from_host(&stream, &host_b)?;
+    let dev_a = DeviceBuffer::from_host(stream, &host_a)?;
+    let dev_b = DeviceBuffer::from_host(stream, &host_b)?;
 
     let a_ptr = dev_a.cu_deviceptr();
     let b_ptr = dev_b.cu_deviceptr();
@@ -5453,8 +5451,8 @@ fn run_correctness_test_clc(
     let b_tma =
         create_tma_descriptor_f16_swizzled(b_ptr as *mut std::ffi::c_void, k as u64, n as u64)?;
 
-    let dev_a_tma = DeviceBuffer::from_host(&stream, &a_tma.opaque)?;
-    let dev_b_tma = DeviceBuffer::from_host(&stream, &b_tma.opaque)?;
+    let dev_a_tma = DeviceBuffer::from_host(stream, &a_tma.opaque)?;
+    let dev_b_tma = DeviceBuffer::from_host(stream, &b_tma.opaque)?;
 
     let tiles_m = (m / 128) as u32;
     let tiles_n = (n / 128) as u32;
@@ -5477,7 +5475,7 @@ fn run_correctness_test_clc(
     println!("K-loop: {} outer iters (BK=64, 4 MMAs each)", k / 64);
 
     let output_u32_count = m * n / 2;
-    let mut dev_output = DeviceBuffer::<u32>::zeroed(&stream, output_u32_count)?;
+    let mut dev_output = DeviceBuffer::<u32>::zeroed(stream, output_u32_count)?;
 
     let a_tma_ptr = dev_a_tma.cu_deviceptr();
     let b_tma_ptr = dev_b_tma.cu_deviceptr();
@@ -5504,14 +5502,14 @@ fn run_correctness_test_clc(
 
     stream.synchronize()?;
 
-    let host_output: Vec<u32> = dev_output.to_host_vec(&stream)?;
+    let host_output: Vec<u32> = dev_output.to_host_vec(stream)?;
 
     let expected = |row: usize, col: usize| -> f32 { ((row % 8 + 1) * (col % 8 + 1) * k) as f32 };
     let read_c = |row: usize, col: usize| -> f32 {
         let packed_idx = row * (n / 2) + col / 2;
         let packed = host_output[packed_idx];
         let (lo, hi) = unpack_bf16_pair(packed);
-        if col % 2 == 0 { lo } else { hi }
+        if col.is_multiple_of(2) { lo } else { hi }
     };
 
     let check_positions = [
@@ -5604,10 +5602,10 @@ fn run_benchmark_clc(
     const WARMUP: usize = 10;
     const ITERS: usize = 100;
 
-    assert!(m % 128 == 0 && n % 128 == 0 && k % 64 == 0);
+    assert!(m.is_multiple_of(128) && n.is_multiple_of(128) && k.is_multiple_of(64));
 
-    let dev_a = DeviceBuffer::<u16>::zeroed(&stream, m * k)?;
-    let dev_b = DeviceBuffer::<u16>::zeroed(&stream, n * k)?;
+    let dev_a = DeviceBuffer::<u16>::zeroed(stream, m * k)?;
+    let dev_b = DeviceBuffer::<u16>::zeroed(stream, n * k)?;
 
     let a_ptr = dev_a.cu_deviceptr();
     let b_ptr = dev_b.cu_deviceptr();
@@ -5617,8 +5615,8 @@ fn run_benchmark_clc(
     let b_tma =
         create_tma_descriptor_f16_swizzled(b_ptr as *mut std::ffi::c_void, k as u64, n as u64)?;
 
-    let dev_a_tma = DeviceBuffer::from_host(&stream, &a_tma.opaque)?;
-    let dev_b_tma = DeviceBuffer::from_host(&stream, &b_tma.opaque)?;
+    let dev_a_tma = DeviceBuffer::from_host(stream, &a_tma.opaque)?;
+    let dev_b_tma = DeviceBuffer::from_host(stream, &b_tma.opaque)?;
     let a_tma_ptr = dev_a_tma.cu_deviceptr();
     let b_tma_ptr = dev_b_tma.cu_deviceptr();
     let a_tma_ptr = a_tma_ptr as *const TmaDescriptor;
@@ -5637,7 +5635,7 @@ fn run_benchmark_clc(
     };
 
     let output_u32_count = m * n / 2;
-    let mut dev_output = DeviceBuffer::<u32>::zeroed(&stream, output_u32_count)?;
+    let mut dev_output = DeviceBuffer::<u32>::zeroed(stream, output_u32_count)?;
 
     for _ in 0..WARMUP {
         unsafe {
@@ -5724,7 +5722,7 @@ fn run_correctness_test_clc_multicast(
     n: usize,
     k: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert!(m % 128 == 0 && n % 128 == 0 && k % 64 == 0);
+    assert!(m.is_multiple_of(128) && n.is_multiple_of(128) && k.is_multiple_of(64));
 
     println!("Matrix: {}x{}x{} (f16 -> bf16)", m, n, k);
     println!("CLC + TMA multicast for B tiles + TMEM accum pipeline.");
@@ -5748,8 +5746,8 @@ fn run_correctness_test_clc_multicast(
     println!("A[i,k] = (i%8+1), B[n,k] = (n%8+1)");
     println!("Expected: C[i,j] = (i%8+1)*(j%8+1)*K\n");
 
-    let dev_a = DeviceBuffer::from_host(&stream, &host_a)?;
-    let dev_b = DeviceBuffer::from_host(&stream, &host_b)?;
+    let dev_a = DeviceBuffer::from_host(stream, &host_a)?;
+    let dev_b = DeviceBuffer::from_host(stream, &host_b)?;
 
     let a_ptr = dev_a.cu_deviceptr();
     let b_ptr = dev_b.cu_deviceptr();
@@ -5759,8 +5757,8 @@ fn run_correctness_test_clc_multicast(
     let b_tma =
         create_tma_descriptor_f16_swizzled(b_ptr as *mut std::ffi::c_void, k as u64, n as u64)?;
 
-    let dev_a_tma = DeviceBuffer::from_host(&stream, &a_tma.opaque)?;
-    let dev_b_tma = DeviceBuffer::from_host(&stream, &b_tma.opaque)?;
+    let dev_a_tma = DeviceBuffer::from_host(stream, &a_tma.opaque)?;
+    let dev_b_tma = DeviceBuffer::from_host(stream, &b_tma.opaque)?;
 
     let tiles_m = (m / 128) as u32;
     let tiles_n = (n / 128) as u32;
@@ -5783,7 +5781,7 @@ fn run_correctness_test_clc_multicast(
     println!("K-loop: {} outer iters (BK=64, 4 MMAs each)", k / 64);
 
     let output_u32_count = m * n / 2;
-    let mut dev_output = DeviceBuffer::<u32>::zeroed(&stream, output_u32_count)?;
+    let mut dev_output = DeviceBuffer::<u32>::zeroed(stream, output_u32_count)?;
 
     let a_tma_ptr = dev_a_tma.cu_deviceptr();
     let b_tma_ptr = dev_b_tma.cu_deviceptr();
@@ -5810,14 +5808,14 @@ fn run_correctness_test_clc_multicast(
 
     stream.synchronize()?;
 
-    let host_output: Vec<u32> = dev_output.to_host_vec(&stream)?;
+    let host_output: Vec<u32> = dev_output.to_host_vec(stream)?;
 
     let expected = |row: usize, col: usize| -> f32 { ((row % 8 + 1) * (col % 8 + 1) * k) as f32 };
     let read_c = |row: usize, col: usize| -> f32 {
         let packed_idx = row * (n / 2) + col / 2;
         let packed = host_output[packed_idx];
         let (lo, hi) = unpack_bf16_pair(packed);
-        if col % 2 == 0 { lo } else { hi }
+        if col.is_multiple_of(2) { lo } else { hi }
     };
 
     let check_positions = [
@@ -5910,10 +5908,10 @@ fn run_benchmark_clc_multicast(
     const WARMUP: usize = 10;
     const ITERS: usize = 100;
 
-    assert!(m % 128 == 0 && n % 128 == 0 && k % 64 == 0);
+    assert!(m.is_multiple_of(128) && n.is_multiple_of(128) && k.is_multiple_of(64));
 
-    let dev_a = DeviceBuffer::<u16>::zeroed(&stream, m * k)?;
-    let dev_b = DeviceBuffer::<u16>::zeroed(&stream, n * k)?;
+    let dev_a = DeviceBuffer::<u16>::zeroed(stream, m * k)?;
+    let dev_b = DeviceBuffer::<u16>::zeroed(stream, n * k)?;
 
     let a_ptr = dev_a.cu_deviceptr();
     let b_ptr = dev_b.cu_deviceptr();
@@ -5923,8 +5921,8 @@ fn run_benchmark_clc_multicast(
     let b_tma =
         create_tma_descriptor_f16_swizzled(b_ptr as *mut std::ffi::c_void, k as u64, n as u64)?;
 
-    let dev_a_tma = DeviceBuffer::from_host(&stream, &a_tma.opaque)?;
-    let dev_b_tma = DeviceBuffer::from_host(&stream, &b_tma.opaque)?;
+    let dev_a_tma = DeviceBuffer::from_host(stream, &a_tma.opaque)?;
+    let dev_b_tma = DeviceBuffer::from_host(stream, &b_tma.opaque)?;
     let a_tma_ptr = dev_a_tma.cu_deviceptr();
     let b_tma_ptr = dev_b_tma.cu_deviceptr();
     let a_tma_ptr = a_tma_ptr as *const TmaDescriptor;
@@ -5943,7 +5941,7 @@ fn run_benchmark_clc_multicast(
     };
 
     let output_u32_count = m * n / 2;
-    let mut dev_output = DeviceBuffer::<u32>::zeroed(&stream, output_u32_count)?;
+    let mut dev_output = DeviceBuffer::<u32>::zeroed(stream, output_u32_count)?;
 
     for _ in 0..WARMUP {
         unsafe {
@@ -6030,7 +6028,7 @@ fn run_correctness_test_clc_multicast_4_stage_pipeline(
     n: usize,
     k: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert!(m % 256 == 0 && n % 128 == 0 && k % 64 == 0);
+    assert!(m.is_multiple_of(256) && n.is_multiple_of(128) && k.is_multiple_of(64));
 
     println!("Matrix: {}x{}x{} (f16 -> bf16)", m, n, k);
     println!("CLC + cta_group::2 + 4-stage SMEM pipeline.");
@@ -6054,8 +6052,8 @@ fn run_correctness_test_clc_multicast_4_stage_pipeline(
     println!("A[i,k] = (i%8+1), B[n,k] = (n%8+1)");
     println!("Expected: C[i,j] = (i%8+1)*(j%8+1)*K\n");
 
-    let dev_a = DeviceBuffer::from_host(&stream, &host_a)?;
-    let dev_b = DeviceBuffer::from_host(&stream, &host_b)?;
+    let dev_a = DeviceBuffer::from_host(stream, &host_a)?;
+    let dev_b = DeviceBuffer::from_host(stream, &host_b)?;
 
     let a_ptr = dev_a.cu_deviceptr();
     let b_ptr = dev_b.cu_deviceptr();
@@ -6071,8 +6069,8 @@ fn run_correctness_test_clc_multicast_4_stage_pipeline(
         64,
     )?;
 
-    let dev_a_tma = DeviceBuffer::from_host(&stream, &a_tma.opaque)?;
-    let dev_b_tma = DeviceBuffer::from_host(&stream, &b_tma.opaque)?;
+    let dev_a_tma = DeviceBuffer::from_host(stream, &a_tma.opaque)?;
+    let dev_b_tma = DeviceBuffer::from_host(stream, &b_tma.opaque)?;
 
     let tiles_m = (m / 256) as u32;
     let tiles_n = (n / 128) as u32;
@@ -6095,7 +6093,7 @@ fn run_correctness_test_clc_multicast_4_stage_pipeline(
     println!("K-loop: {} outer iters (BK=64, 4 MMAs each)", k / 64);
 
     let output_u32_count = m * n / 2;
-    let mut dev_output = DeviceBuffer::<u32>::zeroed(&stream, output_u32_count)?;
+    let mut dev_output = DeviceBuffer::<u32>::zeroed(stream, output_u32_count)?;
 
     let a_tma_ptr = dev_a_tma.cu_deviceptr();
     let b_tma_ptr = dev_b_tma.cu_deviceptr();
@@ -6122,14 +6120,14 @@ fn run_correctness_test_clc_multicast_4_stage_pipeline(
 
     stream.synchronize()?;
 
-    let host_output: Vec<u32> = dev_output.to_host_vec(&stream)?;
+    let host_output: Vec<u32> = dev_output.to_host_vec(stream)?;
 
     let expected = |row: usize, col: usize| -> f32 { ((row % 8 + 1) * (col % 8 + 1) * k) as f32 };
     let read_c = |row: usize, col: usize| -> f32 {
         let packed_idx = row * (n / 2) + col / 2;
         let packed = host_output[packed_idx];
         let (lo, hi) = unpack_bf16_pair(packed);
-        if col % 2 == 0 { lo } else { hi }
+        if col.is_multiple_of(2) { lo } else { hi }
     };
 
     let check_positions = [
@@ -6228,10 +6226,10 @@ fn run_benchmark_clc_multicast_4_stage_pipeline(
     const WARMUP: usize = 10;
     const ITERS: usize = 100;
 
-    assert!(m % 256 == 0 && n % 128 == 0 && k % 64 == 0);
+    assert!(m.is_multiple_of(256) && n.is_multiple_of(128) && k.is_multiple_of(64));
 
-    let dev_a = DeviceBuffer::<u16>::zeroed(&stream, m * k)?;
-    let dev_b = DeviceBuffer::<u16>::zeroed(&stream, n * k)?;
+    let dev_a = DeviceBuffer::<u16>::zeroed(stream, m * k)?;
+    let dev_b = DeviceBuffer::<u16>::zeroed(stream, n * k)?;
 
     let a_ptr = dev_a.cu_deviceptr();
     let b_ptr = dev_b.cu_deviceptr();
@@ -6246,8 +6244,8 @@ fn run_benchmark_clc_multicast_4_stage_pipeline(
         64,
     )?;
 
-    let dev_a_tma = DeviceBuffer::from_host(&stream, &a_tma.opaque)?;
-    let dev_b_tma = DeviceBuffer::from_host(&stream, &b_tma.opaque)?;
+    let dev_a_tma = DeviceBuffer::from_host(stream, &a_tma.opaque)?;
+    let dev_b_tma = DeviceBuffer::from_host(stream, &b_tma.opaque)?;
     let a_tma_ptr = dev_a_tma.cu_deviceptr();
     let b_tma_ptr = dev_b_tma.cu_deviceptr();
     let a_tma_ptr = a_tma_ptr as *const TmaDescriptor;
@@ -6266,7 +6264,7 @@ fn run_benchmark_clc_multicast_4_stage_pipeline(
     };
 
     let output_u32_count = m * n / 2;
-    let mut dev_output = DeviceBuffer::<u32>::zeroed(&stream, output_u32_count)?;
+    let mut dev_output = DeviceBuffer::<u32>::zeroed(stream, output_u32_count)?;
 
     for _ in 0..WARMUP {
         unsafe {

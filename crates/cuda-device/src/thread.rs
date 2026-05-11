@@ -7,92 +7,315 @@
 //! CUDA thread intrinsics and thread-safe index types.
 //!
 //! This module provides:
-//! - `ThreadIndex`: A newtype derived from hardware built-in variables, ensuring uniqueness
+//! - `ThreadIndex<'kernel, IndexSpace>`: a typed witness derived from
+//!   hardware built-in variables, with a `'kernel` lifetime that pins it
+//!   to the kernel body
 //! - Thread intrinsics: `threadIdx_x`, `blockIdx_x`, etc.
-//! - Index helpers: `index_1d`, `index_2d` that return `ThreadIndex`
+//! - Index helpers: `index_1d`, `index_2d::<S>`, `unsafe index_2d_runtime`
+//!   that return typed `ThreadIndex` witnesses
+//! - `IndexFormula`: a marker trait for index spaces that can be derived
+//!   from the kernel scope alone (used by `DisjointSlice::get_mut_indexed`)
 //!
 //! # Safety Model
 //!
-//! The safety of parallel writes to `DisjointSlice` relies on each thread accessing
-//! a unique memory location. This is guaranteed (or, in one case, *not yet*
-//! guaranteed) as follows:
+//! The safety of parallel writes to `DisjointSlice` relies on each thread
+//! accessing a unique memory location. This is guaranteed as follows:
 //!
-//! 1. **ThreadIndex** can only be constructed by trusted functions (`index_1d`,
-//!    `index_2d`).
+//! 1. **ThreadIndex** can only be constructed by trusted functions:
+//!    `index_1d()`, `index_2d::<S>()`, and the unsafe `index_2d_runtime(s)`.
 //! 2. These functions derive the index from hardware built-in variables
 //!    (`threadIdx`, `blockIdx`, `blockDim`) -- read-only special registers
 //!    assigned by the runtime at kernel launch. The formula
 //!    `outer * stride + inner` combines these into a scalar index per thread.
 //! 3. `index_1d`: unique per thread, unconditionally
 //!    (`threadIdx.x < blockDim.x` is hardware-enforced).
-//! 4. `index_2d(row_stride)`: **currently unsound.** The `col < row_stride`
-//!    check inside `index_2d` only proves uniqueness *within a single, fixed
-//!    `row_stride`*. Nothing today ties the `row_stride` argument into the
-//!    `ThreadIndex` type, so two threads in the same kernel that pass
-//!    different `row_stride` values can produce colliding `ThreadIndex`
-//!    values in entirely safe code. Treat `index_2d` as if it were
-//!    `unsafe fn` until the principled fix lands: pin `row_stride` to one
-//!    binding per kernel and pass that binding to every `index_2d` call.
-//!    The fix in flight encodes stride into the witness type
-//!    (`index_2d::<S>() -> ThreadIndex<S>`) and makes the witness
-//!    non-transferable across threads; both pieces will land together to
-//!    keep the API churn to a single change.
+//! 4. `index_2d::<S>()`: unique per thread for const-stride 2D grids.
+//!    The stride lives in the witness type, and `DisjointSlice` only
+//!    accepts indices from the matching index space -- mismatched
+//!    strides are a compile error.
+//! 5. `unsafe index_2d_runtime(s)`: caller asserts every thread used the
+//!    same `s`. The type system can't prove uniformity for runtime
+//!    strides; the `unsafe` keyword is the contract.
+//! 6. The witness is `!Send + !Sync + !Copy + !Clone` and `'kernel`-scoped,
+//!    so threads can't launder it through shared memory and it can't
+//!    outlive the kernel body.
+
+use core::fmt;
+use core::marker::PhantomData;
 
 // =============================================================================
 // ThreadIndex - Type-Safe Thread-Unique Index
 // =============================================================================
 
+/// Type-level index space for the standard 1D index formula.
+pub enum Index1D {}
+
+/// Type-level index space for a 2D row-major index with a const row stride.
+pub enum Index2D<const ROW_STRIDE: usize> {}
+
+/// Index spaces whose `ThreadIndex` can be derived from the kernel scope alone.
+///
+/// `Index1D` and `Index2D<S>` impl this — their formulas take no runtime
+/// inputs. [`Runtime2DIndex`] does **not** impl this, because the row stride
+/// is a runtime value the type system can't see; reach for the unsafe
+/// [`index_2d_runtime`] when you need a runtime stride.
+///
+/// Used by [`DisjointSlice::get_mut_indexed`] to mint the per-thread index
+/// in the same call that resolves it to a mutable reference.
+pub trait IndexFormula: Sized {
+    #[doc(hidden)]
+    fn from_scope<'kernel>(
+        scope: &'kernel KernelScope<'kernel>,
+    ) -> Option<ThreadIndex<'kernel, Self>>;
+}
+
+impl IndexFormula for Index1D {
+    #[inline(always)]
+    fn from_scope<'kernel>(
+        scope: &'kernel KernelScope<'kernel>,
+    ) -> Option<ThreadIndex<'kernel, Self>> {
+        Some(__internal::index_1d(scope))
+    }
+}
+
+impl<const ROW_STRIDE: usize> IndexFormula for Index2D<ROW_STRIDE> {
+    #[inline(always)]
+    fn from_scope<'kernel>(
+        scope: &'kernel KernelScope<'kernel>,
+    ) -> Option<ThreadIndex<'kernel, Self>> {
+        __internal::index_2d::<ROW_STRIDE>(scope)
+    }
+}
+
+/// Type-level index space for manually audited runtime-stride 2D indexing.
+///
+/// Two `ThreadIndex<'_, Runtime2DIndex>` values produced under different runtime
+/// strides have the same type, so the type system can't tell them apart. The
+/// `unsafe` on [`index_2d_runtime`] is the only thing keeping callers honest:
+/// every thread in the kernel that feeds a `Runtime2DIndex` into the same
+/// `DisjointSlice` must have used the same `row_stride`. If you can pin the
+/// stride at compile time, prefer [`index_2d`] — the const-generic version
+/// makes a stride mismatch a type error instead of a contract.
+pub enum Runtime2DIndex {}
+
+/// Stack-local witness produced by `make_kernel_scope` and consumed by
+/// `__internal::index_*`. The `'kernel` lifetime tags every `ThreadIndex`
+/// minted from it. Hidden from public docs because users never name this
+/// type — the macros inject it.
+#[doc(hidden)]
+pub struct KernelScope<'kernel> {
+    _kernel: PhantomData<fn(&'kernel mut ()) -> &'kernel mut ()>,
+    _not_send_sync: PhantomData<*mut ()>,
+}
+
+impl<'kernel> KernelScope<'kernel> {
+    #[inline(always)]
+    unsafe fn new() -> Self {
+        KernelScope {
+            _kernel: PhantomData,
+            _not_send_sync: PhantomData,
+        }
+    }
+}
+
 /// A thread-unique index derived from hardware built-in variables (special registers).
 ///
-/// `ThreadIndex` cannot be constructed directly. The intended invariant is
-/// that the contained `usize` is unique per thread, making it safe to use
-/// for parallel writes to `DisjointSlice`. That invariant holds
-/// unconditionally for `index_1d`. For `index_2d`, see the unsoundness
-/// note on that function -- the witness type does not yet carry the
-/// stride, so `index_2d`'s uniqueness is conditional on every call site
-/// in the kernel passing the same `row_stride`.
+/// `ThreadIndex` cannot be constructed directly. The contained `usize` is
+/// unique per thread, which is what makes parallel writes to `DisjointSlice`
+/// race-free without synchronisation.
+///
+/// The index-space parameter ties each witness to the indexing scheme that
+/// created it. A `DisjointSlice<T, Index2D<128>>` won't accept a
+/// `ThreadIndex<'_, Index2D<256>>`, so mixing 2D strides is rejected at
+/// compile time.
+///
+/// `ThreadIndex` is intentionally `!Send`, `!Sync`, `!Copy`, and `!Clone`,
+/// so safe code can't duplicate a witness or smuggle one to a different
+/// thread. The `'kernel` lifetime is borrowed from a stack-local scope the
+/// proc macros inject; it can't outlive the kernel body.
 ///
 /// # Construction
 ///
 /// `ThreadIndex` cannot be constructed directly. Use one of the trusted
 /// functions:
-/// - [`index_1d()`] - For 1D grids (sound)
-/// - [`index_2d()`] - For 2D grids (e.g., GEMM); **currently unsound**,
-///   see its docs
+/// - [`index_1d()`] — for 1D grids
+/// - [`index_2d()`] — for const-stride 2D grids
+/// - [`index_2d_runtime()`] — unsafe runtime-stride escape hatch
+///
+/// # Where you can call them
+///
+/// The `'kernel` scope only exists inside `#[kernel]` and `#[device]`
+/// bodies, which has two practical consequences:
+///
+/// - **Plain `fn` device helpers (no annotation)** can't acquire a
+///   `ThreadIndex`. The public `thread::index_*` items are `unreachable!`
+///   stubs — they compile and import fine, but calling one outside an
+///   annotated body panics on first call. The macros rewrite real
+///   call sites to `thread::__internal::*`, which is what actually runs
+///   on the device. If a helper needs an index, take it as a parameter.
+/// - **`#[device]` fns** *can* call `thread::index_*`, but they can't
+///   return the resulting `ThreadIndex` — `'kernel` is borrowed from the
+///   helper's local scope and dies at function exit. Use the witness
+///   inside the helper. (`#[device]` is mainly for FFI exports via
+///   LTOIR, where this restriction doesn't bite.)
+///
+/// # Reserved names inside `#[kernel]` and `#[device]`
+///
+/// The macros rewrite a small set of names inside annotated bodies so
+/// the user never has to thread the kernel scope through by hand:
+///
+/// - free functions: `index_1d`, `index_2d`, `index_2d_runtime`
+/// - methods (zero-arg call sites): `get_mut_indexed`
+///
+/// Free-function calls are matched on path tail, so all of these resolve
+/// to the same intrinsic:
+///
+/// ```rust,ignore
+/// thread::index_1d()
+/// cuda_device::thread::index_1d()
+/// use cuda_device::thread::index_1d;  index_1d()
+/// use cuda_device::thread::index_1d as get_idx;  get_idx() // not rewritten — alias
+/// ```
+///
+/// Method calls are matched on the method name only — `slice.get_mut_indexed()`
+/// has the kernel scope spliced in as the (currently invisible)
+/// `&KernelScope` argument the method actually takes.
+///
+/// The trade-off: if you define a local `fn index_1d` (or any of the
+/// other reserved names) and call it from inside `#[kernel]` or
+/// `#[device]`, the macro will silently rewrite that call too. Pick a
+/// different name (e.g. `compute_index_1d`, `pop_indexed`) for any
+/// helper you want to keep.
 ///
 /// # Example
 ///
-/// ```rust
-/// use cuda_device::thread::{index_1d, ThreadIndex};
-/// use cuda_device::DisjointSlice;
+/// ```rust,ignore
+/// use cuda_device::{DisjointSlice, kernel, thread};
 ///
 /// #[kernel]
 /// fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
-///     let idx = index_1d();
+///     let idx = thread::index_1d();
+///     let i = idx.get();
 ///     if let Some(c_elem) = c.get_mut(idx) {
-///         *c_elem = a[idx.get()] + b[idx.get()];
+///         *c_elem = a[i] + b[i];
 ///     }
 /// }
 /// ```
-#[derive(Clone, Copy, Debug)]
-#[repr(transparent)]
-pub struct ThreadIndex(usize);
+pub struct ThreadIndex<'kernel, IndexSpace = Index1D> {
+    raw: usize,
+    _kernel: PhantomData<fn(&'kernel mut ()) -> &'kernel mut ()>,
+    _space: PhantomData<fn() -> IndexSpace>,
+    _not_send_sync: PhantomData<*mut ()>,
+}
 
-impl ThreadIndex {
+impl<'kernel, IndexSpace> ThreadIndex<'kernel, IndexSpace> {
+    #[inline(always)]
+    unsafe fn new(raw: usize, _scope: &'kernel KernelScope<'kernel>) -> Self {
+        ThreadIndex {
+            raw,
+            _kernel: PhantomData,
+            _space: PhantomData,
+            _not_send_sync: PhantomData,
+        }
+    }
+
     /// Get the raw index value.
     ///
     /// Use this when you need the index for array indexing on regular slices.
     #[inline(always)]
-    pub fn get(self) -> usize {
-        self.0
+    pub fn get(&self) -> usize {
+        self.raw
     }
 
     /// Check if this index is less than a bound.
     ///
     /// Convenience method for bounds checking.
     #[inline(always)]
-    pub fn in_bounds(self, len: usize) -> bool {
-        self.0 < len
+    pub fn in_bounds(&self, len: usize) -> bool {
+        self.raw < len
+    }
+}
+
+impl<'kernel, IndexSpace> fmt::Debug for ThreadIndex<'kernel, IndexSpace> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("ThreadIndex").field(&self.raw).finish()
+    }
+}
+
+#[doc(hidden)]
+pub mod __internal {
+    use super::{Index1D, Index2D, KernelScope, Runtime2DIndex, ThreadIndex};
+
+    /// Mints a fresh `KernelScope` whose `'kernel` lifetime backs every
+    /// `ThreadIndex` produced inside this kernel/device body.
+    ///
+    /// # Safety
+    ///
+    /// Only the `#[kernel]` and `#[device]` proc macros may call this. They
+    /// inject exactly one call at the top of the rewritten function body and
+    /// bind the result to a stack local, so the lifetime can't escape.
+    /// Calling it anywhere else lets the caller forge `ThreadIndex` values
+    /// via `__internal::index_*`, which breaks the entire safety story.
+    ///
+    /// # Call-context consequences
+    ///
+    /// The "only macros call this" rule shapes where `thread::index_*` is
+    /// usable:
+    ///
+    /// - **Plain `fn` device helpers (no annotation)** can't acquire a
+    ///   `ThreadIndex`. The public `thread::index_*` items resolve fine
+    ///   (they're `unreachable!` stubs), so the call compiles, but
+    ///   without the macro rewriting it to the `__internal::*` form
+    ///   the stub body executes and panics on first call.
+    /// - **`#[device]` fns** *can* call `thread::index_*`, but the returned
+    ///   `ThreadIndex<'kernel, _>` borrows from the helper's local scope —
+    ///   you can use it inside the helper, you can't return it out.
+    ///   `#[device]` is mainly for FFI exports via LTOIR, where this
+    ///   doesn't bite in practice.
+    #[inline(always)]
+    pub unsafe fn make_kernel_scope<'kernel>() -> KernelScope<'kernel> {
+        unsafe { KernelScope::new() }
+    }
+
+    #[inline(always)]
+    pub fn index_1d<'kernel>(
+        scope: &'kernel KernelScope<'kernel>,
+    ) -> ThreadIndex<'kernel, Index1D> {
+        let tid = super::threadIdx_x() as usize;
+        let bid = super::blockIdx_x() as usize;
+        let bdim = super::blockDim_x() as usize;
+        unsafe { ThreadIndex::new(bid * bdim + tid, scope) }
+    }
+
+    #[inline(always)]
+    pub fn index_2d<'kernel, const ROW_STRIDE: usize>(
+        scope: &'kernel KernelScope<'kernel>,
+    ) -> Option<ThreadIndex<'kernel, Index2D<ROW_STRIDE>>> {
+        let row = (super::blockIdx_y() as usize) * (super::blockDim_y() as usize)
+            + (super::threadIdx_y() as usize);
+        let col = (super::blockIdx_x() as usize) * (super::blockDim_x() as usize)
+            + (super::threadIdx_x() as usize);
+        if col < ROW_STRIDE {
+            Some(unsafe { ThreadIndex::new(row * ROW_STRIDE + col, scope) })
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn index_2d_runtime<'kernel>(
+        scope: &'kernel KernelScope<'kernel>,
+        row_stride: usize,
+    ) -> Option<ThreadIndex<'kernel, Runtime2DIndex>> {
+        let row = (super::blockIdx_y() as usize) * (super::blockDim_y() as usize)
+            + (super::threadIdx_y() as usize);
+        let col = (super::blockIdx_x() as usize) * (super::blockDim_x() as usize)
+            + (super::threadIdx_x() as usize);
+        if col < row_stride {
+            Some(unsafe { ThreadIndex::new(row * row_stride + col, scope) })
+        } else {
+            None
+        }
     }
 }
 
@@ -118,65 +341,51 @@ impl ThreadIndex {
 ///
 /// ```rust
 /// let idx = index_1d();
+/// let i = idx.get();
 /// if let Some(c_elem) = c.get_mut(idx) {
-///     *c_elem = a[idx.get()] + b[idx.get()];
+///     *c_elem = a[i] + b[i];
 /// }
 /// ```
+///
+/// # Stub body
+///
+/// Calls inside `#[kernel]` / `#[device]` are rewritten by the macros
+/// to the real intrinsic path (`thread::__internal::index_1d`). The
+/// public function exists only so imports and aliases resolve cleanly;
+/// invoking it directly from host code panics.
 #[inline(always)]
-pub fn index_1d() -> ThreadIndex {
-    let tid = threadIdx_x();
-    let bid = blockIdx_x();
-    let bdim = blockDim_x();
-    // SAFETY: bid, bdim, tid are hardware built-in variables (read-only special registers).
-    // The formula `bid * bdim + tid` produces unique indices because tid < bdim is
-    // guaranteed by the hardware.
-    ThreadIndex((bid * bdim + tid) as usize)
+pub fn index_1d<'kernel>() -> ThreadIndex<'kernel> {
+    unreachable!(
+        "thread::index_1d called outside #[kernel] / #[device] — the macro rewrites real call sites; the public item is a stub"
+    )
 }
 
 // =============================================================================
 // 2D Index Helper
 // =============================================================================
 
-/// Get the global 2D thread index, linearized to 1D.
+/// Get the global 2D thread index for a const row stride, linearized to 1D.
 ///
-/// Returns `Some(ThreadIndex)` when `col < row_stride`, `None` otherwise.
+/// Returns `Some(ThreadIndex)` when `col < ROW_STRIDE`, `None` otherwise.
 ///
-/// Computes: `row * row_stride + col`
+/// Computes: `row * ROW_STRIDE + col`
 ///
 /// Where:
 /// - `row = blockIdx.y * blockDim.y + threadIdx.y`
 /// - `col = blockIdx.x * blockDim.x + threadIdx.x`
 ///
-/// # ⚠️ Currently unsound -- read this before using
+/// # Why the stride is const-generic
 ///
-/// Despite the `Option<ThreadIndex>` signature, this function does **not**
-/// guarantee a unique `ThreadIndex` per thread today. The internal
-/// `col < row_stride` check only proves uniqueness within a single, fixed
-/// `row_stride`. Nothing ties the `row_stride` argument into the
-/// `ThreadIndex` type, so two threads in the same kernel that pass
-/// **different** `row_stride` values can produce the same linear index
-/// and alias the same element of a `DisjointSlice` -- a data race in
-/// otherwise safe code.
+/// The row stride is part of the returned witness type:
+/// `ThreadIndex<Index2D<ROW_STRIDE>>`. A `DisjointSlice` in a different domain
+/// will not accept it, so accidentally mixing `index_2d::<100>()` and
+/// `index_2d::<200>()` for the same output is a compile-time error.
 ///
-/// Concrete failure: a thread at `(row=1, col=0)` with `row_stride=200`
-/// and a thread at `(row=2, col=0)` with `row_stride=100` both compute
-/// the linear index `200`.
+/// # Uniqueness Guarantee
 ///
-/// We have not migrated this to `unsafe fn` because the principled fix
-/// changes the API surface: stride moves into a type parameter
-/// (`index_2d::<S>() -> ThreadIndex<S>`), and the witness becomes
-/// non-transferable across threads (`!Send` + a kernel-scoped lifetime)
-/// so it cannot be laundered through shared memory either. Both pieces
-/// will land together. Until then, treat `index_2d` the way you would an
-/// `unsafe fn`: pin `row_stride` to one binding per kernel and pass that
-/// binding to every call site.
-///
-/// # Uniqueness Guarantee (within a single `row_stride`)
-///
-/// Conditional on every thread in the kernel passing the same
-/// `row_stride`: the formula `row * stride + col` is injective when
-/// `col < stride`. The internal check returns `None` for threads where
-/// `col >= row_stride`, so the surviving `ThreadIndex` values are unique.
+/// The formula `row * ROW_STRIDE + col` is injective when
+/// `col < ROW_STRIDE`. The internal check returns `None` for threads where
+/// `col >= ROW_STRIDE`, so the surviving `ThreadIndex` values are unique.
 ///
 /// **Proof sketch (within one stride):** Two threads with distinct
 /// `(row_a, col_a)` and `(row_b, col_b)` where both `col_a < stride` and
@@ -194,19 +403,17 @@ pub fn index_1d() -> ThreadIndex {
 ///
 /// # Parameters
 ///
-/// - `row_stride`: The stride for row-major layout (typically the number
-///   of columns `N`). Must be the same value at every call site in the
-///   kernel; see the unsoundness note above.
+/// - `ROW_STRIDE`: The stride for row-major layout (typically the number
+///   of columns `N`).
 ///
 /// # Example
 ///
 /// ```rust
 /// // GEMM: C[row, col] = ...
-/// let n = n as usize;            // ONE binding, ONE stride value
 /// let row = index_2d_row();
 /// let col = index_2d_col();
-/// if let Some(c_idx) = index_2d(n) {
-///     // col < n is guaranteed by Some
+/// if let Some(c_idx) = index_2d::<1024>() {
+///     // col < 1024 is guaranteed by Some
 ///     if row < m {
 ///         if let Some(c_elem) = c.get_mut(c_idx) {
 ///             *c_elem = ...;
@@ -214,15 +421,43 @@ pub fn index_1d() -> ThreadIndex {
 ///     }
 /// }
 /// ```
+///
+/// # Stub body
+///
+/// Calls inside `#[kernel]` / `#[device]` are rewritten by the macros
+/// to the real intrinsic path (`thread::__internal::index_2d::<ROW_STRIDE>`).
+/// The public function exists only so imports and aliases resolve
+/// cleanly; invoking it directly from host code panics.
 #[inline(always)]
-pub fn index_2d(row_stride: usize) -> Option<ThreadIndex> {
-    let row = (blockIdx_y() * blockDim_y() + threadIdx_y()) as usize;
-    let col = (blockIdx_x() * blockDim_x() + threadIdx_x()) as usize;
-    if col < row_stride {
-        Some(ThreadIndex(row * row_stride + col))
-    } else {
-        None
-    }
+pub fn index_2d<'kernel, const ROW_STRIDE: usize>()
+-> Option<ThreadIndex<'kernel, Index2D<ROW_STRIDE>>> {
+    unreachable!(
+        "thread::index_2d called outside #[kernel] / #[device] — the macro rewrites real call sites; the public item is a stub"
+    )
+}
+
+/// Runtime-stride 2D indexing escape hatch.
+///
+/// # Safety
+///
+/// Every thread in the kernel that uses the resulting index with the same
+/// `DisjointSlice<T, Runtime2DIndex>` must pass the same `row_stride`. Mixing
+/// runtime strides can create colliding indices and data races.
+///
+/// # Stub body
+///
+/// Calls inside `#[kernel]` / `#[device]` are rewritten by the macros
+/// to the real intrinsic path (`thread::__internal::index_2d_runtime`).
+/// The public function exists only so imports and aliases resolve
+/// cleanly; invoking it directly from host code panics.
+#[inline(always)]
+pub unsafe fn index_2d_runtime<'kernel>(
+    row_stride: usize,
+) -> Option<ThreadIndex<'kernel, Runtime2DIndex>> {
+    let _ = row_stride;
+    unreachable!(
+        "thread::index_2d_runtime called outside #[kernel] / #[device] — the macro rewrites real call sites; the public item is a stub"
+    )
 }
 
 /// Get the row component of a 2D thread index.
@@ -238,7 +473,7 @@ pub fn index_2d_row() -> usize {
 /// Computes: `blockIdx.x * blockDim.x + threadIdx.x`
 #[inline(always)]
 pub fn index_2d_col() -> usize {
-    (blockIdx_x() * blockDim_x() + threadIdx_x()) as usize
+    (blockIdx_x() as usize) * (blockDim_x() as usize) + (threadIdx_x() as usize)
 }
 
 // =============================================================================

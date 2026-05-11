@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#![allow(clippy::needless_range_loop)]
+
 //! Unified Warp Reduction Example
 //!
 //! Demonstrates warp-level primitives: shuffle_xor, shuffle_down, shuffle (broadcast).

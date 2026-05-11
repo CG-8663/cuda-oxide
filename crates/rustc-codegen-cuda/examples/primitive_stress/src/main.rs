@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// Stress fixtures: `a / a` and `a - a` are the test inputs, and the
+// 15-digit hex literal is shaped that way deliberately.
+#![allow(clippy::eq_op, clippy::unusual_byte_groupings)]
 #![feature(core_float_math)]
 
 //! Primitive scalar stress test.
@@ -577,7 +580,7 @@ fn ulp_distance(a_bits: u64, b_bits: u64, width: u32) -> u64 {
     };
     let am = map_to_monotonic(a, sign_mask, body_mask);
     let bm = map_to_monotonic(b, sign_mask, body_mask);
-    if am > bm { am - bm } else { bm - am }
+    am.abs_diff(bm)
 }
 
 /// Like `check_slice` but treats each entry as IEEE-754 bits and accepts up

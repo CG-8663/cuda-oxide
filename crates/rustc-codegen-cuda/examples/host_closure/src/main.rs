@@ -42,8 +42,9 @@ mod kernels {
     #[kernel]
     pub fn map<T: Copy, F: Fn(T) -> T + Copy>(f: F, input: &[T], mut out: DisjointSlice<T>) {
         let idx = thread::index_1d();
+        let idx_raw = idx.get();
         if let Some(out_elem) = out.get_mut(idx) {
-            *out_elem = f(input[idx.get()]);
+            *out_elem = f(input[idx_raw]);
         }
     }
 }

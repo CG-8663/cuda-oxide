@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#![allow(clippy::approx_constant)]
+
 //! GPU Printf Test
 //!
 //! Tests the `gpu_printf!` macro for formatted output from GPU kernels.
@@ -53,7 +55,7 @@ mod kernels {
         let tid = thread::index_1d().get();
 
         if tid == 0 {
-            let pi: f32 = 3.14159265;
+            let pi: f32 = 3.141_592_7;
             let e: f64 = 2.718281828;
             let large: f64 = 1234567.89;
             let small: f64 = 0.000123;

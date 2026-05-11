@@ -20,13 +20,13 @@ Marks a function as a CUDA kernel. Generates:
 > is enforced at expansion time so the error points at the offending source line.
 
 ```rust
-use cuda_device::{kernel, thread, DisjointSlice};
+use cuda_device::{kernel, DisjointSlice};
 
 #[kernel]
 pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
-    let idx = thread::index_1d();
-    if let Some(c_elem) = c.get_mut(idx) {
-        *c_elem = a[idx.get()] + b[idx.get()];
+    if let Some((c_elem, idx)) = c.get_mut_indexed() {
+        let i = idx.get();
+        *c_elem = a[i] + b[i];
     }
 }
 ```
@@ -175,6 +175,21 @@ let op = cuda_launch_async! {
     config: LaunchConfig::for_num_elems(N as u32),
     args: [slice(a_dev), slice(b_dev), slice_mut(c_dev)]
 };
+```
+
+This is a lower-level API. Prefer `#[cuda_module]`'s borrowed async methods for
+stack-local use and owned async methods for spawned tasks:
+
+```text
+raw pointer async:
+  op stores only a device address
+  owner can be dropped before op runs
+
+typed borrowed async:
+  op borrows buffers until completion
+
+typed owned async:
+  op owns buffers and returns them after completion
 ```
 
 ## `gpu_printf!` -- Device-Side Printf

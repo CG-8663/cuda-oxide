@@ -50,18 +50,20 @@ pub fn gpu_printf(input: TokenStream) -> TokenStream {
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use reserved_oxide_symbols::{
-    DEVICE_EXTERN_PREFIX, DEVICE_PREFIX, INSTANTIATE_PREFIX, KERNEL_PREFIX, RESERVED_ROOT,
-    kernel_symbol,
+    DEVICE_EXTERN_PREFIX, DEVICE_PREFIX, INSTANTIATE_PREFIX, KERNEL_PREFIX, KERNEL_SCOPE_LOCAL,
+    RESERVED_ROOT, kernel_symbol,
 };
 use std::collections::HashSet;
 use syn::{
-    FnArg, ForeignItem, GenericArgument, GenericParam, Ident, Item, ItemFn, ItemForeignMod,
-    ItemMod, Pat, PathArguments, Token, Type, bracketed, parenthesized,
+    Expr, ExprCall, ExprMethodCall, ExprPath, FnArg, ForeignItem, GenericArgument, GenericParam,
+    Ident, Item, ItemFn, ItemForeignMod, ItemMod, Pat, Path, PathArguments, Stmt, Token, Type,
+    bracketed, parenthesized,
     parse::{Parse, ParseStream},
-    parse_macro_input,
+    parse_macro_input, parse_quote,
     punctuated::Punctuated,
     spanned::Spanned,
     visit::Visit,
+    visit_mut::{self, VisitMut},
 };
 
 /// Reject function names that start with the reserved cuda-oxide prefix
@@ -1081,8 +1083,211 @@ fn strip_mut_from_inputs(
         .collect()
 }
 
+/// True when `path`'s *last* segment is `name`.
+///
+/// We deliberately match on the tail only, so all of these resolve to the
+/// same intrinsic:
+///
+/// ```ignore
+/// index_1d()
+/// thread::index_1d()
+/// cuda_device::thread::index_1d()
+/// ::cuda_device::thread::index_1d()
+/// ```
+///
+/// And imports/aliases work too:
+///
+/// ```ignore
+/// use cuda_device::thread::index_1d;          // bare ident → matches
+/// use cuda_device::thread::index_1d as foo;   // aliased    → won't match (path tail is `foo`)
+/// ```
+///
+/// The aliased form is intentionally not rewritten — if the user picked a
+/// new name, they get the bare-stub-panic behaviour, not silent capture.
+///
+/// Caveat: if the user defines a *local* `fn index_1d` (or any other
+/// reserved name) and calls it from inside `#[kernel]` / `#[device]`,
+/// that call gets rewritten too. See the `Reserved names` section in
+/// `ThreadIndex`'s doc-block — the convention is to pick a different
+/// name (e.g. `compute_index_1d`) for any helper you want to keep.
+fn is_thread_index_path(path: &Path, name: &str) -> bool {
+    path.segments.last().is_some_and(|seg| seg.ident == name)
+}
+
+/// Build the rewritten path that points the user's call at the
+/// `__internal::<name>` shim, preserving whatever prefix the user wrote.
+///
+/// The motivation is unused-import hygiene. If the user wrote
+/// `use cuda_device::thread;` and called `thread::index_1d()`, replacing
+/// the whole call with an absolute path makes rustc see the `thread`
+/// import as unused. Instead, we splice `__internal` in front of the
+/// last segment and keep everything before it intact:
+///
+/// ```ignore
+/// thread::index_1d()                   →  thread::__internal::index_1d(&scope)
+/// cuda_device::thread::index_1d()      →  cuda_device::thread::__internal::index_1d(&scope)
+/// ::cuda_device::thread::index_1d()    →  ::cuda_device::thread::__internal::index_1d(&scope)
+/// ```
+///
+/// Bare-ident calls are the only shape that can't carry a prefix, so for
+/// those we fall back to the absolute path (the user wasn't naming
+/// anything to import; see the bare-ident case in `is_thread_index_path`'s
+/// doc-comment for why we still rewrite those):
+///
+/// ```ignore
+/// index_1d()                           →  ::cuda_device::thread::__internal::index_1d(&scope)
+/// ```
+fn internal_thread_path(user_path: &Path, name: &str, arguments: syn::PathArguments) -> Path {
+    let ident = format_ident!("{}", name);
+
+    if user_path.segments.len() == 1 {
+        let mut absolute: Path = parse_quote! { ::cuda_device::thread::__internal::#ident };
+        if let Some(last) = absolute.segments.last_mut() {
+            last.arguments = arguments;
+        }
+        return absolute;
+    }
+
+    let leading_colon = user_path.leading_colon;
+    let prefix_segments: Vec<&syn::PathSegment> = user_path
+        .segments
+        .iter()
+        .take(user_path.segments.len() - 1)
+        .collect();
+    let mut rewritten: Path =
+        parse_quote! { #leading_colon #(#prefix_segments)::* :: __internal :: #ident };
+    if let Some(last) = rewritten.segments.last_mut() {
+        last.arguments = arguments;
+    }
+    rewritten
+}
+
+/// One scoped intrinsic the rewriter knows about.
+///
+/// Adding a new `thread::*` function that needs the `'kernel` scope is a
+/// one-line entry here, plus the matching public stub and `__internal::*`
+/// impl in `cuda-device`.
+struct ScopedIntrinsic {
+    /// The unqualified function name (last segment of the path we match).
+    name: &'static str,
+    /// If true, copy the call-site's turbofish onto the rewritten path
+    /// (e.g. `index_2d::<S>` → `__internal::index_2d::<S>`).
+    preserve_turbofish: bool,
+    /// If true, forward the original call arguments after the scope ref
+    /// (e.g. `index_2d_runtime(s)` → `__internal::index_2d_runtime(&scope, s)`).
+    forward_args: bool,
+}
+
+const SCOPED_INTRINSICS: &[ScopedIntrinsic] = &[
+    ScopedIntrinsic {
+        name: "index_1d",
+        preserve_turbofish: false,
+        forward_args: false,
+    },
+    ScopedIntrinsic {
+        name: "index_2d",
+        preserve_turbofish: true,
+        forward_args: false,
+    },
+    ScopedIntrinsic {
+        name: "index_2d_runtime",
+        preserve_turbofish: false,
+        forward_args: true,
+    },
+];
+
+/// Method names whose zero-arg call sites get the kernel scope spliced in
+/// as a leading `&scope` argument.
+///
+/// These are matched on the *method name only* (not the receiver type, which
+/// the macro can't see anyway). The scope is only injected when the user
+/// wrote a zero-arg call like `slice.get_mut_indexed()`; if they passed
+/// arguments themselves, we leave the call alone and let typeck decide.
+///
+/// Same caveat as `SCOPED_INTRINSICS`: a local method on an unrelated type
+/// with the same name and a zero-arg form will get the scope appended,
+/// which will cause a typeck error ("expected 0 arguments, got 1"). Pick
+/// a different name (e.g. `pop_indexed`) for any helper you want to keep.
+const SCOPED_METHODS: &[&str] = &["get_mut_indexed"];
+
+fn is_scoped_method(method: &Ident) -> bool {
+    SCOPED_METHODS.iter().any(|name| method == name)
+}
+
+struct ThreadIndexCallRewriter {
+    scope_ident: Ident,
+    rewrote_index_call: bool,
+}
+
+impl VisitMut for ThreadIndexCallRewriter {
+    fn visit_expr_mut(&mut self, expr: &mut Expr) {
+        visit_mut::visit_expr_mut(self, expr);
+
+        match expr {
+            Expr::Call(ExprCall { func, args, .. }) => {
+                let Expr::Path(ExprPath { path, .. }) = &**func else {
+                    return;
+                };
+                let Some(intrinsic) = SCOPED_INTRINSICS
+                    .iter()
+                    .find(|i| is_thread_index_path(path, i.name))
+                else {
+                    return;
+                };
+
+                let last_args = path
+                    .segments
+                    .last()
+                    .map(|seg| seg.arguments.clone())
+                    .unwrap_or(syn::PathArguments::None);
+                let path_args = if intrinsic.preserve_turbofish {
+                    last_args
+                } else {
+                    syn::PathArguments::None
+                };
+                let internal_path = internal_thread_path(path, intrinsic.name, path_args);
+                let scope_ident = &self.scope_ident;
+
+                *expr = if intrinsic.forward_args {
+                    parse_quote! { #internal_path(&#scope_ident, #args) }
+                } else {
+                    parse_quote! { #internal_path(&#scope_ident) }
+                };
+                self.rewrote_index_call = true;
+            }
+            Expr::MethodCall(ExprMethodCall { method, args, .. }) => {
+                if !is_scoped_method(method) || !args.is_empty() {
+                    return;
+                }
+                let scope_ident = &self.scope_ident;
+                args.push(parse_quote! { &#scope_ident });
+                self.rewrote_index_call = true;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn inject_thread_index_scope(input: &mut ItemFn) {
+    let scope_ident = format_ident!("{}", KERNEL_SCOPE_LOCAL);
+    let mut rewriter = ThreadIndexCallRewriter {
+        scope_ident: scope_ident.clone(),
+        rewrote_index_call: false,
+    };
+    rewriter.visit_block_mut(&mut input.block);
+
+    if rewriter.rewrote_index_call {
+        let scope_stmt: Stmt = parse_quote! {
+            let #scope_ident = unsafe { ::cuda_device::thread::__internal::make_kernel_scope() };
+        };
+        input.block.stmts.insert(0, scope_stmt);
+    }
+}
+
 /// Generate a generic kernel that will be instantiated from call sites (nvcc-style)
-fn generate_generic_kernel_no_instantiation(input: ItemFn) -> TokenStream {
+fn generate_generic_kernel_no_instantiation(mut input: ItemFn) -> TokenStream {
+    inject_thread_index_scope(&mut input);
+
     let fn_name = &input.sig.ident;
     let vis = &input.vis;
     let generics = &input.sig.generics;
@@ -1236,6 +1441,8 @@ fn _generate_dummy_binding(name: &Ident, ty: &Type) -> TokenStream2 {
 
 /// Generate a simple non-generic kernel
 fn generate_simple_kernel(mut input: ItemFn) -> TokenStream {
+    inject_thread_index_scope(&mut input);
+
     let fn_name = input.sig.ident.clone();
     let new_name = format_ident!("{}{}", KERNEL_PREFIX, fn_name);
 
@@ -1370,7 +1577,9 @@ fn generate_cuda_kernel_impl(fn_name: &Ident, ptx_name: &str, _func: &ItemFn) ->
 }
 
 /// Generate wrapper kernels for a generic kernel
-fn generate_generic_kernel(input: ItemFn, instantiate_types: Vec<Type>) -> TokenStream {
+fn generate_generic_kernel(mut input: ItemFn, instantiate_types: Vec<Type>) -> TokenStream {
+    inject_thread_index_scope(&mut input);
+
     let fn_name = &input.sig.ident;
     let vis = &input.vis;
     let generics = &input.sig.generics;
@@ -1794,6 +2003,7 @@ fn generate_device_function(mut input: ItemFn) -> TokenStream {
     if let Some(err) = reject_reserved_name(&input.sig.ident) {
         return err;
     }
+    inject_thread_index_scope(&mut input);
 
     let fn_name = input.sig.ident.clone();
     let vis = input.vis.clone();
@@ -1883,7 +2093,7 @@ fn generate_device_function(mut input: ItemFn) -> TokenStream {
 
             /// Wrapper for the device function with the original name.
             #[inline(always)]
-            #vis fn #fn_name(#(#wrapper_inputs),*) #return_type {
+            #vis fn #fn_name #generics (#(#wrapper_inputs),*) #return_type #where_clause {
                 #new_name(#(#params),*)
             }
         };

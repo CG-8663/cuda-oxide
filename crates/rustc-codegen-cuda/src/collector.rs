@@ -127,10 +127,9 @@
 //! the framework is upgraded (see metal-oxide for reference).
 
 use rustc_hir::def_id::{DefId, LOCAL_CRATE};
+use rustc_middle::mir::TerminatorKind;
 use rustc_middle::mir::mono::{CodegenUnit, MonoItem};
-use rustc_middle::mir::{Operand, Rvalue, Statement, StatementKind, TerminatorKind};
 use rustc_middle::ty::{Instance, InstanceKind, Ty, TyCtxt, TyKind, TypeVisitableExt, TypingEnv};
-use rustc_span::Span;
 use std::collections::{HashSet, VecDeque};
 
 /// Result of checking if a function should be collected for device compilation.
@@ -172,7 +171,7 @@ use reserved_oxide_symbols::{
 /// This must be kept in sync with `mir-importer/src/translator/terminator/mod.rs`
 /// which sanitizes call target names the same way.
 pub fn sanitize_ptx_name(name: &str) -> String {
-    name.replace('$', "_").replace('.', "_")
+    name.replace(['$', '.'], "_")
 }
 
 /// Compute the export name for a kernel, handling closure type parameters specially.
@@ -195,22 +194,20 @@ fn compute_kernel_export_name<'tcx>(
 ) -> String {
     // Check if any type argument is a closure
     for arg in instance.args.iter() {
-        if let Some(ty) = arg.as_type() {
-            if ty.is_closure() {
-                // Found a closure type - use source location for uniqueness
-                let closure_def_id = match ty.kind() {
-                    rustc_middle::ty::TyKind::Closure(def_id, _) => *def_id,
-                    _ => continue,
-                };
+        if let Some(ty) = arg.as_type()
+            && ty.is_closure()
+        {
+            let closure_def_id = match ty.kind() {
+                rustc_middle::ty::TyKind::Closure(def_id, _) => *def_id,
+                _ => continue,
+            };
 
-                // Get source location of closure definition
-                let span = tcx.def_span(closure_def_id);
-                let loc = tcx.sess.source_map().lookup_char_pos(span.lo());
-                let line = loc.line;
-                let col = loc.col.0;
+            let span = tcx.def_span(closure_def_id);
+            let loc = tcx.sess.source_map().lookup_char_pos(span.lo());
+            let line = loc.line;
+            let col = loc.col.0;
 
-                return format!("{}_L{}C{}", base_name, line, col);
-            }
+            return format!("{}_L{}C{}", base_name, line, col);
         }
     }
 
@@ -340,12 +337,11 @@ pub fn count_kernels_in_cgus<'tcx>(tcx: TyCtxt<'tcx>, cgus: &[CodegenUnit<'tcx>]
     let mut count = 0;
     for cgu in cgus {
         for (item, _data) in cgu.items() {
-            if let MonoItem::Fn(instance) = item {
-                if is_kernel_function(tcx, instance.def_id())
-                    && is_fully_monomorphized(tcx, *instance)
-                {
-                    count += 1;
-                }
+            if let MonoItem::Fn(instance) = item
+                && is_kernel_function(tcx, instance.def_id())
+                && is_fully_monomorphized(tcx, *instance)
+            {
+                count += 1;
             }
         }
     }
@@ -360,12 +356,11 @@ pub fn count_device_fns_in_cgus<'tcx>(tcx: TyCtxt<'tcx>, cgus: &[CodegenUnit<'tc
     let mut count = 0;
     for cgu in cgus {
         for (item, _data) in cgu.items() {
-            if let MonoItem::Fn(instance) = item {
-                if is_device_function(tcx, instance.def_id())
-                    && is_fully_monomorphized(tcx, *instance)
-                {
-                    count += 1;
-                }
+            if let MonoItem::Fn(instance) = item
+                && is_device_function(tcx, instance.def_id())
+                && is_fully_monomorphized(tcx, *instance)
+            {
+                count += 1;
             }
         }
     }
@@ -399,17 +394,6 @@ pub fn is_device_function(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
     is_device_symbol(&tcx.def_path_str(def_id))
 }
 
-fn is_shared_array_ty(tcx: TyCtxt<'_>, ty: Ty<'_>) -> bool {
-    let pointee = match ty.kind() {
-        TyKind::RawPtr(pointee, _) | TyKind::Ref(_, pointee, _) => *pointee,
-        _ => return false,
-    };
-    let TyKind::Adt(adt_def, _) = pointee.kind() else {
-        return false;
-    };
-    tcx.def_path_str(adt_def.did()).contains("SharedArray")
-}
-
 /// Checks if an Instance is fully monomorphized (no unresolved type parameters).
 ///
 /// For generic kernels like `scale<T>`, the CGU may contain both:
@@ -428,10 +412,10 @@ pub fn is_fully_monomorphized<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>)
     // For scale::<f32>, args would be [f32]
     // For scale<T> (generic), args would be [T/#0] (a type parameter)
     for arg in instance.args.iter() {
-        if let Some(ty) = arg.as_type() {
-            if ty.has_param() {
-                return false;
-            }
+        if let Some(ty) = arg.as_type()
+            && ty.has_param()
+        {
+            return false;
         }
     }
 
@@ -473,57 +457,57 @@ pub fn collect_device_functions<'tcx>(
     // Find all kernel entry points
     for cgu in cgus {
         for (item, _data) in cgu.items() {
-            if let MonoItem::Fn(instance) = item {
-                if is_kernel_function(tcx, instance.def_id()) {
-                    // Skip closures inside kernels - they are device functions, not kernels.
-                    // Closures have names like "cuda_oxide_kernel_<hash>_foo::{closure#0}" but
-                    // only "cuda_oxide_kernel_<hash>_foo" is the actual kernel entry point.
-                    let name = tcx.def_path_str(instance.def_id());
-                    if name.contains("{closure") || name.contains("::closure") {
-                        if verbose {
-                            eprintln!(
-                                "[collector] Skipping closure inside kernel (not an entry point): {}",
-                                name
-                            );
-                        }
-                        continue;
-                    }
-
-                    // Skip generic (non-monomorphized) instances.
-                    // For generic kernels like scale<T>, the CGU contains both:
-                    // - The generic definition (scale<T>) - skip this
-                    // - Concrete instantiations (scale::<f32>) - process this
-                    if !is_fully_monomorphized(tcx, *instance) {
-                        if verbose {
-                            let name = tcx.def_path_str(instance.def_id());
-                            eprintln!(
-                                "[collector] Skipping non-monomorphized kernel: {} (needs type instantiation)",
-                                name
-                            );
-                        }
-                        continue;
-                    }
-
-                    let name = tcx.def_path_str(instance.def_id());
-                    // Extract the kernel base name by stripping the reserved
-                    // `cuda_oxide_kernel_<hash>_` prefix. Cross-crate kernels look
-                    // like `kernel_lib::cuda_oxide_kernel_<hash>_scale`; the
-                    // helper handles both bare and FQDN forms uniformly.
-                    let base_name = kernel_base_name(&name)
-                        .map(str::to_string)
-                        .unwrap_or_else(|| name.rsplit("::").next().unwrap_or(&name).to_string());
-
-                    // Compute a unique export name for this kernel monomorphization.
-                    // For closures: uses source location (line/col)
-                    // For generics: uses sanitized type names (e.g., "scale__f32")
-                    let export_name = compute_kernel_export_name(tcx, *instance, &base_name);
-
+            if let MonoItem::Fn(instance) = item
+                && is_kernel_function(tcx, instance.def_id())
+            {
+                // Skip closures inside kernels - they are device functions, not kernels.
+                // Closures have names like "cuda_oxide_kernel_<hash>_foo::{closure#0}" but
+                // only "cuda_oxide_kernel_<hash>_foo" is the actual kernel entry point.
+                let name = tcx.def_path_str(instance.def_id());
+                if name.contains("{closure") || name.contains("::closure") {
                     if verbose {
-                        eprintln!("[collector] Found kernel: {} -> {}", name, export_name);
+                        eprintln!(
+                            "[collector] Skipping closure inside kernel (not an entry point): {}",
+                            name
+                        );
                     }
-
-                    collector.add_root(*instance, true, export_name);
+                    continue;
                 }
+
+                // Skip generic (non-monomorphized) instances.
+                // For generic kernels like scale<T>, the CGU contains both:
+                // - The generic definition (scale<T>) - skip this
+                // - Concrete instantiations (scale::<f32>) - process this
+                if !is_fully_monomorphized(tcx, *instance) {
+                    if verbose {
+                        let name = tcx.def_path_str(instance.def_id());
+                        eprintln!(
+                            "[collector] Skipping non-monomorphized kernel: {} (needs type instantiation)",
+                            name
+                        );
+                    }
+                    continue;
+                }
+
+                let name = tcx.def_path_str(instance.def_id());
+                // Extract the kernel base name by stripping the reserved
+                // `cuda_oxide_kernel_<hash>_` prefix. Cross-crate kernels look
+                // like `kernel_lib::cuda_oxide_kernel_<hash>_scale`; the
+                // helper handles both bare and FQDN forms uniformly.
+                let base_name = kernel_base_name(&name)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| name.rsplit("::").next().unwrap_or(&name).to_string());
+
+                // Compute a unique export name for this kernel monomorphization.
+                // For closures: uses source location (line/col)
+                // For generics: uses sanitized type names (e.g., "scale__f32")
+                let export_name = compute_kernel_export_name(tcx, *instance, &base_name);
+
+                if verbose {
+                    eprintln!("[collector] Found kernel: {} -> {}", name, export_name);
+                }
+
+                collector.add_root(*instance, true, export_name);
             }
         }
     }
@@ -534,33 +518,32 @@ pub fn collect_device_functions<'tcx>(
     if collector.worklist.is_empty() {
         for cgu in cgus {
             for (item, _data) in cgu.items() {
-                if let MonoItem::Fn(instance) = item {
-                    if is_device_function(tcx, instance.def_id())
-                        && is_fully_monomorphized(tcx, *instance)
-                    {
-                        let raw_name = tcx.def_path_str(instance.def_id());
+                if let MonoItem::Fn(instance) = item
+                    && is_device_function(tcx, instance.def_id())
+                    && is_fully_monomorphized(tcx, *instance)
+                {
+                    let raw_name = tcx.def_path_str(instance.def_id());
 
-                        // Skip closures inside device functions
-                        if raw_name.contains("{closure") || raw_name.contains("::closure") {
-                            continue;
-                        }
-
-                        // Use FQDN so the export name matches what the MIR translator
-                        // sees via `CrateDef::name()` on the call side. The lowering
-                        // layer converts `::` to `__` on both sides.
-                        let name = collector.fqdn(instance.def_id());
-                        let export_name = collector.compute_export_name(&name, *instance);
-
-                        if verbose {
-                            eprintln!(
-                                "[collector] Found standalone device function: {} -> {}",
-                                name, export_name
-                            );
-                        }
-
-                        // Add as a non-kernel root — produces .func (not .entry) in PTX
-                        collector.add_root(*instance, false, export_name);
+                    // Skip closures inside device functions
+                    if raw_name.contains("{closure") || raw_name.contains("::closure") {
+                        continue;
                     }
+
+                    // Use FQDN so the export name matches what the MIR translator
+                    // sees via `CrateDef::name()` on the call side. The lowering
+                    // layer converts `::` to `__` on both sides.
+                    let name = collector.fqdn(instance.def_id());
+                    let export_name = collector.compute_export_name(&name, *instance);
+
+                    if verbose {
+                        eprintln!(
+                            "[collector] Found standalone device function: {} -> {}",
+                            name, export_name
+                        );
+                    }
+
+                    // Add as a non-kernel root — produces .func (not .entry) in PTX
+                    collector.add_root(*instance, false, export_name);
                 }
             }
         }
@@ -590,8 +573,11 @@ struct DeviceCollector<'tcx> {
     device_externs: Vec<DeviceExternDecl>,
     /// DefIds of device externs already seen (prevents duplicates).
     seen_device_externs: HashSet<DefId>,
-    /// Warning keys already emitted (prevents repeated warnings across monomorphizations).
-    emitted_shared_memory_warnings: HashSet<String>,
+    /// Whether we've already emitted the "`DynamicSharedArray::get`
+    /// needs `shared_mem_bytes` set at launch" warning. Fired at most
+    /// once per program — the message is procedural advice about the
+    /// kernel-launch contract, not anything per-call.
+    warned_dynamic_shared_array: bool,
     /// Print progress to stderr.
     verbose: bool,
 }
@@ -606,7 +592,7 @@ impl<'tcx> DeviceCollector<'tcx> {
             result: Vec::new(),
             device_externs: Vec::new(),
             seen_device_externs: HashSet::new(),
-            emitted_shared_memory_warnings: HashSet::new(),
+            warned_dynamic_shared_array: false,
             verbose,
         }
     }
@@ -664,12 +650,9 @@ impl<'tcx> DeviceCollector<'tcx> {
                     );
                 }
 
-                // Walk all basic blocks looking for calls
-                // Pass the caller's instance so we can substitute its args into callees
+                // Walk all basic blocks looking for calls.
+                // Pass the caller's instance so we can substitute its args into callees.
                 for bb_data in mir.basic_blocks.iter() {
-                    for statement in &bb_data.statements {
-                        self.process_statement_warnings(statement);
-                    }
                     if let Some(ref terminator) = bb_data.terminator {
                         self.process_terminator(terminator, &func.instance);
                     }
@@ -696,7 +679,7 @@ impl<'tcx> DeviceCollector<'tcx> {
         // The #[link_name] attribute on the extern fn has the original name.
         // `device_extern_base_name` returns the part after DEVICE_EXTERN_PREFIX
         // and works for both bare and FQDN forms.
-        let export_name = device_extern_base_name(&full_name)
+        let export_name = device_extern_base_name(full_name)
             .map(str::to_string)
             .unwrap_or_else(|| full_name.to_string());
 
@@ -733,61 +716,6 @@ impl<'tcx> DeviceCollector<'tcx> {
         attrs.is_readonly = check("readonly");
 
         attrs
-    }
-
-    fn process_statement_warnings(&mut self, statement: &Statement<'tcx>) {
-        let StatementKind::Assign(assign) = &statement.kind else {
-            return;
-        };
-        self.process_rvalue_warnings(&assign.1, statement.source_info.span);
-    }
-
-    fn process_rvalue_warnings(&mut self, rvalue: &Rvalue<'tcx>, span: Span) {
-        match rvalue {
-            Rvalue::Use(operand)
-            | Rvalue::Repeat(operand, _)
-            | Rvalue::UnaryOp(_, operand)
-            | Rvalue::Cast(_, operand, _)
-            | Rvalue::WrapUnsafeBinder(operand, _) => {
-                self.process_operand_warnings(operand, span);
-            }
-            Rvalue::BinaryOp(_, operands) => {
-                self.process_operand_warnings(&operands.0, span);
-                self.process_operand_warnings(&operands.1, span);
-            }
-            Rvalue::Aggregate(_, operands) => {
-                for operand in operands {
-                    self.process_operand_warnings(operand, span);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn process_operand_warnings(&mut self, operand: &Operand<'tcx>, span: Span) {
-        let Operand::Constant(const_op) = operand else {
-            return;
-        };
-        let Some(static_def_id) = const_op.check_static_ptr(self.tcx) else {
-            return;
-        };
-        if is_shared_array_ty(self.tcx, const_op.ty()) {
-            let static_name = self.tcx.def_path_str(static_def_id);
-            self.warn_once(
-                "shared-array-static",
-                span,
-                format!(
-                    "`static mut {static_name}` uses `SharedArray`, which cuda-oxide lowers to per-block CUDA shared memory, not persistent device global memory"
-                ),
-            );
-        }
-    }
-
-    fn warn_once(&mut self, kind: &str, span: Span, message: String) {
-        let key = format!("{kind}:{span:?}:{message}");
-        if self.emitted_shared_memory_warnings.insert(key) {
-            self.tcx.sess.dcx().span_warn(span, message);
-        }
     }
 
     /// Process a terminator to find function calls.
@@ -833,11 +761,12 @@ impl<'tcx> DeviceCollector<'tcx> {
             && (fn_path.contains("::get")
                 || fn_path.contains("::get_raw")
                 || fn_path.contains("::offset"))
+            && !self.warned_dynamic_shared_array
         {
-            self.warn_once(
-                "dynamic-shared-array",
+            self.warned_dynamic_shared_array = true;
+            self.tcx.sess.dcx().span_warn(
                 const_op.span,
-                "`DynamicSharedArray` returns CUDA dynamic shared memory; make sure the kernel launch config provides enough `shared_mem_bytes`".to_string(),
+                "`DynamicSharedArray` returns CUDA dynamic shared memory; make sure the kernel launch config provides enough `shared_mem_bytes`",
             );
         }
 
@@ -932,43 +861,39 @@ impl<'tcx> DeviceCollector<'tcx> {
         {
             // Check if any type arg is a closure
             for arg in args.iter() {
-                if let Some(ty) = arg.as_type() {
-                    if let TyKind::Closure(closure_def_id, closure_substs) = ty.kind() {
-                        // Found a closure - add its body to the collection
-                        let typing_env = TypingEnv::fully_monomorphized();
-                        if let Some(closure_instance) = Instance::try_resolve(
-                            self.tcx,
-                            typing_env,
-                            *closure_def_id,
-                            closure_substs,
-                        )
-                        .ok()
-                        .flatten()
-                        {
-                            let mangled = self.tcx.symbol_name(closure_instance).name.to_string();
-                            if !self.seen.contains(&mangled) {
-                                let closure_name = self.fqdn(*closure_def_id);
-                                let export_name =
-                                    self.compute_export_name(&closure_name, closure_instance);
+                if let Some(ty) = arg.as_type()
+                    && let TyKind::Closure(closure_def_id, closure_substs) = ty.kind()
+                {
+                    // Found a closure - add its body to the collection
+                    let typing_env = TypingEnv::fully_monomorphized();
+                    if let Some(closure_instance) =
+                        Instance::try_resolve(self.tcx, typing_env, *closure_def_id, closure_substs)
+                            .ok()
+                            .flatten()
+                    {
+                        let mangled = self.tcx.symbol_name(closure_instance).name.to_string();
+                        if !self.seen.contains(&mangled) {
+                            let closure_name = self.fqdn(*closure_def_id);
+                            let export_name =
+                                self.compute_export_name(&closure_name, closure_instance);
 
-                                if self.verbose {
-                                    eprintln!(
-                                        "[collector] Discovered closure body (via trait call): {} -> {}",
-                                        closure_name, export_name
-                                    );
-                                }
-
-                                self.seen.insert(mangled);
-                                self.worklist.push_back(CollectedFunction {
-                                    instance: closure_instance,
-                                    is_kernel: false,
-                                    export_name,
-                                });
+                            if self.verbose {
+                                eprintln!(
+                                    "[collector] Discovered closure body (via trait call): {} -> {}",
+                                    closure_name, export_name
+                                );
                             }
+
+                            self.seen.insert(mangled);
+                            self.worklist.push_back(CollectedFunction {
+                                instance: closure_instance,
+                                is_kernel: false,
+                                export_name,
+                            });
                         }
-                        // Don't return - continue to try resolving the trait method too
-                        // (even though it may fail, we still want to try)
                     }
+                    // Don't return - continue to try resolving the trait method too
+                    // (even though it may fail, we still want to try)
                 }
             }
         }

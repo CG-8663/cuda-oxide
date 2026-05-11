@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#![allow(clippy::redundant_closure_call)]
+
 //! Unified Device Closures Example
 //!
 //! Demonstrates closure patterns in unified compilation:
@@ -76,10 +78,11 @@ mod kernels {
     #[kernel]
     pub fn test_inline_closure(mut out: DisjointSlice<u32>) {
         let idx = thread::index_1d();
+        let idx_raw = idx.get();
         if let Some(out_elem) = out.get_mut(idx) {
             // Closure defined inline - will be optimized away
             let double = |x: u32| x * 2;
-            let val = idx.get() as u32;
+            let val = idx_raw as u32;
             *out_elem = double(val);
         }
     }
@@ -90,9 +93,10 @@ mod kernels {
     #[kernel]
     pub fn scale_kernel(factor: u32, input: &[u32], mut out: DisjointSlice<u32>) {
         let idx = thread::index_1d();
+        let idx_raw = idx.get();
         if let Some(out_elem) = out.get_mut(idx) {
             // This is equivalent to: let scale = move |x| x * factor;
-            *out_elem = input[idx.get()] * factor;
+            *out_elem = input[idx_raw] * factor;
         }
     }
 
@@ -101,9 +105,10 @@ mod kernels {
     #[kernel]
     pub fn transform_kernel(offset: i32, scale: i32, input: &[i32], mut out: DisjointSlice<i32>) {
         let idx = thread::index_1d();
+        let idx_raw = idx.get();
         if let Some(out_elem) = out.get_mut(idx) {
             // Equivalent to: let transform = move |x| (x + offset) * scale;
-            let x = input[idx.get()];
+            let x = input[idx_raw];
             *out_elem = (x + offset) * scale;
         }
     }
@@ -113,10 +118,11 @@ mod kernels {
     #[kernel]
     pub fn inline_with_param(factor: u32, input: &[u32], mut out: DisjointSlice<u32>) {
         let idx = thread::index_1d();
+        let idx_raw = idx.get();
         if let Some(out_elem) = out.get_mut(idx) {
             // Closure captures 'factor' which is a kernel parameter
             let scale = |x: u32| x * factor;
-            *out_elem = scale(input[idx.get()]);
+            *out_elem = scale(input[idx_raw]);
         }
     }
 
@@ -152,9 +158,10 @@ mod kernels {
     #[kernel]
     pub fn test_closure_multi_arg(mut out: DisjointSlice<u32>) {
         let idx = thread::index_1d();
+        let idx_raw = idx.get();
         if let Some(out_elem) = out.get_mut(idx) {
             let add = |a: u32, b: u32| a + b;
-            let val = idx.get() as u32;
+            let val = idx_raw as u32;
             *out_elem = add(val, 10);
         }
     }
@@ -163,9 +170,10 @@ mod kernels {
     #[kernel]
     pub fn test_closure_fnonce(mut out: DisjointSlice<u32>) {
         let idx = thread::index_1d();
+        let idx_raw = idx.get();
         if let Some(out_elem) = out.get_mut(idx) {
             let triple = |x: u32| x * 3;
-            let val = idx.get() as u32;
+            let val = idx_raw as u32;
             *out_elem = apply_closure(triple, val);
         }
     }
@@ -186,9 +194,10 @@ mod kernels {
     #[kernel]
     pub fn test_closure_capture_fnonce(factor: u32, mut out: DisjointSlice<u32>) {
         let idx = thread::index_1d();
+        let idx_raw = idx.get();
         if let Some(out_elem) = out.get_mut(idx) {
             let scale = |x: u32| x * factor;
-            let val = idx.get() as u32;
+            let val = idx_raw as u32;
             *out_elem = apply_closure(scale, val);
         }
     }

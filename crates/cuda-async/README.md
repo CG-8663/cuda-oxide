@@ -99,3 +99,28 @@ let (a_dev, b_dev, c_dev) = tokio::spawn(op.into_future()).await??;
 
 The owned form keeps device buffers alive until the CUDA stream reaches the
 kernel completion callback, then returns those buffers as the operation output.
+
+## Buffer lifetime safety
+
+Async launches are lazy: building the operation does not enqueue GPU work. That
+makes raw pointer launches easy to misuse because a `CUdeviceptr` is just an
+integer handle with no Rust lifetime attached.
+
+```text
+raw async launch:
+  build operation from CUdeviceptr
+  drop the owning buffer
+  run operation later  -> kernel sees stale memory
+
+borrowed typed launch:
+  module.kernel_async(..., &input, &mut output)
+  Rust keeps those buffers borrowed until the operation is done
+
+owned typed launch:
+  module.kernel_async_owned(..., input, output)
+  the operation owns the buffers and can be spawned safely
+```
+
+Prefer generated `#[cuda_module]` async methods for application code. Use raw
+device pointers only when you can prove the allocation outlives every scheduled
+operation that may touch it.
