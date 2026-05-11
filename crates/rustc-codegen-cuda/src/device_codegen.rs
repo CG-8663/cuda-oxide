@@ -413,16 +413,16 @@ pub fn generate_device_code<'tcx>(
         let stable_functions: Vec<mir_importer::CollectedFunction> = functions
             .iter()
             .zip(export_names.iter())
-            .filter_map(|(func, (export_name, is_kernel))| {
+            .map(|(func, (export_name, is_kernel))| {
                 // Use rustc_internal::stable() to convert the Instance.
                 // This is the key bridge between rustc_middle and rustc_public types.
                 let stable_instance = rustc_internal::stable(func.instance);
 
-                Some(mir_importer::CollectedFunction {
+                mir_importer::CollectedFunction {
                     instance: stable_instance,
                     is_kernel: *is_kernel,
                     export_name: export_name.clone(),
-                })
+                }
             })
             .collect();
 

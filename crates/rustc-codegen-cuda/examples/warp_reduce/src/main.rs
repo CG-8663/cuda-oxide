@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// Per-lane scratch arrays are indexed by `lane_id`, not iterated.
+#![allow(clippy::needless_range_loop)]
+
 //! Unified Warp Reduction Example
 //!
 //! Demonstrates warp-level primitives: shuffle_xor, shuffle_down, shuffle (broadcast).
@@ -24,11 +27,12 @@ use cuda_host::cuda_launch;
 #[kernel]
 pub fn warp_reduce_sum(data: &[f32], mut out: DisjointSlice<f32>) {
     let gid = thread::index_1d();
+    let gid_raw = gid.get();
     let lane = warp::lane_id();
 
     // Load value (or 0 if out of bounds)
     let mut val = if gid.in_bounds(out.len() * 32) {
-        data[gid.get()]
+        data[gid_raw]
     } else {
         0.0
     };
@@ -42,7 +46,7 @@ pub fn warp_reduce_sum(data: &[f32], mut out: DisjointSlice<f32>) {
 
     // Lane 0 writes the result
     if lane == 0 {
-        let warp_idx = gid.get() / 32;
+        let warp_idx = gid_raw / 32;
         unsafe {
             *out.get_unchecked_mut(warp_idx) = val;
         }
@@ -54,10 +58,11 @@ pub fn warp_reduce_sum(data: &[f32], mut out: DisjointSlice<f32>) {
 #[kernel]
 pub fn warp_reduce_sum_down(data: &[f32], mut out: DisjointSlice<f32>) {
     let gid = thread::index_1d();
+    let gid_raw = gid.get();
     let lane = warp::lane_id();
 
     let mut val = if gid.in_bounds(out.len() * 32) {
-        data[gid.get()]
+        data[gid_raw]
     } else {
         0.0
     };
@@ -71,7 +76,7 @@ pub fn warp_reduce_sum_down(data: &[f32], mut out: DisjointSlice<f32>) {
 
     // Only lane 0 has the complete sum
     if lane == 0 {
-        let warp_idx = gid.get() / 32;
+        let warp_idx = gid_raw / 32;
         unsafe {
             *out.get_unchecked_mut(warp_idx) = val;
         }
@@ -82,9 +87,10 @@ pub fn warp_reduce_sum_down(data: &[f32], mut out: DisjointSlice<f32>) {
 #[kernel]
 pub fn warp_broadcast(data: &[f32], mut out: DisjointSlice<f32>) {
     let gid = thread::index_1d();
+    let gid_raw = gid.get();
 
     let my_val = if gid.in_bounds(out.len()) {
-        data[gid.get()]
+        data[gid_raw]
     } else {
         0.0
     };
@@ -101,12 +107,13 @@ pub fn warp_broadcast(data: &[f32], mut out: DisjointSlice<f32>) {
 #[kernel]
 pub fn test_lane_id(mut out: DisjointSlice<u32>) {
     let gid = thread::index_1d();
+    let gid_raw = gid.get();
     let lane = warp::lane_id();
 
     if gid.in_bounds(out.len()) {
         // Each thread writes its lane ID
         unsafe {
-            *out.get_unchecked_mut(gid.get()) = lane;
+            *out.get_unchecked_mut(gid_raw) = lane;
         }
     }
 }
@@ -114,7 +121,6 @@ pub fn test_lane_id(mut out: DisjointSlice<u32>) {
 // =============================================================================
 // HOST CODE
 // =============================================================================
-
 fn main() {
     println!("=== Unified Warp Reduction Example ===\n");
 

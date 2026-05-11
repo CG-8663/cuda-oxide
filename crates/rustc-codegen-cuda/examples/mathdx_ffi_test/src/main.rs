@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// Thread-local scratch is indexed by `i`; iterator form doesn't apply.
+#![allow(clippy::needless_range_loop)]
+
 //! MathDx FFI Test - cuda-oxide kernel calling MathDx (cuFFTDx, cuBLASDx) via LTOIR
 //!
 //! This example demonstrates calling NVIDIA MathDx device extension libraries
@@ -664,10 +667,10 @@ fn file_needs_rebuild(target: &Path, sources: &[&Path]) -> bool {
     }
     let target_time = target.metadata().and_then(|m| m.modified()).ok();
     for src in sources {
-        if let Ok(src_time) = src.metadata().and_then(|m| m.modified()) {
-            if target_time.map(|t| src_time > t).unwrap_or(true) {
-                return true;
-            }
+        if let Ok(src_time) = src.metadata().and_then(|m| m.modified())
+            && target_time.map(|t| src_time > t).unwrap_or(true)
+        {
+            return true;
         }
     }
     false

@@ -10,23 +10,25 @@
 //!
 //! # Intrinsic Table
 //!
-//! | Intrinsic            | NVVM Op                 | Description                |
-//! |----------------------|-------------------------|----------------------------|
-//! | `threadIdx_x/y`      | `ReadPtxSregTidX/Y`     | Thread ID within block     |
-//! | `blockIdx_x/y`       | `ReadPtxSregCtaidX/Y`   | Block ID within grid       |
-//! | `blockDim_x/y`       | `ReadPtxSregNtidX/Y`    | Block dimensions           |
-//! | `index_1d()`         | Arithmetic expansion    | Global 1D thread index     |
-//! | `index_2d_row/col()` | Arithmetic expansion    | 2D row/column indices      |
-//! | `index_2d(stride)`   | Normal function call    | Linear 2D index (returns `Option<ThreadIndex>`) |
-//! | `get_thread_local()` | `MirPtrOffsetOp`        | DisjointSlice element ptr  |
-//! | `len()`              | `MirExtractFieldOp`     | Slice length extraction    |
+//! | Intrinsic                  | NVVM Op                 | Description                                          |
+//! |----------------------------|-------------------------|------------------------------------------------------|
+//! | `threadIdx_x/y/z`          | `ReadPtxSregTidX/Y/Z`   | Thread ID within block                               |
+//! | `blockIdx_x/y/z`           | `ReadPtxSregCtaidX/Y/Z` | Block ID within grid                                 |
+//! | `blockDim_x/y/z`           | `ReadPtxSregNtidX/Y/Z`  | Block dimensions                                     |
+//! | `index_1d()`               | Arithmetic expansion    | Global 1D thread index                               |
+//! | `index_2d_row/col()`       | Arithmetic expansion    | 2D row/column indices                                |
+//! | `index_2d::<S>()`          | Normal function call    | Const-stride 2D index (returns `Option<ThreadIndex>`)|
+//! | `index_2d_runtime(s)`      | Normal function call    | Runtime-stride 2D index (caller-asserted)            |
+//! | `get_thread_local()`       | `MirPtrOffsetOp`        | DisjointSlice element ptr                            |
+//! | `len()`                    | `MirExtractFieldOp`     | Slice length extraction                              |
 //!
 //! # Index Formulas
 //!
 //! - `index_1d() = blockIdx.x * blockDim.x + threadIdx.x`
 //! - `index_2d_row() = blockIdx.y * blockDim.y + threadIdx.y`
 //! - `index_2d_col() = blockIdx.x * blockDim.x + threadIdx.x`
-//! - `index_2d(stride) = if col < stride { Some(row * stride + col) } else { None }`
+//! - `index_2d::<S>() = if col < S { Some(row * S + col) } else { None }`
+//! - `index_2d_runtime(s) = if col < s { Some(row * s + col) } else { None }`
 
 use super::super::helpers::emit_store_result_and_goto;
 use crate::error::{TranslationErr, TranslationResult};
@@ -312,9 +314,11 @@ pub fn emit_index_2d_col(
     )
 }
 
-/// Emits `index_2d(stride) = row * stride + col`
+/// Emits `row * stride + col` for `index_2d::<S>()` and `index_2d_runtime(s)`.
 ///
-/// Where `row = index_2d_row()` and `col = index_2d_col()`.
+/// Where `row = index_2d_row()` and `col = index_2d_col()`. The `stride`
+/// is the const generic for `index_2d::<S>` and the runtime arg for
+/// `index_2d_runtime`.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_index_2d(
     ctx: &mut Context,

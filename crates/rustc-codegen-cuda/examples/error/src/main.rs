@@ -22,9 +22,10 @@ use cuda_device::{DisjointSlice, kernel, thread};
 #[kernel]
 pub fn valid_f64_to_f32_kernel(a: &[f64], b: &[f64], mut c: DisjointSlice<f32>) {
     let idx = thread::index_1d();
+    let idx_raw = idx.get();
 
     if let Some(c_elem) = c.get_mut(idx) {
-        *c_elem = (a[idx.get()] + b[idx.get()]) as f32;
+        *c_elem = (a[idx_raw] + b[idx_raw]) as f32;
     }
 }
 
@@ -34,13 +35,13 @@ pub fn valid_f64_to_f32_kernel(a: &[f64], b: &[f64], mut c: DisjointSlice<f32>) 
 #[kernel]
 pub fn unsupported_format_kernel(a: &[f32], mut c: DisjointSlice<f32>) {
     let idx = thread::index_1d();
+    let idx_raw = idx.get();
 
     if let Some(c_elem) = c.get_mut(idx) {
-        let _formatted = core::format_args!("{}", a[idx.get()]);
-        *c_elem = a[idx.get()];
+        let _formatted = core::format_args!("{}", a[idx_raw]);
+        *c_elem = a[idx_raw];
     }
 }
-
 fn main() {
     println!("=== Error Test Example (Unified) ===");
     println!();

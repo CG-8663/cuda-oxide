@@ -3,6 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// TMA kernels take raw TMA-descriptor pointers from the host driver; the
+// implicit `unsafe` is in the launch contract, not the function signature.
+#![allow(clippy::not_unsafe_ptr_arg_deref, clippy::missing_safety_doc)]
+
 //! TMA Copy Example (SM90+ / Hopper+)
 //!
 //! Demonstrates TMA (Tensor Memory Accelerator) usage:
@@ -62,6 +66,7 @@ pub fn tma_copy_2d_test(
     let tid = thread::threadIdx_x();
     let block_size = thread::blockDim_x();
     let gid = thread::index_1d();
+    let gid_raw = gid.get();
 
     // Thread 0 initializes barrier with BLOCK SIZE (all threads will arrive)
     if tid == 0 {
@@ -108,7 +113,7 @@ pub fn tma_copy_2d_test(
     thread::sync_threads();
 
     // Each thread copies one element to output
-    let idx = gid.get();
+    let idx = gid_raw;
     if idx < TILE_SIZE {
         let val = unsafe { TILE[idx] };
         if let Some(out_elem) = out.get_mut(gid) {
@@ -252,9 +257,9 @@ fn run_tma_copy_test(
     );
 
     let host_input: Vec<f32> = (0..TENSOR_SIZE).map(|i| i as f32).collect();
-    let dev_tensor = DeviceBuffer::from_host(&stream, &host_input)?;
+    let dev_tensor = DeviceBuffer::from_host(stream, &host_input)?;
 
-    let mut dev_output = DeviceBuffer::<f32>::zeroed(&stream, TILE_SIZE)?;
+    let mut dev_output = DeviceBuffer::<f32>::zeroed(stream, TILE_SIZE)?;
 
     println!(
         "2. Creating TMA descriptor (tile: {}x{})",
@@ -269,14 +274,14 @@ fn run_tma_copy_test(
         TILE_HEIGHT,
     )?;
 
-    let dev_tensor_map = DeviceBuffer::from_host(&stream, &tensor_map.opaque[..])?;
+    let dev_tensor_map = DeviceBuffer::from_host(stream, &tensor_map.opaque[..])?;
 
     println!("3. Launching tma_copy_2d_test kernel...");
 
     let tile_x: i32 = 0;
     let tile_y: i32 = 0;
     let block_size = 256u32;
-    let grid_size = ((TILE_SIZE as u32) + block_size - 1) / block_size;
+    let grid_size = (TILE_SIZE as u32).div_ceil(block_size);
 
     let cfg = LaunchConfig {
         grid_dim: (grid_size, 1, 1),
@@ -298,7 +303,7 @@ fn run_tma_copy_test(
     stream.synchronize()?;
 
     println!("4. Verifying results...");
-    let host_output = dev_output.to_host_vec(&stream)?;
+    let host_output = dev_output.to_host_vec(stream)?;
 
     let mut errors = 0;
     for row in 0..TILE_HEIGHT as usize {
@@ -341,10 +346,10 @@ fn run_tma_pipeline_test(
     const PIPELINE_TILE_HEIGHT: u32 = 32;
 
     let host_input: Vec<f32> = (0..TENSOR_SIZE).map(|i| i as f32).collect();
-    let dev_tensor = DeviceBuffer::from_host(&stream, &host_input)?;
+    let dev_tensor = DeviceBuffer::from_host(stream, &host_input)?;
 
     let block_size = 256u32;
-    let mut dev_output = DeviceBuffer::<u32>::zeroed(&stream, block_size as usize)?;
+    let mut dev_output = DeviceBuffer::<u32>::zeroed(stream, block_size as usize)?;
 
     let ptr = dev_tensor.cu_deviceptr();
     let tensor_map = create_tma_descriptor(
@@ -355,7 +360,7 @@ fn run_tma_pipeline_test(
         PIPELINE_TILE_HEIGHT,
     )?;
 
-    let dev_tensor_map = DeviceBuffer::from_host(&stream, &tensor_map.opaque[..])?;
+    let dev_tensor_map = DeviceBuffer::from_host(stream, &tensor_map.opaque[..])?;
 
     println!(
         "1. Launching tma_pipeline_test kernel (tile: {}x{})...",
@@ -382,7 +387,7 @@ fn run_tma_pipeline_test(
     stream.synchronize()?;
 
     println!("2. Verifying results...");
-    let host_output = dev_output.to_host_vec(&stream)?;
+    let host_output = dev_output.to_host_vec(stream)?;
 
     let success_count = host_output.iter().filter(|&&x| x == 1).count();
     if success_count == block_size as usize {

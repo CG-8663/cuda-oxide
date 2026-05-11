@@ -1013,8 +1013,9 @@ use cuda_core::LaunchConfig;
 #[kernel]
 pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {{
     let idx = thread::index_1d();
+    let idx_raw = idx.get();
     if let Some(c_elem) = c.get_mut(idx) {{
-        *c_elem = a[idx.get()] + b[idx.get()];
+        *c_elem = a[idx_raw] + b[idx_raw];
     }}
 }}
 
@@ -1099,11 +1100,11 @@ use cuda_host::{{cuda_launch, load_kernel_module}};
 #[kernel]
 pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {{
     let idx = thread::index_1d();
+    let idx_raw = idx.get();
     if let Some(c_elem) = c.get_mut(idx) {{
-        *c_elem = a[idx.get()] + b[idx.get()];
+        *c_elem = a[idx_raw] + b[idx_raw];
     }}
 }}
-
 fn main() {{
     let ctx = CudaContext::new(0).expect("Failed to create CUDA context");
     let stream = ctx.default_stream();

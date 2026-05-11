@@ -49,10 +49,7 @@ pub fn test_option(val: u32, mut out: DisjointSlice<u32>) {
     let idx = thread::index_1d();
     if let Some(out_elem) = out.get_mut(idx) {
         let maybe: Option<u32> = if val > 0 { Some(val) } else { None };
-        let result = match maybe {
-            Some(x) => x,
-            None => 0,
-        };
+        let result = maybe.unwrap_or_default();
         *out_elem = result;
     }
 }
@@ -180,8 +177,9 @@ pub fn baseline_binary_match(flag: bool, mut out: DisjointSlice<u32>) {
 #[kernel]
 pub fn baseline_vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
     let idx = thread::index_1d();
+    let idx_raw = idx.get();
     if let Some(c_elem) = c.get_mut(idx) {
-        *c_elem = a[idx.get()] + b[idx.get()];
+        *c_elem = a[idx_raw] + b[idx_raw];
     }
 }
 
@@ -189,7 +187,12 @@ pub fn baseline_vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
 // SHARED MEMORY ADDRESS CASTING TESTS
 // =============================================================================
 
-/// Test DIRECT cast to u64 - no intermediate pointer cast
+/// Test DIRECT cast to u64 - no intermediate pointer cast.
+///
+/// # Safety
+///
+/// The kernel writes the raw address of a `static mut SharedArray` to
+/// `out`; the read of `SMEM` happens before any thread writes to it.
 #[kernel]
 pub unsafe fn test_smem_addr_direct_u64(mut out: DisjointSlice<u64>) {
     static mut SMEM: SharedArray<u8, 256, 128> = SharedArray::UNINIT;
@@ -201,7 +204,12 @@ pub unsafe fn test_smem_addr_direct_u64(mut out: DisjointSlice<u64>) {
     }
 }
 
-/// Test Via *const u8 (current approach - has cvta round-trip)
+/// Test Via *const u8 (current approach - has cvta round-trip).
+///
+/// # Safety
+///
+/// Same as `test_smem_addr_direct_u64`: pure address read of an
+/// untouched `static mut SharedArray`.
 #[kernel]
 pub unsafe fn test_smem_addr_via_ptr_u8(mut out: DisjointSlice<u64>) {
     static mut SMEM: SharedArray<u8, 256, 128> = SharedArray::UNINIT;
@@ -265,8 +273,9 @@ pub fn test_u64_shift_by_46(mut out: DisjointSlice<u64>) {
 #[kernel]
 pub fn parallel_polynomial_eval(input: &[f32], mut out: DisjointSlice<f32>) {
     let idx = thread::index_1d();
+    let idx_raw = idx.get();
     if let Some(out_elem) = out.get_mut(idx) {
-        let x = input[idx.get()];
+        let x = input[idx_raw];
         let mut result: f32 = 0.0;
         let mut power: f32 = 1.0;
         for _ in 0u32..8 {
@@ -281,8 +290,9 @@ pub fn parallel_polynomial_eval(input: &[f32], mut out: DisjointSlice<f32>) {
 #[kernel]
 pub fn parallel_chunked_sum(data: &[u32], chunk_size: u32, mut out: DisjointSlice<u32>) {
     let idx = thread::index_1d();
+    let idx_raw = idx.get();
     if let Some(out_elem) = out.get_mut(idx) {
-        let start = idx.get() as u32 * chunk_size;
+        let start = idx_raw as u32 * chunk_size;
         let end = start + chunk_size;
         let data_len = data.len() as u32;
         let mut sum: u32 = 0;
@@ -300,8 +310,9 @@ pub fn parallel_chunked_sum(data: &[u32], chunk_size: u32, mut out: DisjointSlic
 #[kernel]
 pub fn parallel_local_average(data: &[f32], radius: u32, mut out: DisjointSlice<f32>) {
     let idx = thread::index_1d();
+    let idx_raw = idx.get();
     if let Some(out_elem) = out.get_mut(idx) {
-        let pos = idx.get() as i32;
+        let pos = idx_raw as i32;
         let len = data.len() as i32;
         let r = radius as i32;
 
@@ -330,8 +341,9 @@ pub fn parallel_dot_product_chunked(
     mut out: DisjointSlice<f32>,
 ) {
     let idx = thread::index_1d();
+    let idx_raw = idx.get();
     if let Some(out_elem) = out.get_mut(idx) {
-        let start = idx.get() as u32 * chunk_size;
+        let start = idx_raw as u32 * chunk_size;
         let end = start + chunk_size;
         let len = a.len() as u32;
 
@@ -349,8 +361,9 @@ pub fn parallel_dot_product_chunked(
 #[kernel]
 pub fn parallel_row_sum(matrix: &[u32], cols: u32, mut out: DisjointSlice<u32>) {
     let idx = thread::index_1d();
+    let idx_raw = idx.get();
     if let Some(out_elem) = out.get_mut(idx) {
-        let row = idx.get() as u32;
+        let row = idx_raw as u32;
         let row_start = row * cols;
 
         let mut sum: u32 = 0;
@@ -374,8 +387,9 @@ pub fn parallel_range_count(
     mut out: DisjointSlice<u32>,
 ) {
     let idx = thread::index_1d();
+    let idx_raw = idx.get();
     if let Some(out_elem) = out.get_mut(idx) {
-        let start = idx.get() as u32 * chunk_size;
+        let start = idx_raw as u32 * chunk_size;
         let end = start + chunk_size;
         let len = data.len() as u32;
 
@@ -396,8 +410,9 @@ pub fn parallel_range_count(
 #[kernel]
 pub fn parallel_partial_product(elements_per_thread: u32, mut out: DisjointSlice<u64>) {
     let idx = thread::index_1d();
+    let idx_raw = idx.get();
     if let Some(out_elem) = out.get_mut(idx) {
-        let base = idx.get() as u64 * elements_per_thread as u64;
+        let base = idx_raw as u64 * elements_per_thread as u64;
 
         let mut product: u64 = 1;
         for i in 1u32..=elements_per_thread {
@@ -410,7 +425,6 @@ pub fn parallel_partial_product(elements_per_thread: u32, mut out: DisjointSlice
 // =============================================================================
 // HOST CODE
 // =============================================================================
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Compiler Features Test (Unified) ===\n");
 

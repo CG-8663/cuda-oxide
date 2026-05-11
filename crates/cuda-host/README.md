@@ -22,15 +22,15 @@ Host-side infrastructure for launching CUDA kernels compiled by cuda-oxide. Prov
 ### Synchronous (`cuda_launch!`)
 
 ```rust
-use cuda_device::{kernel, thread, DisjointSlice};
+use cuda_device::{kernel, DisjointSlice};
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
 use cuda_host::cuda_launch;
 
 #[kernel]
 pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
-    let idx = thread::index_1d();
-    if let Some(c_elem) = c.get_mut(idx) {
-        *c_elem = a[idx.get()] + b[idx.get()];
+    if let Some((c_elem, idx)) = c.get_mut_indexed() {
+        let i = idx.get();
+        *c_elem = a[i] + b[i];
     }
 }
 

@@ -247,7 +247,8 @@ pub fn try_insert_kernel(
     mut out: DisjointSlice<u32>,
 ) {
     let tid = thread::index_1d();
-    let i_thread = tid.get();
+    let tid_raw = tid.get();
+    let i_thread = tid_raw;
     if i_thread >= keys.len() {
         return;
     }
@@ -384,7 +385,8 @@ pub fn rehash_kernel(old_ctrl: &[u32], old_slots: &[u64], new_ctrl: &[u32], new_
 #[kernel]
 pub fn find_kernel(ctrl: &[u32], slots: &[u64], keys: &[u32], mut out: DisjointSlice<u32>) {
     let tid = thread::index_1d();
-    let i_thread = tid.get();
+    let tid_raw = tid.get();
+    let i_thread = tid_raw;
     if i_thread >= keys.len() {
         return;
     }
@@ -449,7 +451,8 @@ pub fn find_kernel(ctrl: &[u32], slots: &[u64], keys: &[u32], mut out: DisjointS
 /// Launch with `LaunchConfig::for_num_elems(keys.len() * 32)`.
 #[kernel]
 pub fn find_kernel_tile_32(ctrl: &[u32], slots: &[u64], keys: &[u32], out: DisjointSlice<u32>) {
-    find_tile_impl::<32>(ctrl, slots, keys, out);
+    let global_tid = thread::index_1d().get();
+    find_tile_impl::<32>(ctrl, slots, keys, out, global_tid);
 }
 
 /// `find_kernel_tile_16` — sub-warp find (16-lane tile per query).
@@ -469,7 +472,8 @@ pub fn find_kernel_tile_32(ctrl: &[u32], slots: &[u64], keys: &[u32], out: Disjo
 /// Launch with `LaunchConfig::for_num_elems(keys.len() * 16)`.
 #[kernel]
 pub fn find_kernel_tile_16(ctrl: &[u32], slots: &[u64], keys: &[u32], out: DisjointSlice<u32>) {
-    find_tile_impl::<16>(ctrl, slots, keys, out);
+    let global_tid = thread::index_1d().get();
+    find_tile_impl::<16>(ctrl, slots, keys, out, global_tid);
 }
 
 /// Const-generic warp-cooperative find body, parameterised over the
@@ -510,12 +514,12 @@ fn find_tile_impl<const N: u32>(
     slots: &[u64],
     keys: &[u32],
     mut out: DisjointSlice<u32>,
+    global_tid: usize,
 ) {
     let block = this_thread_block();
     let tile = block.tiled_partition::<N>();
 
     let lane = tile.thread_rank();
-    let global_tid = thread::index_1d().get();
     let tile_idx = global_tid / (N as usize);
     if tile_idx >= keys.len() {
         return;
@@ -611,7 +615,8 @@ fn find_tile_impl<const N: u32>(
 #[kernel]
 pub fn delete_kernel(ctrl: &[u32], slots: &[u64], keys: &[u32], mut out: DisjointSlice<u32>) {
     let tid = thread::index_1d();
-    let i_thread = tid.get();
+    let tid_raw = tid.get();
+    let i_thread = tid_raw;
     if i_thread >= keys.len() {
         return;
     }

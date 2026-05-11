@@ -218,46 +218,57 @@ In CUDA C++, the standard pattern for parallel output is a raw `__global__`
 pointer that every thread indexes into. This is inherently unsafe -- nothing
 prevents two threads from writing to the same location.
 
-cuda-oxide provides `DisjointSlice<T>` as a safe alternative. It wraps a mutable
-slice and only allows writes through a `ThreadIndex`, ensuring each thread
-accesses a unique element:
+cuda-oxide provides `DisjointSlice<T, IndexSpace>` as a safe alternative. It
+wraps a mutable slice and only allows writes through a `ThreadIndex` whose
+`IndexSpace` matches its own, ensuring each thread accesses a unique element:
 
 ```rust
-use cuda_device::{kernel, thread, DisjointSlice};
+use cuda_device::{kernel, DisjointSlice};
 
 #[kernel]
 pub fn double(input: &[f32], mut out: DisjointSlice<f32>) {
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
+    if let Some((out_elem, idx)) = out.get_mut_indexed() {
         *out_elem = input[idx.get()] * 2.0;
     }
 }
 ```
 
-- `get_mut(idx)` returns `Option<&mut T>` -- `None` for out-of-bounds indices,
-  eliminating buffer overruns.
-- For patterns like reductions where multiple threads intentionally write to the
-  same location, `get_unchecked_mut` (unsafe) provides an escape hatch.
+- `get_mut_indexed()` is the one-call form: it mints the per-thread witness
+  and resolves it to a `&mut T` in a single shot. `None` covers both
+  out-of-grid threads (e.g. `col >= ROW_STRIDE` for 2D) and out-of-slice
+  indices.
+- The explicit two-step form `let idx = thread::index_1d(); out.get_mut(idx)`
+  is also available when you need the index for parallel arithmetic across
+  multiple slices.
+- For patterns like reductions where multiple threads intentionally write
+  to the same location, `get_unchecked_mut` (unsafe) provides an escape
+  hatch.
 
 ### Why `ThreadIndex` makes this safe
 
-The key to `DisjointSlice`'s safety is `ThreadIndex` -- a **newtype** around
-`usize` that can only be constructed from hardware-provided thread identifiers
-like `thread::index_1d()`. You cannot create a `ThreadIndex` from an arbitrary
-integer:
+The key to `DisjointSlice`'s safety is `ThreadIndex<'kernel, IndexSpace>` --
+an opaque witness with no public constructor. The only way to obtain one
+is through trusted index functions that derive the value from hardware
+built-in variables (`threadIdx`, `blockIdx`, `blockDim`):
 
 ```rust
-let idx = thread::index_1d();          // ThreadIndex -- ok
-let bad = ThreadIndex::new(42);        // does not exist -- no public constructor
+let idx = thread::index_1d();          // ThreadIndex<'_, Index1D> -- ok
+let bad = ThreadIndex::new(42);        // does not exist -- private constructor
 ```
 
 This works because CUDA's thread indices are **uniform values provided by the
 hardware**: every thread in a block receives a unique `threadIdx` from the GPU's
 warp scheduler. For 1D grid launches (where only the x dimension is used), the
 global index derived from `blockIdx.x * blockDim.x + threadIdx.x` is unique
-across the entire grid. By restricting `get_mut` to accept only `ThreadIndex`,
-the type system enforces at compile time that each thread can only write to its
-own element -- turning a data-race hazard into a type error.
+across the entire grid.
+
+The witness is also `!Send + !Sync + !Copy + !Clone`, and its `'kernel`
+lifetime is borrowed from a stack-local scope the macros inject -- so a
+thread can't park its `ThreadIndex` in shared memory for a neighbour to
+pick up later, and the witness can't outlive the kernel body. Combine
+that with the `IndexSpace` parameter (`Index1D`, `Index2D<S>`,
+`Runtime2DIndex`) and the type system rejects mismatched 2D strides at
+compile time too -- a data-race hazard becomes a type error.
 
 ## Shared memory
 

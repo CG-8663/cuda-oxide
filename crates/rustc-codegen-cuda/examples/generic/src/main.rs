@@ -37,8 +37,9 @@ use std::ops::{Add, Mul};
 #[kernel]
 pub fn scale<T: Copy + Mul<Output = T>>(factor: T, input: &[T], mut out: DisjointSlice<T>) {
     let idx = thread::index_1d();
+    let idx_raw = idx.get();
     if let Some(out_elem) = out.get_mut(idx) {
-        *out_elem = input[idx.get()] * factor;
+        *out_elem = input[idx_raw] * factor;
     }
 }
 
@@ -46,8 +47,9 @@ pub fn scale<T: Copy + Mul<Output = T>>(factor: T, input: &[T], mut out: Disjoin
 #[kernel]
 pub fn add<T: Copy + Add<Output = T>>(a: &[T], b: &[T], mut c: DisjointSlice<T>) {
     let idx = thread::index_1d();
+    let idx_raw = idx.get();
     if let Some(c_elem) = c.get_mut(idx) {
-        *c_elem = a[idx.get()] + b[idx.get()];
+        *c_elem = a[idx_raw] + b[idx_raw];
     }
 }
 
@@ -60,7 +62,6 @@ pub fn add<T: Copy + Add<Output = T>>(a: &[T], b: &[T], mut c: DisjointSlice<T>)
 // rustc to generate the monomorphized version.
 
 use cuda_host::cuda_launch;
-
 fn main() {
     println!("=== Unified Generic Kernel Test ===\n");
 

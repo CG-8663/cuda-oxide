@@ -3,6 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// HMM kernels take raw `*mut T` from the host so the GPU can dereference
+// pageable host memory; the implicit `unsafe` is in the launch contract.
+#![allow(clippy::not_unsafe_ptr_arg_deref, clippy::missing_safety_doc)]
+
 //! Unified ABI + HMM Test Example
 //!
 //! This example replicates the nvc++ test from rustc-codegen-cuda-plan.md:
@@ -69,14 +73,15 @@ pub struct Extreme {
 #[kernel]
 pub fn modify_extreme_hmm(p: *mut Extreme, scale: i128, device_check: *mut i32) {
     let idx = thread::index_1d();
-    if idx.get() == 0 {
+    let idx_raw = idx.get();
+    if idx_raw == 0 {
         unsafe {
             // Mark that we ran on device
             *device_check = 1;
 
             // Access host memory via HMM
             // Device must read at offset 16 (same as host) for this to work
-            (*p).b = (*p).b * scale;
+            (*p).b *= scale;
         }
     }
 }
@@ -85,7 +90,8 @@ pub fn modify_extreme_hmm(p: *mut Extreme, scale: i128, device_check: *mut i32) 
 #[kernel]
 pub fn with_closure_hmm<F: Fn(*mut Extreme) + Copy>(p: *mut Extreme, device_check: *mut i32, f: F) {
     let idx = thread::index_1d();
-    if idx.get() == 0 {
+    let idx_raw = idx.get();
+    if idx_raw == 0 {
         unsafe {
             *device_check = 1;
         }
@@ -98,7 +104,6 @@ pub fn with_closure_hmm<F: Fn(*mut Extreme) + Copy>(p: *mut Extreme, device_chec
 // =============================================================================
 
 use cuda_host::cuda_launch;
-
 fn main() {
     println!("=== HMM (Heterogeneous Memory Management) Test ===");
     println!("=== GPU Direct Access to Host Memory ===\n");
@@ -205,7 +210,7 @@ fn main() {
             module: module,
             config: LaunchConfig::for_num_elems(1),
             args: [data_ptr, device_ran_ptr, move |p: *mut Extreme| unsafe {
-                (*p).b = (*p).b * scale
+                (*p).b *= scale
             }]
         };
 
@@ -274,7 +279,7 @@ fn main() {
             args: [data_ptr, device_ran_ptr, |p: *mut Extreme| unsafe {
                 // `scale` here is actually `*(&scale)` - dereferencing the captured reference
                 // GPU accesses host memory (&scale) via HMM to read the value
-                (*p).b = (*p).b * scale
+                (*p).b *= scale
             }]
         };
 
@@ -355,7 +360,7 @@ fn main() {
     }
 
     println!("\n=== Tests Complete ===");
-    println!("");
+    println!();
     println!("Summary:");
     println!("  Test 1: HMM direct host memory access ✓");
     println!("  Test 2: HMM + move closure (scale by value, struct ptr via HMM) ✓");

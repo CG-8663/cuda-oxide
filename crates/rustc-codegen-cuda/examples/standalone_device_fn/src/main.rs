@@ -22,7 +22,6 @@
 
 use cuda_device::device;
 use cuda_device::thread;
-use cuda_device::thread::ThreadIndex;
 
 // =============================================================================
 // TEST 1: Simple standalone device functions
@@ -135,11 +134,11 @@ pub fn lerp<T: core::ops::Mul<Output = T> + core::ops::Add<Output = T> + Copy>(
 // tid.x / ctaid.x / ntid.x under the hood.
 // =============================================================================
 
-/// Returns the 1D global thread index.
+/// Returns the raw 1D global thread index.
 /// A thin wrapper around the GPU intrinsic — usable from CUDA C++ via LTOIR.
 #[device]
-pub fn get_global_thread_id() -> ThreadIndex {
-    thread::index_1d()
+pub fn get_global_thread_id() -> usize {
+    thread::index_1d().get()
 }
 
 // =============================================================================

@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// Indexed by warp id on the host side; iterator form doesn't fit.
+#![allow(clippy::needless_range_loop)]
+
 //! Device FFI Test - cuda-oxide kernel calling external LTOIR functions
 //!
 //! This example demonstrates calling device functions defined in external LTOIR
@@ -80,7 +83,7 @@ fn test_simple_device_funcs(output: *mut f32) {
     let sum = unsafe { warp_reduce_sum(added) };
 
     // Lane 0 writes result
-    if tid % 32 == 0 {
+    if tid.is_multiple_of(32) {
         unsafe {
             *output.add((tid / 32) as usize) = sum;
         }
@@ -294,10 +297,10 @@ fn file_needs_rebuild(target: &Path, sources: &[&Path]) -> bool {
     }
     let target_time = target.metadata().and_then(|m| m.modified()).ok();
     for src in sources {
-        if let Ok(src_time) = src.metadata().and_then(|m| m.modified()) {
-            if target_time.map(|t| src_time > t).unwrap_or(true) {
-                return true;
-            }
+        if let Ok(src_time) = src.metadata().and_then(|m| m.modified())
+            && target_time.map(|t| src_time > t).unwrap_or(true)
+        {
+            return true;
         }
     }
     false

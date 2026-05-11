@@ -26,6 +26,12 @@ use cuda_host::cuda_launch;
 // KERNEL
 // =============================================================================
 
+/// # Safety
+///
+/// Must be launched with the cluster shape declared in
+/// `#[cluster_launch(4, 1, 1)]` on SM90+ (Hopper or newer). Uses
+/// uninitialised `static mut Barrier` slots that the kernel itself
+/// initialises before first use.
 #[kernel]
 #[cluster_launch(4, 1, 1)]
 pub unsafe fn mcast_barrier_loop(mut out: DisjointSlice<u32>, num_iters: u32) {

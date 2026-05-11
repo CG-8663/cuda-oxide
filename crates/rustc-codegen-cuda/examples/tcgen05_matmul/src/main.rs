@@ -64,6 +64,12 @@ fn build_smem_descriptor(
 /// `cuda_host::tiling::to_k_major_f16`:
 /// - A (128×16): K-major tiled
 /// - B (128×16): K-major tiled (B is stored transposed as N×K = 128×16)
+///
+/// # Safety
+///
+/// Must run on SM100+ (Blackwell). `a_tma` / `b_tma` must point to
+/// valid TMA descriptors built for the K-major tiling described above,
+/// and `out` must be large enough for 128×128 bf16 packed as `u32`.
 #[kernel]
 pub unsafe fn tcgen05_matmul_128x128_tiled(
     a_tma: *const TmaDescriptor,
@@ -162,7 +168,7 @@ pub unsafe fn tcgen05_matmul_128x128_tiled(
         let row_stride_bytes = N * 2;
 
         let row_within_8 = (lane_id % 8) as usize;
-        let is_second_matrix = lane_id >= 8 && lane_id < 16;
+        let is_second_matrix = (8..16).contains(&lane_id);
         let col_offset_for_matrix2 = if is_second_matrix { 16usize } else { 0usize };
 
         let mut tmem_row_block = 0u32;
@@ -339,8 +345,8 @@ fn run_tiled_kernel_test(
     );
 
     // Upload to GPU
-    let dev_a = DeviceBuffer::from_host(&stream, &host_a_u16)?;
-    let dev_b = DeviceBuffer::from_host(&stream, &host_b_u16)?;
+    let dev_a = DeviceBuffer::from_host(stream, &host_a_u16)?;
+    let dev_b = DeviceBuffer::from_host(stream, &host_b_u16)?;
 
     let a_ptr = dev_a.cu_deviceptr();
     let b_ptr = dev_b.cu_deviceptr();
@@ -361,8 +367,8 @@ fn run_tiled_kernel_test(
         N as u32,
     )?;
 
-    let dev_a_tma = DeviceBuffer::from_host(&stream, &a_tma.opaque[..])?;
-    let dev_b_tma = DeviceBuffer::from_host(&stream, &b_tma.opaque[..])?;
+    let dev_a_tma = DeviceBuffer::from_host(stream, &a_tma.opaque[..])?;
+    let dev_b_tma = DeviceBuffer::from_host(stream, &b_tma.opaque[..])?;
 
     // Launch kernel
     let cfg = LaunchConfig {
@@ -381,7 +387,7 @@ fn run_tiled_kernel_test(
     let tile_b_y = 0i32;
 
     println!("Launching tcgen05_matmul_128x128_tiled...");
-    let mut dev_output = DeviceBuffer::<u32>::zeroed(&stream, OUTPUT_SIZE)?;
+    let mut dev_output = DeviceBuffer::<u32>::zeroed(stream, OUTPUT_SIZE)?;
 
     cuda_launch! {
         kernel: tcgen05_matmul_128x128_tiled,
@@ -394,7 +400,7 @@ fn run_tiled_kernel_test(
     stream.synchronize()?;
 
     // Verify results
-    let host_output: Vec<u32> = dev_output.to_host_vec(&stream)?;
+    let host_output: Vec<u32> = dev_output.to_host_vec(stream)?;
 
     let mut result_f32: Vec<f32> = Vec::with_capacity(M * N);
     for &packed in &host_output {

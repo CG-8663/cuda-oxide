@@ -34,6 +34,12 @@ use std::sync::Arc;
 /// - wgmma_fence(): Ensure prior memory operations complete
 /// - wgmma_commit_group(): Commit current instruction group
 /// - wgmma_wait_group::<0>(): Wait for all groups to complete
+///
+/// # Safety
+///
+/// Must run on SM90+ (Hopper). The kernel manages its own WGMMA
+/// fence/commit/wait sequence, so the caller only needs to launch
+/// it on a supported arch.
 #[kernel]
 pub unsafe fn wgmma_sync_test(mut output: DisjointSlice<u64>) {
     static mut SMEM: SharedArray<u8, 256, 128> = SharedArray::UNINIT;
@@ -48,10 +54,10 @@ pub unsafe fn wgmma_sync_test(mut output: DisjointSlice<u64>) {
         wgmma_commit_group();
         wgmma_wait_group::<0>();
 
-        if tid == 0 {
-            if let Some(output_elem) = output.get_mut(gid) {
-                *output_elem = desc;
-            }
+        if tid == 0
+            && let Some(output_elem) = output.get_mut(gid)
+        {
+            *output_elem = desc;
         }
     }
 }
@@ -128,7 +134,7 @@ fn run_wgmma_sync_test(
     println!("--- Test: WGMMA Sync Primitives ---\n");
 
     // Allocate output buffer (1 u64 for descriptor)
-    let mut dev_output = DeviceBuffer::<u64>::zeroed(&stream, 1)?;
+    let mut dev_output = DeviceBuffer::<u64>::zeroed(stream, 1)?;
 
     // Launch with 128 threads (1 warpgroup)
     let cfg = LaunchConfig {
@@ -149,7 +155,7 @@ fn run_wgmma_sync_test(
     stream.synchronize()?;
 
     // Read back result
-    let host_output = dev_output.to_host_vec(&stream)?;
+    let host_output = dev_output.to_host_vec(stream)?;
 
     println!("SMEM descriptor: 0x{:016x}", host_output[0]);
 

@@ -49,7 +49,7 @@ fn anyhow_to_pliron(e: anyhow::Error) -> pliron::result::Error {
 
 /// Convert `mir.extract_field` to `llvm.extractvalue`.
 ///
-/// Handles transparent newtype case: if the operand is a scalar (e.g., `ThreadIndex(usize)`),
+/// Handles scalar-lowered newtype case: if the operand is a scalar (e.g., `ThreadIndex`),
 /// no extraction is needed.
 ///
 /// Note: Zero-sized fields are stripped from LLVM structs, so we need to remap

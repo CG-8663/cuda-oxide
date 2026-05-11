@@ -3,6 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// GEMM kernels take A, B, C plus M/N/K plus alpha/beta — eight args is the
+// minimum useful shape for a real GEMM signature.
+#![allow(clippy::too_many_arguments)]
+
 //! Unified GEMM Example (Naive Implementation)
 //!
 //! Demonstrates matrix multiplication: C = alpha * A * B + beta * C
@@ -36,13 +40,13 @@ pub fn sgemm_naive(
     a: &[f32], // M x K matrix
     b: &[f32], // K x N matrix
     beta: f32,
-    mut c: DisjointSlice<f32>, // M x N matrix (output)
+    mut c: DisjointSlice<f32, thread::Runtime2DIndex>, // M x N matrix (output)
 ) {
     let row = thread::index_2d_row();
     let col = thread::index_2d_col();
 
-    if let Some(c_idx) = thread::index_2d(n as usize) {
-        // col < n guaranteed by index_2d returning Some
+    if let Some(c_idx) = unsafe { thread::index_2d_runtime(n as usize) } {
+        // col < n guaranteed by index_2d_runtime returning Some
         if row < m as usize {
             let n_size = n as usize;
             let k_size = k as usize;
@@ -51,8 +55,8 @@ pub fn sgemm_naive(
             let mut sum = 0.0f32;
             let mut i = 0usize;
             while i < k_size {
-                sum = sum + a[row * k_size + i] * b[i * n_size + col];
-                i = i + 1;
+                sum += a[row * k_size + i] * b[i * n_size + col];
+                i += 1;
             }
 
             if let Some(c_elem) = c.get_mut(c_idx) {
@@ -112,8 +116,8 @@ fn main() {
 
     // Configure launch: 16x16 threads per block
     let block_size = 16u32;
-    let grid_x = (N as u32 + block_size - 1) / block_size;
-    let grid_y = (M as u32 + block_size - 1) / block_size;
+    let grid_x = (N as u32).div_ceil(block_size);
+    let grid_y = (M as u32).div_ceil(block_size);
 
     println!(
         "Grid: ({}, {}), Block: ({}, {})",

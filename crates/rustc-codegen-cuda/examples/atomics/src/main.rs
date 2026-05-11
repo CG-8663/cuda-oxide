@@ -409,7 +409,7 @@ pub fn atomic_f64_fetch_add_test(counter: &[f64], mut out: DisjointSlice<u32>) {
 
 /// Test 16: DeviceAtomicF32 swap -- float atomic exchange.
 ///
-/// Thread 0 swaps in 3.14, gets back 0.0. Other threads read 3.14 after barrier.
+/// Thread 0 swaps in 2.5, gets back 0.0. Other threads read 2.5 after barrier.
 /// This verifies atomicrmw xchg works on float types.
 #[kernel]
 pub fn atomic_f32_swap_test(target: &[f32], mut out: DisjointSlice<u32>) {
@@ -420,7 +420,7 @@ pub fn atomic_f32_swap_test(target: &[f32], mut out: DisjointSlice<u32>) {
 
     if let Some(out_elem) = out.get_mut(gid) {
         if tid == 0 {
-            let old = atomic_target.swap(3.14, AtomicOrdering::AcqRel);
+            let old = atomic_target.swap(2.5, AtomicOrdering::AcqRel);
             // old should be 0.0 (initial); write 1 to indicate success
             // We check old == 0.0 by testing if it's < 0.01
             if old < 0.01 {
@@ -431,8 +431,8 @@ pub fn atomic_f32_swap_test(target: &[f32], mut out: DisjointSlice<u32>) {
         } else {
             thread::sync_threads();
             let val = atomic_target.load(AtomicOrdering::Acquire);
-            // All other threads should read ~3.14
-            if val > 3.0 {
+            // All other threads should read ~2.5
+            if val > 2.0 {
                 *out_elem = 1;
             } else {
                 *out_elem = 0;
@@ -1191,16 +1191,16 @@ fn main() {
         let target_val = target_dev.to_host_vec(&stream).unwrap();
         let result = out_dev.to_host_vec(&stream).unwrap();
 
-        // target should now hold 3.14 (swapped by thread 0)
-        let swap_ok = (target_val[0] - 3.14).abs() < 0.01;
+        // target should now hold 2.5 (swapped by thread 0)
+        let swap_ok = (target_val[0] - 2.5).abs() < 0.01;
         // Thread 0 must have succeeded (out[0] == 1)
         let t0_ok = result[0] == 1;
 
         if swap_ok && t0_ok {
-            println!("  target = {} (expected ~3.14), thread 0 ok", target_val[0]);
+            println!("  target = {} (expected ~2.5), thread 0 ok", target_val[0]);
         } else {
             println!(
-                "  FAIL: target={} (expected ~3.14), t0={}",
+                "  FAIL: target={} (expected ~2.5), t0={}",
                 target_val[0], result[0]
             );
             std::process::exit(1);

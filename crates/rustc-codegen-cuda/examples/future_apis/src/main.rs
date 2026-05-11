@@ -24,7 +24,8 @@ use cuda_host::cuda_launch;
 #[kernel]
 pub fn test_cusimd(mut output: DisjointSlice<f32>) {
     let idx = thread::index_1d();
-    let tid = idx.get();
+    let idx_raw = idx.get();
+    let tid = idx_raw;
 
     // Test 1: Construct CuSimd<f32, 4> from array
     let values: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
@@ -75,7 +76,8 @@ pub fn test_cusimd(mut output: DisjointSlice<f32>) {
 #[kernel]
 pub fn test_cusimd_u32(mut output: DisjointSlice<u32>) {
     let idx = thread::index_1d();
-    let tid = idx.get();
+    let idx_raw = idx.get();
+    let tid = idx_raw;
 
     let simd = CuSimd::<u32, 4>::new([10, 20, 30, 40]);
 

@@ -3,6 +3,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// Iterator helpers like `.iter()`, `.copy_from_slice`, and `.swap` aren't
+// a fit for kernel-side fixed-size arrays driven by runtime indices —
+// the explicit `for i in 0..N { arr[i] }` and manual-temp shapes are
+// exactly what these tests are exercising.
+#![allow(
+    clippy::needless_range_loop,
+    clippy::manual_memcpy,
+    clippy::manual_swap
+)]
+
 //! Array Index Operations Test
 //!
 //! This example tests all combinations of array index operations:
@@ -246,7 +256,7 @@ pub fn test_read_modify_write(mut out: DisjointSlice<u32>) {
 
         // Double each element
         for i in 0..4 {
-            arr[i] = arr[i] * 2; // Read at runtime index, then write
+            arr[i] *= 2; // Read at runtime index, then write
         }
 
         *out_elem = arr[0] + arr[1] + arr[2] + arr[3]; // 2+4+6+8 = 20
@@ -261,7 +271,8 @@ pub fn test_swap_elements(mut out: DisjointSlice<u32>) {
     if let Some(out_elem) = out.get_mut(idx) {
         let mut arr: [u32; 4] = [1, 2, 3, 4];
 
-        // Swap arr[0] and arr[3]
+        // Swap arr[0] and arr[3] via an explicit temp — this test is about
+        // manual indexed assignment, not `<[T]>::swap`.
         let tmp = arr[0];
         arr[0] = arr[3];
         arr[3] = tmp;
@@ -345,7 +356,7 @@ fn run_test_const_index_read(
     module: &Arc<CudaModule>,
     stream: &Arc<CudaStream>,
 ) {
-    let mut d_out = DeviceBuffer::<u32>::zeroed(&stream, 1).unwrap();
+    let mut d_out = DeviceBuffer::<u32>::zeroed(stream, 1).unwrap();
     let config = LaunchConfig {
         grid_dim: (1, 1, 1),
         block_dim: (1, 1, 1),
@@ -361,7 +372,7 @@ fn run_test_const_index_read(
     }
     .expect("Kernel launch failed");
 
-    let result = d_out.to_host_vec(&stream).unwrap()[0];
+    let result = d_out.to_host_vec(stream).unwrap()[0];
     let expected = 100u32; // 10 + 20 + 30 + 40
     if result == expected {
         println!("test_const_index_read: PASS (result = {})", result);
@@ -378,7 +389,7 @@ fn run_test_const_index_read_expr(
     module: &Arc<CudaModule>,
     stream: &Arc<CudaStream>,
 ) {
-    let mut d_out = DeviceBuffer::<u32>::zeroed(&stream, 1).unwrap();
+    let mut d_out = DeviceBuffer::<u32>::zeroed(stream, 1).unwrap();
     let config = LaunchConfig {
         grid_dim: (1, 1, 1),
         block_dim: (1, 1, 1),
@@ -394,7 +405,7 @@ fn run_test_const_index_read_expr(
     }
     .expect("Kernel launch failed");
 
-    let result = d_out.to_host_vec(&stream).unwrap()[0];
+    let result = d_out.to_host_vec(stream).unwrap()[0];
     let expected = 14u32; // 1*2 + 3*4
     if result == expected {
         println!("test_const_index_read_expr: PASS (result = {})", result);
@@ -411,7 +422,7 @@ fn run_test_runtime_index_read(
     module: &Arc<CudaModule>,
     stream: &Arc<CudaStream>,
 ) {
-    let mut d_out = DeviceBuffer::<u32>::zeroed(&stream, 1).unwrap();
+    let mut d_out = DeviceBuffer::<u32>::zeroed(stream, 1).unwrap();
     let config = LaunchConfig {
         grid_dim: (1, 1, 1),
         block_dim: (1, 1, 1),
@@ -428,7 +439,7 @@ fn run_test_runtime_index_read(
     }
     .expect("Kernel launch failed");
 
-    let result = d_out.to_host_vec(&stream).unwrap()[0];
+    let result = d_out.to_host_vec(stream).unwrap()[0];
     let expected = 300u32;
     if result == expected {
         println!("test_runtime_index_read: PASS (result = {})", result);
@@ -445,7 +456,7 @@ fn run_test_runtime_index_read_loop(
     module: &Arc<CudaModule>,
     stream: &Arc<CudaStream>,
 ) {
-    let mut d_out = DeviceBuffer::<u32>::zeroed(&stream, 1).unwrap();
+    let mut d_out = DeviceBuffer::<u32>::zeroed(stream, 1).unwrap();
     let config = LaunchConfig {
         grid_dim: (1, 1, 1),
         block_dim: (1, 1, 1),
@@ -461,7 +472,7 @@ fn run_test_runtime_index_read_loop(
     }
     .expect("Kernel launch failed");
 
-    let result = d_out.to_host_vec(&stream).unwrap()[0];
+    let result = d_out.to_host_vec(stream).unwrap()[0];
     let expected = 10u32; // 1 + 2 + 3 + 4
     if result == expected {
         println!("test_runtime_index_read_loop: PASS (result = {})", result);
@@ -478,7 +489,7 @@ fn run_test_mixed_read(
     module: &Arc<CudaModule>,
     stream: &Arc<CudaStream>,
 ) {
-    let mut d_out = DeviceBuffer::<u32>::zeroed(&stream, 1).unwrap();
+    let mut d_out = DeviceBuffer::<u32>::zeroed(stream, 1).unwrap();
     let config = LaunchConfig {
         grid_dim: (1, 1, 1),
         block_dim: (1, 1, 1),
@@ -495,7 +506,7 @@ fn run_test_mixed_read(
     }
     .expect("Kernel launch failed");
 
-    let result = d_out.to_host_vec(&stream).unwrap()[0];
+    let result = d_out.to_host_vec(stream).unwrap()[0];
     let expected = 40u32; // 10 + 30
     if result == expected {
         println!("test_mixed_read: PASS (result = {})", result);
@@ -512,7 +523,7 @@ fn run_test_const_index_write(
     module: &Arc<CudaModule>,
     stream: &Arc<CudaStream>,
 ) {
-    let mut d_out = DeviceBuffer::<u32>::zeroed(&stream, 1).unwrap();
+    let mut d_out = DeviceBuffer::<u32>::zeroed(stream, 1).unwrap();
     let config = LaunchConfig {
         grid_dim: (1, 1, 1),
         block_dim: (1, 1, 1),
@@ -528,7 +539,7 @@ fn run_test_const_index_write(
         args: [val, slice_mut(d_out)]
     } {
         Ok(_) => {
-            let result = d_out.to_host_vec(&stream).unwrap()[0];
+            let result = d_out.to_host_vec(stream).unwrap()[0];
             let expected = 26u32; // 5 + 6 + 7 + 8
             if result == expected {
                 println!("test_const_index_write: PASS (result = {})", result);
@@ -550,7 +561,7 @@ fn run_test_runtime_index_write_loop(
     module: &Arc<CudaModule>,
     stream: &Arc<CudaStream>,
 ) {
-    let mut d_out = DeviceBuffer::<u32>::zeroed(&stream, 1).unwrap();
+    let mut d_out = DeviceBuffer::<u32>::zeroed(stream, 1).unwrap();
     let config = LaunchConfig {
         grid_dim: (1, 1, 1),
         block_dim: (1, 1, 1),
@@ -565,7 +576,7 @@ fn run_test_runtime_index_write_loop(
         args: [slice_mut(d_out)]
     } {
         Ok(_) => {
-            let result = d_out.to_host_vec(&stream).unwrap()[0];
+            let result = d_out.to_host_vec(stream).unwrap()[0];
             let expected = 280u32; // 0+10+20+30+40+50+60+70
             if result == expected {
                 println!("test_runtime_index_write_loop: PASS (result = {})", result);
@@ -591,8 +602,8 @@ fn run_test_copy_to_local_array(
     stream: &Arc<CudaStream>,
 ) {
     let h_input = vec![100u32, 200, 300, 400];
-    let d_input = DeviceBuffer::from_host(&stream, &h_input).unwrap();
-    let mut d_out = DeviceBuffer::<u32>::zeroed(&stream, 1).unwrap();
+    let d_input = DeviceBuffer::from_host(stream, &h_input).unwrap();
+    let mut d_out = DeviceBuffer::<u32>::zeroed(stream, 1).unwrap();
     let config = LaunchConfig {
         grid_dim: (1, 1, 1),
         block_dim: (1, 1, 1),
@@ -607,7 +618,7 @@ fn run_test_copy_to_local_array(
         args: [slice(d_input), slice_mut(d_out)]
     } {
         Ok(_) => {
-            let result = d_out.to_host_vec(&stream).unwrap()[0];
+            let result = d_out.to_host_vec(stream).unwrap()[0];
             let expected = 1000u32; // 100+200+300+400
             if result == expected {
                 println!("test_copy_to_local_array: PASS (result = {})", result);
@@ -632,7 +643,7 @@ fn run_test_read_modify_write(
     module: &Arc<CudaModule>,
     stream: &Arc<CudaStream>,
 ) {
-    let mut d_out = DeviceBuffer::<u32>::zeroed(&stream, 1).unwrap();
+    let mut d_out = DeviceBuffer::<u32>::zeroed(stream, 1).unwrap();
     let config = LaunchConfig {
         grid_dim: (1, 1, 1),
         block_dim: (1, 1, 1),
@@ -647,7 +658,7 @@ fn run_test_read_modify_write(
         args: [slice_mut(d_out)]
     } {
         Ok(_) => {
-            let result = d_out.to_host_vec(&stream).unwrap()[0];
+            let result = d_out.to_host_vec(stream).unwrap()[0];
             let expected = 20u32; // 2+4+6+8
             if result == expected {
                 println!("test_read_modify_write: PASS (result = {})", result);

@@ -346,7 +346,8 @@ pub fn try_insert_kernel(
     mut out: DisjointSlice<u32>,
 ) {
     let tid = thread::index_1d();
-    let i_thread = tid.get();
+    let tid_raw = tid.get();
+    let i_thread = tid_raw;
     if i_thread >= keys.len() {
         return;
     }
@@ -589,7 +590,8 @@ pub fn try_insert_kernel_proto_a(
     mut out: DisjointSlice<u32>,
 ) {
     let tid = thread::index_1d();
-    let i_thread = tid.get();
+    let tid_raw = tid.get();
+    let i_thread = tid_raw;
     if i_thread >= keys.len() {
         return;
     }
@@ -694,7 +696,8 @@ pub fn try_insert_kernel_proto_a(
 #[kernel]
 pub fn find_kernel(ctrl: &[u32], slots: &[u64], keys: &[u32], mut out: DisjointSlice<u32>) {
     let tid = thread::index_1d();
-    let i_thread = tid.get();
+    let tid_raw = tid.get();
+    let i_thread = tid_raw;
     if i_thread >= keys.len() {
         return;
     }
@@ -974,7 +977,8 @@ pub fn find_kernel_warp_typed(
 #[kernel]
 pub fn delete_kernel(ctrl: &[u32], slots: &[u64], keys: &[u32], mut out: DisjointSlice<u32>) {
     let tid = thread::index_1d();
-    let i_thread = tid.get();
+    let tid_raw = tid.get();
+    let i_thread = tid_raw;
     if i_thread >= keys.len() {
         return;
     }

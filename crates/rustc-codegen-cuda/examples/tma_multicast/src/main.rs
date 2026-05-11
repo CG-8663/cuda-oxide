@@ -3,6 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// TMA multicast kernels take raw descriptor pointers from the host
+// driver; the implicit `unsafe` is in the launch contract.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 //! TMA Multicast Example (SM100a+ / Blackwell Datacenter)
 //!
 //! Demonstrates TMA multicast — a single TMA load broadcasts a tile to
@@ -185,10 +189,10 @@ fn run_tma_multicast_test(
     );
 
     let host_input: Vec<f32> = (0..TENSOR_SIZE).map(|i| i as f32).collect();
-    let dev_tensor = DeviceBuffer::from_host(&stream, &host_input)?;
+    let dev_tensor = DeviceBuffer::from_host(stream, &host_input)?;
 
     let total_output = TILE_SIZE * CLUSTER_SIZE;
-    let mut dev_output = DeviceBuffer::<f32>::zeroed(&stream, total_output)?;
+    let mut dev_output = DeviceBuffer::<f32>::zeroed(stream, total_output)?;
 
     let ptr = dev_tensor.cu_deviceptr();
     let tensor_map = create_tma_descriptor(
@@ -199,10 +203,10 @@ fn run_tma_multicast_test(
         TILE_HEIGHT,
     )?;
 
-    let dev_tensor_map = DeviceBuffer::from_host(&stream, &tensor_map.opaque[..])?;
+    let dev_tensor_map = DeviceBuffer::from_host(stream, &tensor_map.opaque[..])?;
 
-    let tile_x: i32 = 1 * TILE_WIDTH as i32;
-    let tile_y: i32 = 0 * TILE_HEIGHT as i32;
+    let tile_x: i32 = TILE_WIDTH as i32;
+    let tile_y: i32 = 0;
     let block_size = 256u32;
 
     println!(
@@ -233,7 +237,7 @@ fn run_tma_multicast_test(
         "3. Verifying all {} CTAs received the same tile...",
         CLUSTER_SIZE
     );
-    let host_output = dev_output.to_host_vec(&stream)?;
+    let host_output = dev_output.to_host_vec(stream)?;
 
     let mut errors = 0;
     for cta in 0..CLUSTER_SIZE {

@@ -36,7 +36,7 @@ use crate::types::{
 /// MIR extract field/element operation.
 ///
 /// Extracts a field from a tuple, slice, disjoint slice, struct, array (constant index),
-/// or transparent newtype.
+/// or scalar-lowered newtype.
 ///
 /// # Attributes
 ///
@@ -225,19 +225,19 @@ impl Verify for MirExtractFieldOp {
                 );
             }
         } else if operand_ty_obj.downcast_ref::<IntegerType>().is_some() {
-            // Transparent newtype case: extracting field 0 from a scalar
+            // Scalar-lowered newtype case: extracting field 0 from a scalar
             // This happens with newtypes like ThreadIndex(usize)
             // The extraction is a no-op - just verify types match
             if index != 0 {
                 return verify_err!(
                     op.loc(),
-                    "MirExtractFieldOp on scalar only supports field 0 (transparent newtype)"
+                    "MirExtractFieldOp on scalar only supports field 0 (scalar-lowered newtype)"
                 );
             }
             if operand_ty != res_ty {
                 return verify_err!(
                     op.loc(),
-                    "MirExtractFieldOp on scalar (transparent newtype) must preserve type"
+                    "MirExtractFieldOp on scalar (scalar-lowered newtype) must preserve type"
                 );
             }
         } else {

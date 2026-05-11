@@ -50,8 +50,8 @@ pub fn test_floats() {
     let tid = thread::index_1d().get();
 
     if tid == 0 {
-        let pi: f32 = 3.14159265;
-        let e: f64 = 2.718281828;
+        let pi: f32 = core::f32::consts::PI;
+        let e: f64 = core::f64::consts::E;
         let large: f64 = 1234567.89;
         let small: f64 = 0.000123;
 
@@ -74,7 +74,7 @@ pub fn test_width_align() {
 
     if tid == 0 {
         let val: i32 = 42;
-        let fval: f32 = 3.14;
+        let fval: f32 = 2.5;
 
         gpu_printf!("=== Width & Alignment Tests ===\n");
         gpu_printf!("Width 8:     [{}]\n", val);

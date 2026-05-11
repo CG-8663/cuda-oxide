@@ -91,8 +91,8 @@ roadmap, **N/A** = not applicable or no identified need.
 
 | Feature | Status | Description |
 |:--------|:-------|:------------|
-| `DisjointSlice<T>` | **Full** | Bounds-checked parallel write output slice. Access via `ThreadIndex` returns `Option<&mut T>`. |
-| `ThreadIndex` (opaque index type) | **Full** | Newtype that can only be constructed by trusted index functions. Guarantees unique indices. |
+| `DisjointSlice<T, IndexSpace>` | **Full** | Bounds-checked parallel write output slice. `get_mut` and `get_mut_indexed` return `Option<&mut T>`. The `IndexSpace` type parameter rejects mismatched 2D strides at compile time. |
+| `ThreadIndex<'kernel, IndexSpace>` | **Full** | Opaque witness only constructable by trusted index functions. `!Send + !Sync + !Copy + !Clone`, `'kernel`-scoped — non-transferable across threads, can't outlive the kernel body. |
 | `ManagedBarrier` Typestate | **Full** | Compile-time barrier lifecycle: `Uninit → Ready → Invalidated`. Invalid transitions are compile errors. |
 
 ## Runtime Library: Atomics
@@ -116,7 +116,7 @@ roadmap, **N/A** = not applicable or no identified need.
 
 | Feature | Status | Description |
 |:--------|:-------|:------------|
-| Thread/Block/Grid Intrinsics | **Partial** | `threadIdx`, `blockIdx`, `blockDim`, `index_1d()` are sound. `index_2d(row_stride)` returns `Option<ThreadIndex>` but is **currently unsound** -- it does not enforce kernel-wide stride consistency. Pass the same `row_stride` value at every call site until the principled fix lands. See [The Safety Model](../gpu-safety/the-safety-model.md#index-2d-stride-is-currently-unsound). |
+| Thread/Block/Grid Intrinsics | **Full** | `threadIdx`, `blockIdx`, `blockDim`, `gridDim`. `index_1d()` and `index_2d::<S>()` (const stride) are type-safe; `index_2d_runtime(s)` is the `unsafe` escape hatch when the stride is only known at launch time. See [The Safety Model](../gpu-safety/the-safety-model.md). |
 | Block Synchronization | **Full** | `sync_threads()` — thread block barrier. |
 | Async Barriers (mbarrier) | **Full** | Hardware async barriers for Hopper+: init, arrive, test_wait, try_wait, inval. |
 | Cluster Synchronization | **Full** | `cluster_sync()` for all blocks in a cluster. sm_90+. |

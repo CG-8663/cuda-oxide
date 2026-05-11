@@ -21,7 +21,7 @@
 // No #![cfg_attr(cuda_device, no_std)] - this compiles as ONE unit!
 
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
-use cuda_device::{DisjointSlice, kernel, thread};
+use cuda_device::{DisjointSlice, kernel};
 use cuda_host::cuda_launch;
 
 // =============================================================================
@@ -35,16 +35,15 @@ use cuda_host::cuda_launch;
 /// - Device: Compiled to PTX via mir-importer pipeline
 #[kernel]
 pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
-    let idx = thread::index_1d();
-    if let Some(c_elem) = c.get_mut(idx) {
-        *c_elem = a[idx.get()] + b[idx.get()];
+    if let Some((c_elem, idx)) = c.get_mut_indexed() {
+        let i = idx.get();
+        *c_elem = a[i] + b[i];
     }
 }
 
 // =============================================================================
 // HOST CODE - This gets compiled to native x86_64 by LLVM
 // =============================================================================
-
 fn main() {
     println!("=== Unified Compilation Vector Addition ===\n");
 

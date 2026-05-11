@@ -26,15 +26,15 @@ The v0.1.0 release is an early-stage alpha: **expect bugs, incomplete features, 
 ## 🚀 Quick start
 
 ```rust
-use cuda_device::{kernel, thread, DisjointSlice};
+use cuda_device::{kernel, DisjointSlice};
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
 use cuda_host::{cuda_launch, load_kernel_module};
 
 #[kernel]
 fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
-    let idx = thread::index_1d();
-    if let Some(c_elem) = c.get_mut(idx) {
-        *c_elem = a[idx.get()] + b[idx.get()];
+    if let Some((c_elem, idx)) = c.get_mut_indexed() {
+        let i = idx.get();
+        *c_elem = a[i] + b[i];
     }
 }
 

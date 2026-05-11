@@ -321,10 +321,11 @@ pub fn test_slice_constant_index(data: &[u32], mut out: DisjointSlice<u32>) {
 #[kernel]
 pub fn test_unsize_array_to_slice(mut out: DisjointSlice<f32>) {
     let idx = thread::index_1d();
+    let idx_raw = idx.get();
     if let Some(out_elem) = out.get_mut(idx) {
         let arr: [f32; 4] = [10.0, 20.0, 30.0, 40.0];
         let slice: &[f32] = &arr;
-        let i = idx.get() % 4;
+        let i = idx_raw % 4;
         *out_elem = slice[i];
     }
 }
@@ -333,10 +334,11 @@ pub fn test_unsize_array_to_slice(mut out: DisjointSlice<f32>) {
 #[kernel]
 pub fn test_unsize_array_as_slice(mut out: DisjointSlice<f32>) {
     let idx = thread::index_1d();
+    let idx_raw = idx.get();
     if let Some(out_elem) = out.get_mut(idx) {
         let arr: [f32; 4] = [100.0, 200.0, 300.0, 400.0];
         let slice = arr.as_slice();
-        let i = idx.get() % 4;
+        let i = idx_raw % 4;
         *out_elem = slice[i];
     }
 }
@@ -365,9 +367,10 @@ pub fn test_unsize_array_iter_sum(mut out: DisjointSlice<f32>) {
 #[kernel]
 pub fn test_unsize_f64_as_slice(mut out: DisjointSlice<f64>) {
     let idx = thread::index_1d();
+    let idx_raw = idx.get();
     if let Some(out_elem) = out.get_mut(idx) {
         let slice = [1., 2., 3.].as_slice();
-        let i = idx.get() % 3;
+        let i = idx_raw % 3;
         *out_elem = slice[i];
     }
 }
@@ -376,10 +379,11 @@ pub fn test_unsize_f64_as_slice(mut out: DisjointSlice<f64>) {
 #[kernel]
 pub fn test_unsize_f64_explicit(mut out: DisjointSlice<f64>) {
     let idx = thread::index_1d();
+    let idx_raw = idx.get();
     if let Some(out_elem) = out.get_mut(idx) {
         let arr: [f64; 3] = [1.0, 2.0, 3.0];
         let slice: &[f64] = &arr;
-        let i = idx.get() % 3;
+        let i = idx_raw % 3;
         *out_elem = slice[i];
     }
 }
@@ -689,14 +693,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cuda_launch! {
             kernel: test_cast_f32_to_f64,
             stream: stream, module: module, config: cfg,
-            args: [3.14f32, slice_mut(out)]
+            args: [2.5f32, slice_mut(out)]
         }?;
         let r = out.to_host_vec(&stream)?;
-        if (r[0] - 3.14f64).abs() < 0.001 {
-            println!("  [PASS] f32 → f64: 3.14 → {}", r[0]);
+        if (r[0] - 2.5f64).abs() < 0.001 {
+            println!("  [PASS] f32 → f64: 2.5 → {}", r[0]);
             passed += 1;
         } else {
-            let msg = format!("f32 → f64: expected ~3.14, got {}", r[0]);
+            let msg = format!("f32 → f64: expected ~2.5, got {}", r[0]);
             println!("  [FAIL] {}", msg);
             errors.push(msg);
             failed += 1;
@@ -709,14 +713,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cuda_launch! {
             kernel: test_cast_f64_to_f32,
             stream: stream, module: module, config: cfg,
-            args: [3.14f64, slice_mut(out)]
+            args: [2.5f64, slice_mut(out)]
         }?;
         let r = out.to_host_vec(&stream)?;
-        if (r[0] - 3.14f32).abs() < 0.01 {
-            println!("  [PASS] f64 → f32: 3.14 → {}", r[0]);
+        if (r[0] - 2.5f32).abs() < 0.01 {
+            println!("  [PASS] f64 → f32: 2.5 → {}", r[0]);
             passed += 1;
         } else {
-            let msg = format!("f64 → f32: expected ~3.14, got {}", r[0]);
+            let msg = format!("f64 → f32: expected ~2.5, got {}", r[0]);
             println!("  [FAIL] {}", msg);
             errors.push(msg);
             failed += 1;

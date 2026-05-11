@@ -21,6 +21,10 @@ use cuda_host::cuda_launch;
 
 /// Minimal kernel that writes 42 to a memory location.
 /// Tests raw pointer passing to kernels.
+///
+/// # Safety
+///
+/// `out` must point to a writable `i32` in device-accessible memory.
 #[kernel]
 pub unsafe fn hello_constant(out: *mut i32) {
     unsafe { *out = 42 };

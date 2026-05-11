@@ -55,11 +55,14 @@ A lazy, composable description of GPU work (allocation, kernel launch, or data
 transfer). Not executed until `.sync()` or `.await` is called. Can be combined
 with `zip!` (parallel) and `and_then` (sequential).
 
-## `DisjointSlice<T>`
+## `DisjointSlice<T, IndexSpace>`
 
-A safe mutable output abstraction for kernels. Accepts only `ThreadIndex` for
-mutable access, providing bounds-checked `Option<&mut T>` returns. Prevents
-data races by construction — each thread can only write to its own element.
+A safe mutable output abstraction for kernels. Accepts only a
+`ThreadIndex` whose `IndexSpace` matches its own type parameter,
+providing bounds-checked `Option<&mut T>` returns. Prevents data races
+by construction — each thread can only write to its own element. The
+`get_mut_indexed()` shortcut mints the witness and resolves it to a
+mutable reference in a single call.
 
 ## Distributed Shared Memory (DSMEM)
 
@@ -142,18 +145,26 @@ Specialized matrix multiply-accumulate hardware units. WGMMA (Hopper, sm_90)
 operates at warpgroup granularity from shared memory. tcgen05 (Blackwell,
 sm_100+) uses single-thread issue with dedicated Tensor Memory (TMEM).
 
-## `ThreadIndex`
+## `ThreadIndex<'kernel, IndexSpace>`
 
-An opaque newtype that can only be constructed by `thread::index_1d()` or
-`thread::index_2d(row_stride)`. `index_1d` always returns a `ThreadIndex`
-and is unconditionally unique per thread (`threadIdx.x < blockDim.x` is
-hardware-enforced). `index_2d` returns `Option<ThreadIndex>` -- the
-`Some` branch is unique only **within a single, fixed `row_stride`**.
-Mixing strides inside a kernel can mint colliding `ThreadIndex` values
-in safe code; until the principled fix lands, pin `row_stride` to one
-value per kernel. See
-[The Safety Model](../gpu-safety/the-safety-model.md#index-2d-stride-is-currently-unsound)
-for the full discussion.
+An opaque witness that can only be constructed by trusted index
+functions. Three forms:
+
+- `thread::index_1d() -> ThreadIndex<'_, Index1D>`. Always returns a
+  witness; unconditionally unique per thread
+  (`threadIdx.x < blockDim.x` is hardware-enforced).
+- `thread::index_2d::<S>() -> Option<ThreadIndex<'_, Index2D<S>>>`. The
+  row stride is a const generic, so a `DisjointSlice<T, Index2D<S>>`
+  only accepts a witness with the matching `S` -- mixing strides is a
+  type error.
+- `unsafe thread::index_2d_runtime(s) -> Option<ThreadIndex<'_, Runtime2DIndex>>`.
+  Escape hatch when the stride is only known at launch time. The
+  `unsafe` is the contract: every thread feeding a `Runtime2DIndex`
+  into the same `DisjointSlice` must have used the same `s`.
+
+The witness is `!Send + !Sync + !Copy + !Clone` and `'kernel`-scoped, so
+threads cannot launder it through shared memory and it cannot outlive
+the kernel body.
 
 ## TMA (Tensor Memory Accelerator)
 
