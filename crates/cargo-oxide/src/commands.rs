@@ -799,8 +799,18 @@ fn resolve_example_dir(ctx: &Context, example: &str) -> PathBuf {
 ///
 /// Always includes `-Z codegen-backend`, `-C opt-level=3`, disabled debug
 /// assertions, suppressed JumpThreading (prevents barrier duplication), and
-/// v0 symbol mangling. Appends `-C debuginfo=2` when `debug` is true.
+/// v0 symbol mangling. Appends `-C debuginfo=2` when `debug` is true, then
+/// appends any existing user-provided `RUSTFLAGS`.
 fn build_rustflags(backend_so: &Path, debug: bool) -> String {
+    let existing = std::env::var("RUSTFLAGS").ok();
+    build_rustflags_with_existing(backend_so, debug, existing.as_deref())
+}
+
+fn build_rustflags_with_existing(
+    backend_so: &Path,
+    debug: bool,
+    existing_rustflags: Option<&str>,
+) -> String {
     let mut flags = format!(
         "-Z codegen-backend={} -C opt-level=3 -C debug-assertions=off -Z mir-enable-passes=-JumpThreading -Csymbol-mangling-version=v0",
         backend_so.display()
@@ -808,11 +818,11 @@ fn build_rustflags(backend_so: &Path, debug: bool) -> String {
     if debug {
         flags.push_str(" -C debuginfo=2");
     }
-    if let Ok(existing) = std::env::var("RUSTFLAGS")
+    if let Some(existing) = existing_rustflags
         && !existing.is_empty()
     {
         flags.push(' ');
-        flags.push_str(&existing);
+        flags.push_str(existing);
     }
     flags
 }
@@ -1184,4 +1194,36 @@ fn find_executable(name: &str, fallback_paths: &[&str]) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_rustflags_appends_existing_rustflags_after_required_flags() {
+        let rustflags = build_rustflags_with_existing(
+            Path::new("/tmp/librustc_codegen_cuda.so"),
+            false,
+            Some("-L native=/nix/store/cuda-cudart/lib"),
+        );
+
+        assert!(
+            rustflags
+                .starts_with("-Z codegen-backend=/tmp/librustc_codegen_cuda.so -C opt-level=3")
+        );
+        assert!(rustflags.ends_with(" -L native=/nix/store/cuda-cudart/lib"));
+    }
+
+    #[test]
+    fn build_rustflags_ignores_empty_existing_rustflags() {
+        let rustflags = build_rustflags_with_existing(
+            Path::new("/tmp/librustc_codegen_cuda.so"),
+            true,
+            Some(""),
+        );
+
+        assert!(rustflags.contains(" -C debuginfo=2"));
+        assert!(!rustflags.ends_with(' '));
+    }
 }
