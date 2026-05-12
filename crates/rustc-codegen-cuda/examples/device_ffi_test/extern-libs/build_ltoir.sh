@@ -21,7 +21,17 @@ set -e  # Exit on any error
 
 # Parse architecture argument (default: sm_120 for Blackwell)
 ARCH="${1:-sm_120}"
+CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+NVCC_CCBIN="${NVCC_CCBIN:-${CUDAHOSTCXX:-}}"
+NVCC_FLAGS=()
+if [[ -n "$NVCC_CCBIN" ]]; then
+    NVCC_FLAGS+=("-ccbin=$NVCC_CCBIN")
+fi
+
 echo "Building for architecture: $ARCH"
+if [[ -n "$NVCC_CCBIN" ]]; then
+    echo "nvcc host compiler: $NVCC_CCBIN"
+fi
 echo ""
 
 # Setup nvvm-tools path for nvvm-dis (converts binary LTOIR to text)
@@ -50,7 +60,7 @@ compile_ltoir() {
 
     echo "=== Compiling $src ==="
     # -dc: relocatable device code, -dlto: device LTO, --keep: retain .ltoir
-    nvcc -arch=$ARCH -dc -dlto --keep $extra_flags "$src" -o "${base}.o" 2>&1
+    nvcc "${NVCC_FLAGS[@]}" -arch=$ARCH -dc -dlto --keep $extra_flags "$src" -o "${base}.o" 2>&1
 
     if [ -f "${base}.ltoir" ]; then
         echo "  Binary LTOIR: ${base}.ltoir ($(wc -c < ${base}.ltoir) bytes)"
@@ -72,7 +82,7 @@ compile_ltoir "external_device_funcs.cu"
 
 # Compile CCCL wrappers (needs CCCL include path)
 if [ -f "cccl_wrappers.cu" ]; then
-    compile_ltoir "cccl_wrappers.cu" "-I/usr/local/cuda/include/cccl"
+    compile_ltoir "cccl_wrappers.cu" "-I${CUDA_HOME}/include/cccl"
 fi
 
 # Clean up intermediate files

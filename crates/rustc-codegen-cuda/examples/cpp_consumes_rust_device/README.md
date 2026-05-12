@@ -95,6 +95,13 @@ Device: NVIDIA GeForce RTX 5090 (sm_120)
 - LTOIR tools from `device_ffi_test/tools/` (built automatically by `run_test.sh`)
 - Blackwell+ GPU (sm_100+) — LTOIR requires NVVM 20 dialect
 
+If your default host compiler is newer than the CUDA Toolkit supports, set
+`NVCC_CCBIN` or `CUDAHOSTCXX` before running the example:
+
+```bash
+NVCC_CCBIN=/usr/bin/g++-15 cargo oxide run cpp_consumes_rust_device --emit-nvvm-ir --arch=sm_120
+```
+
 ## File Structure
 
 ```text

@@ -14,6 +14,15 @@ code through LTOIR linking to GPU execution is fully working.
 cargo oxide run device_ffi_test --emit-nvvm-ir --arch=<your_arch>  # e.g., sm_120
 ```
 
+If your default host compiler is newer than the CUDA Toolkit supports, choose
+one explicitly for the `nvcc` steps:
+
+```bash
+NVCC_CCBIN=/usr/bin/g++-15 cargo oxide run device_ffi_test --emit-nvvm-ir --arch=sm_120
+```
+
+`CUDAHOSTCXX` is also honored as a fallback when `NVCC_CCBIN` is unset.
+
 > **Note:** The `--emit-nvvm-ir` and `--arch=<your_arch>` flags are **required** for this example.
 > Running without these flags will result in a compilation error because device FFI
 > requires LTOIR linking which needs NVVM IR output. A proper error message for this
