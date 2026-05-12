@@ -77,6 +77,14 @@ echo "Architecture: $ARCH"
 echo "Build test:   $BUILD_TEST"
 echo ""
 
+NVCC_CCBIN="${NVCC_CCBIN:-${CUDAHOSTCXX:-}}"
+NVCC_FLAGS=()
+if [[ -n "$NVCC_CCBIN" ]]; then
+    NVCC_FLAGS+=("-ccbin=$NVCC_CCBIN")
+    echo "nvcc host compiler: $NVCC_CCBIN"
+    echo ""
+fi
+
 # =============================================================================
 # Clean if requested
 # =============================================================================
@@ -141,7 +149,7 @@ compile_ltoir() {
     # -dc: relocatable device code, -dlto: device LTO, --keep: retain .ltoir
     # --expt-relaxed-constexpr: REQUIRED for cuBLASDx - enables constexpr in device code
     # -Wno-deprecated-declarations: suppress MathDx deprecation warnings
-    nvcc -arch=$ARCH -dc -dlto --keep -std=c++17 --expt-relaxed-constexpr \
+    nvcc "${NVCC_FLAGS[@]}" -arch=$ARCH -dc -dlto --keep -std=c++17 --expt-relaxed-constexpr \
         -Wno-deprecated-declarations \
         -I"${MATHDX_INCLUDE}" -I"${CUTLASS_INCLUDE}" \
         $extra_flags "$src" -o "${base}.o" 2>&1
@@ -219,7 +227,7 @@ if [ "$BUILD_TEST" = true ]; then
         if [ -f "test_separate.cu" ]; then
             echo ""
             echo "=== Building test_separate host program ==="
-            nvcc -arch=$ARCH test_separate.cu -o test_separate -lcuda
+            nvcc "${NVCC_FLAGS[@]}" -arch=$ARCH test_separate.cu -o test_separate -lcuda
             echo "  Created: test_separate"
             echo ""
             echo "Run './test_separate' to validate CUDA C++ extern calls"

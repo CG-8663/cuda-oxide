@@ -100,6 +100,10 @@ pub const DEVICE_EXTERN_PREFIX: &str = "cuda_oxide_device_extern_246e25db_";
 /// without actually invoking the kernel on the host.
 pub const INSTANTIATE_PREFIX: &str = "cuda_oxide_instantiate_246e25db_";
 
+/// Local binding name injected by `#[kernel]` and `#[device]` for the
+/// hidden thread-index scope token.
+pub const KERNEL_SCOPE_LOCAL: &str = "cuda_oxide_kernel_scope_246e25db";
+
 // ============================================================================
 // Layer 2 — builders (macro side)
 // ============================================================================

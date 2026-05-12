@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#![allow(clippy::erasing_op)]
+
 //! Debug and Utility Intrinsics Test
 //!
 //! Tests GPU debug/utility features:
@@ -16,104 +18,113 @@
 //! Run: cargo oxide run debug
 
 use cuda_device::{DisjointSlice, debug, gpu_assert, kernel, launch_bounds, thread};
-use cuda_host::cuda_launch;
+use cuda_host::cuda_module;
 
 // =============================================================================
 // KERNELS
 // =============================================================================
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-/// Test kernel: measures clock cycles for a simple operation
-#[kernel]
-#[launch_bounds(256, 2)] // Max 256 threads/block, min 2 blocks/SM
-pub fn clock_test(mut output: DisjointSlice<u64>) {
-    let idx = thread::index_1d();
-    if let Some(output_elem) = output.get_mut(idx) {
-        let start = debug::clock64();
+    /// Test kernel: measures clock cycles for a simple operation
+    #[kernel]
+    #[launch_bounds(256, 2)] // Max 256 threads/block, min 2 blocks/SM
+    pub fn clock_test(mut output: DisjointSlice<u64>) {
+        let idx = thread::index_1d();
+        if let Some(output_elem) = output.get_mut(idx) {
+            let start = debug::clock64();
 
-        // Some work to measure
-        let mut sum: u64 = 0;
-        for i in 0..100u64 {
-            sum = sum.wrapping_add(i);
+            // Some work to measure
+            let mut sum: u64 = 0;
+            for i in 0..100u64 {
+                sum = sum.wrapping_add(i);
+            }
+
+            let end = debug::clock64();
+
+            // Write elapsed cycles (use sum to prevent optimization)
+            *output_elem = (end - start) + (sum & 0);
         }
-
-        let end = debug::clock64();
-
-        // Write elapsed cycles (use sum to prevent optimization)
-        *output_elem = (end - start) + (sum & 0);
     }
-}
 
-/// Test kernel: demonstrates trap() for error handling
-///
-/// Traps if any thread sees a negative value.
-#[kernel]
-pub fn trap_test(input: &[i32], mut output: DisjointSlice<i32>) {
-    let idx = thread::index_1d();
-    if let Some(output_elem) = output.get_mut(idx) {
-        let val = input[idx.get()];
+    /// Test kernel: demonstrates trap() for error handling
+    ///
+    /// Traps if any thread sees a negative value.
+    #[kernel]
+    pub fn trap_test(input: &[i32], mut output: DisjointSlice<i32>) {
+        let idx = thread::index_1d();
+        let idx_raw = idx.get();
+        if let Some(output_elem) = output.get_mut(idx) {
+            let val = input[idx_raw];
 
-        if val < 0 {
-            debug::trap(); // Kernel dies here if any value is negative
+            if val < 0 {
+                debug::trap(); // Kernel dies here if any value is negative
+            }
+
+            *output_elem = val * 2;
         }
-
-        *output_elem = val * 2;
     }
-}
 
-/// Test kernel: demonstrates gpu_assert!() macro
-///
-/// Asserts that all values are non-negative.
-#[kernel]
-pub fn assert_test(input: &[i32], mut output: DisjointSlice<i32>) {
-    let idx = thread::index_1d();
-    if let Some(output_elem) = output.get_mut(idx) {
-        let val = input[idx.get()];
+    /// Test kernel: demonstrates gpu_assert!() macro
+    ///
+    /// Asserts that all values are non-negative.
+    #[kernel]
+    pub fn assert_test(input: &[i32], mut output: DisjointSlice<i32>) {
+        let idx = thread::index_1d();
+        let idx_raw = idx.get();
+        if let Some(output_elem) = output.get_mut(idx) {
+            let val = input[idx_raw];
 
-        // Assert that values are non-negative and within bounds
-        gpu_assert!(val >= 0, "Expected non-negative value");
-        gpu_assert!(val < 1000); // Simple assertion
+            // Assert that values are non-negative and within bounds
+            gpu_assert!(val >= 0, "Expected non-negative value");
+            gpu_assert!(val < 1000); // Simple assertion
 
-        *output_elem = val + 1;
-    }
-}
-
-/// Test kernel: demonstrates breakpoint() for cuda-gdb debugging
-#[kernel]
-pub fn breakpoint_test(mut output: DisjointSlice<i32>) {
-    let idx = thread::index_1d();
-    if let Some(output_elem) = output.get_mut(idx) {
-        if idx.get() == 0 {
-            debug::breakpoint(); // cuda-gdb stops here for thread 0
+            *output_elem = val + 1;
         }
-
-        *output_elem = idx.get() as i32;
     }
-}
 
-/// Test kernel: demonstrates prof_trigger() for profiler signals
-#[kernel]
-pub fn profiler_test(input: &[f32], mut output: DisjointSlice<f32>) {
-    let idx = thread::index_1d();
-    if let Some(output_elem) = output.get_mut(idx) {
-        debug::prof_trigger::<0>(); // Signal "region 0 start"
+    /// Test kernel: demonstrates breakpoint() for cuda-gdb debugging
+    #[kernel]
+    pub fn breakpoint_test(mut output: DisjointSlice<i32>) {
+        let idx = thread::index_1d();
+        let idx_raw = idx.get();
+        if let Some(output_elem) = output.get_mut(idx) {
+            if idx_raw == 0 {
+                debug::breakpoint(); // cuda-gdb stops here for thread 0
+            }
 
-        let val = input[idx.get()];
-        let result = val * val; // Some computation
-
-        debug::prof_trigger::<1>(); // Signal "region 0 end"
-
-        *output_elem = result;
+            *output_elem = idx_raw as i32;
+        }
     }
-}
 
-/// Test kernel: demonstrates #[launch_bounds] attribute
-#[kernel]
-#[launch_bounds(128, 4)] // Max 128 threads/block, min 4 blocks/SM
-pub fn launch_bounds_test(input: &[i32], mut output: DisjointSlice<i32>) {
-    let idx = thread::index_1d();
-    if let Some(output_elem) = output.get_mut(idx) {
-        let val = input[idx.get()];
-        *output_elem = val * 3 + 1;
+    /// Test kernel: demonstrates prof_trigger() for profiler signals
+    #[kernel]
+    pub fn profiler_test(input: &[f32], mut output: DisjointSlice<f32>) {
+        let idx = thread::index_1d();
+        let idx_raw = idx.get();
+        if let Some(output_elem) = output.get_mut(idx) {
+            debug::prof_trigger::<0>(); // Signal "region 0 start"
+
+            let val = input[idx_raw];
+            let result = val * val; // Some computation
+
+            debug::prof_trigger::<1>(); // Signal "region 0 end"
+
+            *output_elem = result;
+        }
+    }
+
+    /// Test kernel: demonstrates #[launch_bounds] attribute
+    #[kernel]
+    #[launch_bounds(128, 4)] // Max 128 threads/block, min 4 blocks/SM
+    pub fn launch_bounds_test(input: &[i32], mut output: DisjointSlice<i32>) {
+        let idx = thread::index_1d();
+        let idx_raw = idx.get();
+        if let Some(output_elem) = output.get_mut(idx) {
+            let val = input[idx_raw];
+            *output_elem = val * 3 + 1;
+        }
     }
 }
 
@@ -130,6 +141,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stream = ctx.default_stream();
 
     let module = ctx.load_module_from_file("debug.ptx")?;
+    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
 
     // ====================================================================
     // Test 1: Clock cycles measurement
@@ -145,13 +157,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             shared_mem_bytes: 0,
         };
 
-        cuda_launch! {
-            kernel: clock_test,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice_mut(output_dev)]
-        }?;
+        module.clock_test((stream).as_ref(), cfg, &mut output_dev)?;
         stream.synchronize()?;
 
         let output: Vec<u64> = output_dev.to_host_vec(&stream)?;
@@ -171,13 +177,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let input_dev = DeviceBuffer::from_host(&stream, &input)?;
         let mut output_dev = DeviceBuffer::<i32>::zeroed(&stream, n)?;
 
-        cuda_launch! {
-            kernel: trap_test,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(n as u32),
-            args: [slice(input_dev), slice_mut(output_dev)]
-        }?;
+        module.trap_test(
+            (stream).as_ref(),
+            LaunchConfig::for_num_elems(n as u32),
+            &input_dev,
+            &mut output_dev,
+        )?;
         stream.synchronize()?;
 
         let output: Vec<i32> = output_dev.to_host_vec(&stream)?;
@@ -203,13 +208,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let input_dev = DeviceBuffer::from_host(&stream, &input)?;
         let mut output_dev = DeviceBuffer::<i32>::zeroed(&stream, n)?;
 
-        cuda_launch! {
-            kernel: assert_test,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(n as u32),
-            args: [slice(input_dev), slice_mut(output_dev)]
-        }?;
+        module.assert_test(
+            (stream).as_ref(),
+            LaunchConfig::for_num_elems(n as u32),
+            &input_dev,
+            &mut output_dev,
+        )?;
         stream.synchronize()?;
 
         let output: Vec<i32> = output_dev.to_host_vec(&stream)?;
@@ -247,13 +251,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let input_dev = DeviceBuffer::from_host(&stream, &input)?;
         let mut output_dev = DeviceBuffer::<f32>::zeroed(&stream, n)?;
 
-        cuda_launch! {
-            kernel: profiler_test,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(n as u32),
-            args: [slice(input_dev), slice_mut(output_dev)]
-        }?;
+        module.profiler_test(
+            (stream).as_ref(),
+            LaunchConfig::for_num_elems(n as u32),
+            &input_dev,
+            &mut output_dev,
+        )?;
         stream.synchronize()?;
 
         let output: Vec<f32> = output_dev.to_host_vec(&stream)?;
@@ -287,13 +290,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             shared_mem_bytes: 0,
         };
 
-        cuda_launch! {
-            kernel: launch_bounds_test,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(input_dev), slice_mut(output_dev)]
-        }?;
+        module.launch_bounds_test((stream).as_ref(), cfg, &input_dev, &mut output_dev)?;
         stream.synchronize()?;
 
         let output: Vec<i32> = output_dev.to_host_vec(&stream)?;

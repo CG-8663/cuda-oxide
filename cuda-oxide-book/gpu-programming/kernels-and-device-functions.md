@@ -38,8 +38,8 @@ Under the hood, `#[kernel]` does three things:
    unguessable for user code.
 2. **Adds `#[no_mangle]`** to preserve the symbol name in the generated PTX.
 3. **Generates a marker struct** implementing `CudaKernel` (or
-   `GenericCudaKernel` for generic kernels) so that `cuda_launch!` can look up
-   the correct PTX entry point at compile time.
+   `GenericCudaKernel` for generic kernels) so host launch code can look up the
+   correct PTX entry point at compile time.
 
 In the generated PTX, a kernel becomes a `.entry` directive -- the GPU
 equivalent of `main`:
@@ -116,7 +116,7 @@ pub fn magnitude(x: f32, y: f32) -> f32 {
 | Feature                  | `#[kernel]`             | `#[device]`                         | Auto-discovered        |
 |:-------------------------|:------------------------|:------------------------------------|:-----------------------|
 | PTX directive            | `.entry`                | `.func`                             | `.func` (or inlined)   |
-| Launchable from host     | Yes, via `cuda_launch!` | No                                  | No                     |
+| Launchable from host     | Yes, via typed module   | No                                  | No                     |
 | Can return a value       | No (must be `()`)       | Yes                                 | Yes                    |
 | Callable from device code| Yes                     | Yes                                 | Yes                    |
 | Annotation required      | Always                  | Only for standalone/cross-crate/FFI | Never                  |

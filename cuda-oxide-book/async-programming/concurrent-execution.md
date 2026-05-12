@@ -59,16 +59,16 @@ sets up the scheduling policy (round-robin with four streams by default), and
 makes the thread-local state available for `.sync()` and `.await`:
 
 ```rust
-use cuda_async::device_context::{init_device_contexts, load_kernel_module_async};
+use cuda_async::device_context::init_device_contexts;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_device_contexts(0, 1)?;
-    let module = load_kernel_module_async("async_mlp", 0)?;
+    let module = kernels::load_async(0)?;
 ```
 
-The PTX module is loaded into the thread-local kernel cache. The `Arc<CudaModule>`
-can be cloned cheaply into each batch pipeline.
+The embedded module is loaded through the thread-local async context. The typed
+module handle can be cloned cheaply into each batch pipeline.
 
 ## Step 2: Upload shared weights
 

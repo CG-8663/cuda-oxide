@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// Shared memory is accessed by thread-derived index, not an iterator.
+#![allow(clippy::needless_range_loop)]
+
 //! Unified Shared Memory Example
 //!
 //! Demonstrates SharedArray for block-level cooperation:
@@ -14,59 +17,63 @@
 
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
 use cuda_device::{DisjointSlice, SharedArray, kernel, thread};
-use cuda_host::cuda_launch;
+use cuda_host::cuda_module;
 
 // =============================================================================
 // KERNELS
 // =============================================================================
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-/// Test kernel for shared memory with single array
-#[kernel]
-pub fn shared_test(data: &[f32], mut out: DisjointSlice<f32>) {
-    static mut TILE: SharedArray<f32, 256> = SharedArray::UNINIT;
+    /// Test kernel for shared memory with single array
+    #[kernel]
+    pub fn shared_test(data: &[f32], mut out: DisjointSlice<f32>) {
+        static mut TILE: SharedArray<f32, 256> = SharedArray::UNINIT;
 
-    let tid = thread::threadIdx_x() as usize;
-    let gid = thread::index_1d().get();
+        let tid = thread::threadIdx_x() as usize;
+        let gid = thread::index_1d().get();
 
-    // Write to shared memory
-    unsafe {
-        TILE[tid] = data[gid];
-    }
+        // Write to shared memory
+        unsafe {
+            TILE[tid] = data[gid];
+        }
 
-    thread::sync_threads();
+        thread::sync_threads();
 
-    // Read from shared memory (neighbor)
-    unsafe {
-        let neighbor_idx = (tid + 1) % 256;
-        if let Some(out_elem) = out.get_mut(thread::index_1d()) {
-            *out_elem = TILE[neighbor_idx];
+        // Read from shared memory (neighbor)
+        unsafe {
+            let neighbor_idx = (tid + 1) % 256;
+            if let Some(out_elem) = out.get_mut(thread::index_1d()) {
+                *out_elem = TILE[neighbor_idx];
+            }
         }
     }
-}
 
-/// Test kernel with TWO shared arrays - tests multiple shared allocations
-#[kernel]
-pub fn shared_dual(a: &[f32], b: &[f32], mut out: DisjointSlice<f32>) {
-    // Two separate shared memory allocations
-    static mut TILE_A: SharedArray<f32, 256> = SharedArray::UNINIT;
-    static mut TILE_B: SharedArray<f32, 256> = SharedArray::UNINIT;
+    /// Test kernel with TWO shared arrays - tests multiple shared allocations
+    #[kernel]
+    pub fn shared_dual(a: &[f32], b: &[f32], mut out: DisjointSlice<f32>) {
+        // Two separate shared memory allocations
+        static mut TILE_A: SharedArray<f32, 256> = SharedArray::UNINIT;
+        static mut TILE_B: SharedArray<f32, 256> = SharedArray::UNINIT;
 
-    let tid = thread::threadIdx_x() as usize;
-    let gid = thread::index_1d().get();
+        let tid = thread::threadIdx_x() as usize;
+        let gid = thread::index_1d().get();
 
-    // Load both arrays into shared memory
-    unsafe {
-        TILE_A[tid] = a[gid];
-        TILE_B[tid] = b[gid];
-    }
+        // Load both arrays into shared memory
+        unsafe {
+            TILE_A[tid] = a[gid];
+            TILE_B[tid] = b[gid];
+        }
 
-    thread::sync_threads();
+        thread::sync_threads();
 
-    // Read neighbor's value from both tiles and add them
-    unsafe {
-        let neighbor_idx = (tid + 1) % 256;
-        if let Some(out_elem) = out.get_mut(thread::index_1d()) {
-            *out_elem = TILE_A[neighbor_idx] + TILE_B[neighbor_idx];
+        // Read neighbor's value from both tiles and add them
+        unsafe {
+            let neighbor_idx = (tid + 1) % 256;
+            if let Some(out_elem) = out.get_mut(thread::index_1d()) {
+                *out_elem = TILE_A[neighbor_idx] + TILE_B[neighbor_idx];
+            }
         }
     }
 }
@@ -87,6 +94,7 @@ fn main() {
     let module = ctx
         .load_module_from_file("sharedmem.ptx")
         .expect("Failed to load PTX module");
+    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
 
     // Launch config for shared memory kernels
     let cfg = LaunchConfig {
@@ -105,14 +113,9 @@ fn main() {
         let data_dev = DeviceBuffer::from_host(&stream, &data_host).unwrap();
         let mut out_dev = DeviceBuffer::<f32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: shared_test,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(data_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .shared_test((stream).as_ref(), cfg, &data_dev, &mut out_dev)
+            .expect("Kernel launch failed");
 
         let out_result = out_dev.to_host_vec(&stream).unwrap();
         println!("Output out[0..5] = {:?}", &out_result[0..5]);
@@ -145,14 +148,9 @@ fn main() {
         let b_dev = DeviceBuffer::from_host(&stream, &b_host).unwrap();
         let mut out_dev = DeviceBuffer::<f32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: shared_dual,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice(a_dev), slice(b_dev), slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .shared_dual((stream).as_ref(), cfg, &a_dev, &b_dev, &mut out_dev)
+            .expect("Kernel launch failed");
 
         let out_result = out_dev.to_host_vec(&stream).unwrap();
         println!("Output out[0..5] = {:?}", &out_result[0..5]);

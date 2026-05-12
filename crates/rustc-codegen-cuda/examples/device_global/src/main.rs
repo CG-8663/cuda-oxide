@@ -15,10 +15,16 @@ use cuda_host::cuda_launch;
 static mut DEVICE_COUNTER: u64 = 0;
 static mut DEVICE_MARKER: u32 = 0;
 
+/// # Safety
+///
+/// `out` must point to a writable `u64` in device-accessible memory.
+/// The static globals `DEVICE_COUNTER` and `DEVICE_MARKER` are mutated
+/// without synchronisation; the test launches a single thread to dodge
+/// the race.
 #[kernel]
 pub unsafe fn device_global(out: *mut u64) {
     unsafe {
-        DEVICE_COUNTER = DEVICE_COUNTER + 1;
+        DEVICE_COUNTER += 1;
         DEVICE_MARKER = 0x00C0_FFEE;
         *out = DEVICE_COUNTER ^ (DEVICE_MARKER as u64);
     }

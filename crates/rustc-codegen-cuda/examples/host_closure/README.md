@@ -29,13 +29,13 @@ pub fn map<T: Copy, F: Fn(T) -> T + Copy>(f: F, input: &[T], mut out: DisjointSl
 ```rust
 let factor = 2.5f32;
 
-cuda_launch! {
-    kernel: map::<f32, _>,  // _ infers closure type
-    stream: stream,
-    module: module,
-    config: LaunchConfig::for_num_elems(N as u32),
-    args: [move |x: f32| x * factor, slice(input_dev), slice_mut(output_dev)]
-}
+module.map::<f32, _>(
+    stream.as_ref(),
+    LaunchConfig::for_num_elems(N as u32),
+    move |x: f32| x * factor, // _ infers closure type
+    &input_dev,
+    &mut output_dev,
+)?;
 ```
 
 ### How Capture Extraction Works
@@ -109,15 +109,14 @@ kernel<<<1, N>>>(scale, input, output);
 
 ```rust
 let factor = 5.0f32;
-// Fields abbreviated for clarity; full form: cuda_launch! { kernel: ..., stream: ..., module: ..., config: ..., args: [...] }
-cuda_launch! {
-    kernel: map::<f32, _>,
-    stream: stream,
-    module: module,
-    config: LaunchConfig::for_num_elems(N as u32),
-    args: [move |x: f32| x * factor, slice(input), slice_mut(output)]
-}?;
-// Macro extracts 'factor', passes as kernel parameter
+module.map::<f32, _>(
+    stream.as_ref(),
+    LaunchConfig::for_num_elems(N as u32),
+    move |x: f32| x * factor,
+    &input,
+    &mut output,
+)?;
+// The typed launch method passes the closure value as a kernel argument
 ```
 
 ## Supported Closure Types
@@ -157,20 +156,26 @@ For `map::<f32, {closure capturing factor}>`:
 
 ```rust
 let threshold = 0.5f32;
-cuda_launch!(
-    kernel: map::<f32, _>,
-    args: [move |x: f32| if x > threshold { 1.0 } else { 0.0 }, ...]
-);
+module.map::<f32, _>(
+    stream.as_ref(),
+    cfg,
+    move |x: f32| if x > threshold { 1.0 } else { 0.0 },
+    &input,
+    &mut output,
+)?;
 ```
 
 ### Runtime Configuration
 
 ```rust
 fn launch_with_config(scale: f32, offset: f32, ...) {
-    cuda_launch!(
-        kernel: map::<f32, _>,
-        args: [move |x: f32| x * scale + offset, ...]
-    );
+    module.map::<f32, _>(
+        stream.as_ref(),
+        cfg,
+        move |x: f32| x * scale + offset,
+        &input,
+        &mut output,
+    )?;
 }
 ```
 
@@ -179,8 +184,11 @@ fn launch_with_config(scale: f32, offset: f32, ...) {
 ```rust
 let f = |x: f32| x.sin();
 let g = |x: f32| x * 2.0;
-cuda_launch!(
-    kernel: map::<f32, _>,
-    args: [move |x: f32| g(f(x)), ...]  // sin(x) * 2
-);
+module.map::<f32, _>(
+    stream.as_ref(),
+    cfg,
+    move |x: f32| g(f(x)), // sin(x) * 2
+    &input,
+    &mut output,
+)?;
 ```

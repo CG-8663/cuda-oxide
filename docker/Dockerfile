@@ -13,6 +13,9 @@ ENV CUDA_HOME=/usr/local/cuda \
     CUDA_PATH=/usr/local/cuda \
     CUDA_TOOLKIT_PATH=/usr/local/cuda \
     CUDA_OXIDE_LLC=/usr/bin/llc-21 \
+    HOME=/home/${USERNAME} \
+    CARGO_HOME=/home/${USERNAME}/.cargo \
+    RUSTUP_HOME=/home/${USERNAME}/.rustup \
     LIBCLANG_PATH=/usr/lib/llvm-21/lib \
     LLVM_CONFIG_PATH=/usr/bin/llvm-config-21 \
     PATH=/usr/lib/llvm-21/bin:/usr/local/cuda/bin:/home/${USERNAME}/.cargo/bin:${PATH} \
@@ -45,10 +48,23 @@ RUN apt-get update \
         lld-21 \
         llvm-21 \
         llvm-21-dev \
-    && if ! id -u "${USERNAME}" >/dev/null 2>&1; then \
-        if ! getent group "${USER_GID}" >/dev/null; then \
-            groupadd --gid "${USER_GID}" "${USERNAME}"; \
-        fi; \
+    && existing_user="$(getent passwd "${USER_UID}" | cut -d: -f1 || true)" \
+    && if [ -n "${existing_user}" ] && [ "${existing_user}" != "${USERNAME}" ]; then \
+        echo "USER_UID ${USER_UID} is already used by ${existing_user}"; \
+        exit 1; \
+    fi \
+    && if getent group "${USER_GID}" >/dev/null; then \
+        true; \
+    elif getent group "${USERNAME}" >/dev/null; then \
+        groupmod --gid "${USER_GID}" "${USERNAME}"; \
+    else \
+        groupadd --gid "${USER_GID}" "${USERNAME}"; \
+    fi \
+    && if id -u "${USERNAME}" >/dev/null 2>&1; then \
+        usermod --uid "${USER_UID}" --gid "${USER_GID}" --home "/home/${USERNAME}" --shell /bin/bash "${USERNAME}"; \
+        mkdir -p "/home/${USERNAME}"; \
+        chown -R "${USER_UID}:${USER_GID}" "/home/${USERNAME}"; \
+    else \
         useradd --uid "${USER_UID}" --gid "${USER_GID}" --create-home --shell /bin/bash "${USERNAME}"; \
     fi \
     && apt-get clean \

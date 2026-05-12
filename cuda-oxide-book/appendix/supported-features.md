@@ -81,7 +81,7 @@ roadmap, **N/A** = not applicable or no identified need.
 | PTX Output | **Full** | Default output: Rust MIR → `dialect-mir` → `mem2reg` → `dialect-llvm` → LLVM IR → `llc` → PTX. Targets sm_80 through sm_100a. |
 | NVVM IR Output | **Full** | Alternative output for libNVVM consumption with NVVM metadata. |
 | LTOIR Output | **Full** | Device-side LTO for linking with CUDA C++. Via `--dlto` flag or `CUDA_OXIDE_EMIT_LTOIR`. |
-| Float Math Intrinsics (libdevice) | **Full** | Rust `f32`/`f64` math methods (`sin`, `cos`, `exp`, `pow`, `sqrt`, ...) lower to CUDA libdevice (`__nv_*`). cuda-oxide auto-detects libdevice usage and emits NVVM IR; `cuda_host::load_kernel_module` (sync) and `cuda_async::device_context::load_kernel_module_async` (async) build the cubin via libNVVM + nvJitLink at runtime. |
+| Float Math Intrinsics (libdevice) | **Full** | Rust `f32`/`f64` math methods (`sin`, `cos`, `exp`, `pow`, `sqrt`, ...) lower to CUDA libdevice (`__nv_*`). cuda-oxide auto-detects libdevice usage and emits NVVM IR; `cuda_host::load_kernel_module` (sync) and `cuda_host::load_kernel_module_async` (async) build the cubin via libNVVM + nvJitLink at runtime. |
 | Pipeline Inspection | **Full** | `cargo oxide pipeline <example>` shows IR at each compilation stage. |
 | cuda-gdb Debug Support | **Full** | Build with debug info and launch `cuda-gdb`. `breakpoint()` intrinsic for programmatic breakpoints. |
 
@@ -91,8 +91,8 @@ roadmap, **N/A** = not applicable or no identified need.
 
 | Feature | Status | Description |
 |:--------|:-------|:------------|
-| `DisjointSlice<T>` | **Full** | Bounds-checked parallel write output slice. Access via `ThreadIndex` returns `Option<&mut T>`. |
-| `ThreadIndex` (opaque index type) | **Full** | Newtype that can only be constructed by trusted index functions. Guarantees unique indices. |
+| `DisjointSlice<T, IndexSpace>` | **Full** | Bounds-checked parallel write output slice. `get_mut` and `get_mut_indexed` return `Option<&mut T>`. The `IndexSpace` type parameter rejects mismatched 2D strides at compile time. |
+| `ThreadIndex<'kernel, IndexSpace>` | **Full** | Opaque witness only constructable by trusted index functions. `!Send + !Sync + !Copy + !Clone`, `'kernel`-scoped — non-transferable across threads, can't outlive the kernel body. |
 | `ManagedBarrier` Typestate | **Full** | Compile-time barrier lifecycle: `Uninit → Ready → Invalidated`. Invalid transitions are compile errors. |
 
 ## Runtime Library: Atomics
@@ -116,7 +116,7 @@ roadmap, **N/A** = not applicable or no identified need.
 
 | Feature | Status | Description |
 |:--------|:-------|:------------|
-| Thread/Block/Grid Intrinsics | **Partial** | `threadIdx`, `blockIdx`, `blockDim`, `index_1d()` are sound. `index_2d(row_stride)` returns `Option<ThreadIndex>` but is **currently unsound** -- it does not enforce kernel-wide stride consistency. Pass the same `row_stride` value at every call site until the principled fix lands. See [The Safety Model](../gpu-safety/the-safety-model.md#index-2d-stride-is-currently-unsound). |
+| Thread/Block/Grid Intrinsics | **Full** | `threadIdx`, `blockIdx`, `blockDim`, `gridDim`. `index_1d()` and `index_2d::<S>()` (const stride) are type-safe; `index_2d_runtime(s)` is the `unsafe` escape hatch when the stride is only known at launch time. See [The Safety Model](../gpu-safety/the-safety-model.md). |
 | Block Synchronization | **Full** | `sync_threads()` — thread block barrier. |
 | Async Barriers (mbarrier) | **Full** | Hardware async barriers for Hopper+: init, arrive, test_wait, try_wait, inval. |
 | Cluster Synchronization | **Full** | `cluster_sync()` for all blocks in a cluster. sm_90+. |
@@ -154,7 +154,8 @@ roadmap, **N/A** = not applicable or no identified need.
 
 | Feature | Status | Description |
 |:--------|:-------|:------------|
-| `cuda_launch!` Macro | **Full** | Synchronous kernel launch with argument passing, closure extraction, cluster support. |
+| `#[cuda_module]` Typed Launch | **Full** | Embedded module loading with typed sync/async launch methods. |
+| `cuda_launch!` Macro | **Full** | Lower-level launch with explicit module loading and wrappers. |
 | `#[launch_bounds]` | **Full** | Occupancy hints: max threads per block, min blocks per SM. |
 | `#[cluster_launch]` | **Full** | Compile-time cluster dimensions. Emits `.reqnctapercluster` in PTX. |
 

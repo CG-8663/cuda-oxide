@@ -145,7 +145,8 @@ pub fn insert_kernel(table: &[u64], keys: &[u32], values: &[u32]) {
 #[kernel]
 pub fn try_insert_kernel(table: &[u64], keys: &[u32], values: &[u32], mut out: DisjointSlice<u32>) {
     let tid = thread::index_1d();
-    let i = tid.get();
+    let tid_raw = tid.get();
+    let i = tid_raw;
     if i >= keys.len() {
         return;
     }
@@ -188,7 +189,8 @@ pub fn try_insert_kernel(table: &[u64], keys: &[u32], values: &[u32], mut out: D
 #[kernel]
 pub fn find_kernel(table: &[u64], keys: &[u32], mut out: DisjointSlice<u32>) {
     let tid = thread::index_1d();
-    let i = tid.get();
+    let tid_raw = tid.get();
+    let i = tid_raw;
     if i >= keys.len() {
         return;
     }

@@ -24,6 +24,7 @@ use crate::scheduling_policies::SchedulingPolicy;
 use cuda_core::{CudaFunction, CudaStream, LaunchConfig};
 use std::ffi::c_void;
 use std::future::IntoFuture;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 /// Builder that accumulates kernel arguments and submits a CUDA kernel launch.
@@ -32,48 +33,78 @@ use std::sync::Arc;
 /// and scheduled onto any stream. Also implements [`IntoFuture`] for `.await`
 /// syntax.
 #[derive(Debug)]
-pub struct AsyncKernelLaunch {
+pub struct AsyncKernelLaunch<'a> {
     /// Handle to the compiled device function.
     pub func: Arc<CudaFunction>,
-    /// Heap-allocated, type-erased argument pointers passed to the CUDA driver.
-    ///
-    /// Storage for these values is kept alive until launch submission returns,
-    /// after which the driver has already copied the parameter payload.
-    pub args: Vec<*mut c_void>,
+    /// Heap-allocated, type-erased argument storage passed to the CUDA driver.
+    args: KernelArgStorage,
     /// Grid/block dimensions and shared memory size. Must be set before launch.
     cfg: Option<LaunchConfig>,
+    /// Optional thread-block cluster dimensions for `cuLaunchKernelEx`.
+    cluster_dim: Option<(u32, u32, u32)>,
+    /// Ties borrowed device buffers to the lazy launch operation.
+    _borrows: PhantomData<&'a mut ()>,
 }
 
 /// # Safety
 ///
 /// The `*mut c_void` pointers in `args` are heap-allocated boxes that do not
 /// alias mutable state. The `Arc<CudaFunction>` is `Send + Sync`.
-unsafe impl Send for AsyncKernelLaunch {}
+unsafe impl<'a> Send for AsyncKernelLaunch<'a> {}
 
-/// Reclaims heap-allocated argument storage.
-///
-/// Each pointer in `args` was produced by `Box::into_raw`, so reconstructing
-/// and dropping the boxes here is safe. By the time `Drop` runs, launch
-/// submission has either not happened yet or has already copied the parameter
-/// values into the driver's internal launch packet.
-impl Drop for AsyncKernelLaunch {
+#[derive(Debug, Default)]
+struct KernelArgStorage {
+    ptrs: Vec<*mut c_void>,
+    drops: Vec<unsafe fn(*mut c_void)>,
+}
+
+impl Drop for KernelArgStorage {
     fn drop(&mut self) {
-        let _ = self
-            .args
-            .iter()
-            .map(|&arg| unsafe { Box::from_raw(arg as *mut usize) })
-            .collect::<Vec<_>>();
+        for (arg, drop_arg) in self.ptrs.drain(..).zip(self.drops.drain(..)) {
+            unsafe { drop_arg(arg) };
+        }
     }
 }
 
-impl AsyncKernelLaunch {
+impl KernelArgStorage {
+    fn push_boxed_arg<T>(&mut self, arg: Box<T>) {
+        unsafe fn drop_box<T>(arg: *mut c_void) {
+            let _ = unsafe { Box::from_raw(arg as *mut T) };
+        }
+
+        self.ptrs.push(Box::into_raw(arg) as *mut c_void);
+        self.drops.push(drop_box::<T>);
+    }
+
+    fn push_scalar_arg<T: Copy>(&mut self, arg: T) {
+        self.push_boxed_arg(Box::new(arg));
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [*mut c_void] {
+        &mut self.ptrs
+    }
+}
+
+impl<'a> AsyncKernelLaunch<'a> {
     /// Creates a launcher for `func` with no arguments and no launch config.
     pub fn new(func: Arc<CudaFunction>) -> Self {
         Self {
             func,
-            args: Vec::new(),
+            args: KernelArgStorage::default(),
             cfg: None,
+            cluster_dim: None,
+            _borrows: PhantomData,
         }
+    }
+
+    /// Appends a by-value `Copy` argument to the kernel launch packet.
+    ///
+    /// This is the typed-module path used for scalar, raw-pointer, custom
+    /// `Copy` structs, and `Copy` closure arguments.
+    #[inline(always)]
+    pub fn push_scalar_arg<T: Copy + 'a>(&mut self, arg: T) -> &mut Self {
+        self.args.push_scalar_arg(arg);
+        self
     }
 
     /// Appends a kernel argument. The value is heap-allocated and its pointer
@@ -112,6 +143,12 @@ impl AsyncKernelLaunch {
         self
     }
 
+    /// Sets thread-block cluster dimensions for a cluster launch.
+    pub fn set_cluster_dim(&mut self, cluster_dim: (u32, u32, u32)) -> &mut Self {
+        self.cluster_dim = Some(cluster_dim);
+        self
+    }
+
     /// Submits the kernel to `stream` via `cuLaunchKernel`.
     ///
     /// # Safety
@@ -132,18 +169,50 @@ impl AsyncKernelLaunch {
         let cfg = self
             .cfg
             .ok_or_else(|| DeviceError::Launch("Launch config not set.".to_string()))?;
-        unsafe {
-            cuda_core::launch_kernel_on_stream(
-                self.func.as_ref(),
-                cfg.grid_dim,
-                cfg.block_dim,
-                cfg.shared_mem_bytes,
-                stream.as_ref(),
-                &mut self.args,
-            )
-        }
-        .map_err(DeviceError::Driver)?;
+        let result = if let Some(cluster_dim) = self.cluster_dim {
+            unsafe {
+                cuda_core::launch_kernel_ex_on_stream(
+                    self.func.as_ref(),
+                    cfg.grid_dim,
+                    cfg.block_dim,
+                    cfg.shared_mem_bytes,
+                    cluster_dim,
+                    stream.as_ref(),
+                    self.args.as_mut_slice(),
+                )
+            }
+        } else {
+            unsafe {
+                cuda_core::launch_kernel_on_stream(
+                    self.func.as_ref(),
+                    cfg.grid_dim,
+                    cfg.block_dim,
+                    cfg.shared_mem_bytes,
+                    stream.as_ref(),
+                    self.args.as_mut_slice(),
+                )
+            }
+        };
+        result.map_err(DeviceError::Driver)?;
         Ok(())
+    }
+}
+
+/// Owns resources for a lazy async kernel launch and returns them when the GPU
+/// work has completed.
+#[derive(Debug)]
+pub struct OwnedAsyncKernelLaunch<R: Send> {
+    launch: AsyncKernelLaunch<'static>,
+    resources: R,
+}
+
+unsafe impl<R: Send> Send for OwnedAsyncKernelLaunch<R> {}
+
+impl<R: Send> OwnedAsyncKernelLaunch<R> {
+    /// Creates an owned async kernel operation from a prepared launch and the
+    /// resources that must stay alive until completion.
+    pub fn new(launch: AsyncKernelLaunch<'static>, resources: R) -> Self {
+        Self { launch, resources }
     }
 }
 
@@ -157,17 +226,16 @@ impl AsyncKernelLaunch {
 /// `.push_arg(42u32)` without manual `Box::new`.
 pub trait KernelArgument {
     /// Heap-allocates `self` and appends the pointer to `launcher.args`.
-    fn push_arg(self, launcher: &mut AsyncKernelLaunch);
+    fn push_arg(self, launcher: &mut AsyncKernelLaunch<'_>);
 }
 
 /// Passes the box's raw pointer directly as a kernel argument.
 ///
 /// This is the low-level escape hatch. Prefer passing scalars directly -- they
 /// are auto-boxed via the blanket scalar impls.
-impl<T> KernelArgument for Box<T> {
-    fn push_arg(self, launcher: &mut AsyncKernelLaunch) {
-        let r = Box::into_raw(self);
-        launcher.args.push(r as *mut _);
+impl<T: 'static> KernelArgument for Box<T> {
+    fn push_arg(self, launcher: &mut AsyncKernelLaunch<'_>) {
+        launcher.args.push_boxed_arg(self);
     }
 }
 
@@ -176,8 +244,8 @@ macro_rules! impl_scalar_kernel_arg {
         $(
             impl KernelArgument for $t {
                 #[inline(always)]
-                fn push_arg(self, launcher: &mut AsyncKernelLaunch) {
-                    Box::new(self).push_arg(launcher);
+                fn push_arg(self, launcher: &mut AsyncKernelLaunch<'_>) {
+                    launcher.push_scalar_arg(self);
                 }
             }
         )*
@@ -203,7 +271,7 @@ impl_scalar_kernel_arg!(
 )]
 pub trait KernelArguments {
     /// Pushes every element into `launcher` in order.
-    fn push_args(self, launcher: &mut AsyncKernelLaunch);
+    fn push_args(self, launcher: &mut AsyncKernelLaunch<'_>);
 }
 
 macro_rules! impl_kernel_args_tuple {
@@ -211,14 +279,14 @@ macro_rules! impl_kernel_args_tuple {
     () => {
         impl KernelArguments for () {
             #[inline(always)]
-            fn push_args(self, _launcher: &mut AsyncKernelLaunch) {}
+            fn push_args(self, _launcher: &mut AsyncKernelLaunch<'_>) {}
         }
     };
     // Recursive case: (A, B, C, ...) where each element is a KernelArgument
     ($($idx:tt : $T:ident),+) => {
         impl<$($T: KernelArgument),+> KernelArguments for ($($T,)+) {
             #[inline(always)]
-            fn push_args(self, launcher: &mut AsyncKernelLaunch) {
+            fn push_args(self, launcher: &mut AsyncKernelLaunch<'_>) {
                 $(launcher.push_arg(self.$idx);)+
             }
         }
@@ -260,7 +328,7 @@ impl_kernel_args_tuple!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9:
 impl_kernel_args_tuple!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J, 10: K, 11: L, 12: M, 13: N, 14: O, 15: P, 16: Q, 17: R, 18: S, 19: T, 20: U, 21: V, 22: W, 23: X, 24: Y, 25: Z, 26: AA, 27: AB, 28: AC, 29: AD, 30: AE, 31: AF);
 
 /// Launches the kernel on the stream bound to the execution context.
-impl DeviceOperation for AsyncKernelLaunch {
+impl<'a> DeviceOperation for AsyncKernelLaunch<'a> {
     type Output = ();
 
     unsafe fn execute(self, ctx: &ExecutionContext) -> Result<(), DeviceError> {
@@ -269,13 +337,83 @@ impl DeviceOperation for AsyncKernelLaunch {
 }
 
 /// Schedules the kernel launch via the thread-local default scheduling policy.
-impl IntoFuture for AsyncKernelLaunch {
+impl<'a> IntoFuture for AsyncKernelLaunch<'a> {
     type Output = Result<(), DeviceError>;
-    type IntoFuture = DeviceFuture<(), AsyncKernelLaunch>;
+    type IntoFuture = DeviceFuture<(), AsyncKernelLaunch<'a>>;
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
             Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
+    }
+}
+
+impl<R: Send> DeviceOperation for OwnedAsyncKernelLaunch<R> {
+    type Output = R;
+
+    unsafe fn execute(self, ctx: &ExecutionContext) -> Result<R, DeviceError> {
+        let Self { launch, resources } = self;
+        unsafe { launch.launch(ctx.get_cuda_stream()) }?;
+        Ok(resources)
+    }
+}
+
+impl<R: Send> IntoFuture for OwnedAsyncKernelLaunch<R> {
+    type Output = Result<R, DeviceError>;
+    type IntoFuture = DeviceFuture<R, OwnedAsyncKernelLaunch<R>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        match with_default_device_policy(|policy| policy.schedule(self)) {
+            Ok(Ok(future)) => future,
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct TestParams {
+        scale: f32,
+        bias: i32,
+    }
+
+    #[test]
+    fn scalar_arg_storage_accepts_custom_copy_value() {
+        let mut storage = KernelArgStorage::default();
+        let params = TestParams {
+            scale: 2.0,
+            bias: 3,
+        };
+
+        storage.push_scalar_arg(params);
+
+        assert_eq!(storage.ptrs.len(), 1);
+        assert_eq!(unsafe { *(storage.ptrs[0] as *const TestParams) }, params);
+    }
+
+    #[test]
+    fn arg_storage_drops_values_with_their_original_type() {
+        struct DropCounter(Rc<Cell<usize>>);
+
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+
+        let drops = Rc::new(Cell::new(0));
+        let mut storage = KernelArgStorage::default();
+
+        storage.push_boxed_arg(Box::new(DropCounter(Rc::clone(&drops))));
+        assert_eq!(drops.get(), 0);
+
+        drop(storage);
+        assert_eq!(drops.get(), 1);
     }
 }

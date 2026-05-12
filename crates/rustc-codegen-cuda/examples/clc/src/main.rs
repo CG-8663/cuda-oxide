@@ -30,7 +30,7 @@ use cuda_device::clc::{
     clc_query_is_canceled, clc_try_cancel,
 };
 use cuda_device::{DisjointSlice, SharedArray, cluster_launch, kernel, thread};
-use cuda_host::cuda_launch;
+use cuda_host::cuda_module;
 
 // Grid larger than SM count (148 SMs on B200) to exercise work-stealing
 const TILES_X: u32 = 32;
@@ -42,135 +42,139 @@ const ENTRY_SIZE: usize = 4;
 // ============================================================================
 // Test 0: CLC try_cancel + query pipeline (unicast)
 // ============================================================================
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-/// Persistent kernel that steals work via CLC try_cancel.
-///
-/// Each running CTA:
-///   1. Processes its own tile (from blockIdx)
-///   2. Loops calling clc_try_cancel to steal pending CTAs
-///   3. Writes stolen tile coordinates to output for host verification
-#[kernel]
-#[cluster_launch(2, 1, 1)]
-pub fn test_clc_try_cancel(mut output: DisjointSlice<u32>, _tiles_total: u32) {
-    // 16-byte aligned shared memory for the CLC 128-bit response
-    static mut CLC_RESPONSE: SharedArray<u64, 2, 16> = SharedArray::UNINIT;
-    static mut CLC_BAR: Barrier = Barrier::UNINIT;
+    /// Persistent kernel that steals work via CLC try_cancel.
+    ///
+    /// Each running CTA:
+    ///   1. Processes its own tile (from blockIdx)
+    ///   2. Loops calling clc_try_cancel to steal pending CTAs
+    ///   3. Writes stolen tile coordinates to output for host verification
+    #[kernel]
+    #[cluster_launch(2, 1, 1)]
+    pub fn test_clc_try_cancel(mut output: DisjointSlice<u32>, _tiles_total: u32) {
+        // 16-byte aligned shared memory for the CLC 128-bit response
+        static mut CLC_RESPONSE: SharedArray<u64, 2, 16> = SharedArray::UNINIT;
+        static mut CLC_BAR: Barrier = Barrier::UNINIT;
 
-    let tid = thread::threadIdx_x();
+        let tid = thread::threadIdx_x();
 
-    if tid != 0 {
-        return;
-    }
-
-    let my_x = thread::blockIdx_x();
-    let my_y = thread::blockIdx_y();
-    let my_tile = my_y * TILES_X + my_x;
-
-    if (my_tile as usize) * ENTRY_SIZE + 3 < output.len() {
-        let base = (my_tile as usize) * ENTRY_SIZE;
-        unsafe {
-            *output.get_unchecked_mut(base) = my_x;
-            *output.get_unchecked_mut(base + 1) = my_y;
-            *output.get_unchecked_mut(base + 2) = 0;
-            *output.get_unchecked_mut(base + 3) = 0;
-        }
-    }
-
-    let resp_ptr = addr_of_mut!(CLC_RESPONSE) as *mut u64;
-    let mut iter = 0u32;
-
-    // Init mbarrier ONCE — it auto-reinits after each phase completes
-    unsafe {
-        mbarrier_init(&raw mut CLC_BAR, 1);
-        fence_proxy_async_shared_cta();
-    }
-
-    loop {
-        let parity = iter & 1;
-
-        unsafe { mbarrier_arrive_expect_tx(&raw const CLC_BAR, 1, 16) };
-
-        unsafe {
-            clc_try_cancel(resp_ptr as *mut u8, &raw mut CLC_BAR);
+        if tid != 0 {
+            return;
         }
 
-        unsafe { while !mbarrier_try_wait_parity(&raw const CLC_BAR, parity) {} }
+        let my_x = thread::blockIdx_x();
+        let my_y = thread::blockIdx_y();
+        let my_tile = my_y * TILES_X + my_x;
 
-        let resp_lo = unsafe { *resp_ptr };
-        let resp_hi = unsafe { *resp_ptr.add(1) };
-
-        // is_canceled=1 → CTA was canceled → work available (decode coords)
-        // is_canceled=0 → no pending CTAs → done
-        let is_canceled = unsafe { clc_query_is_canceled(resp_lo, resp_hi) };
-        if is_canceled == 0 {
-            break;
-        }
-
-        let stolen_x = unsafe { clc_query_get_first_ctaid_x(resp_lo, resp_hi) };
-        let stolen_y = unsafe { clc_query_get_first_ctaid_y(resp_lo, resp_hi) };
-        let stolen_z = unsafe { clc_query_get_first_ctaid_z(resp_lo, resp_hi) };
-
-        let tile_id = stolen_y * TILES_X + stolen_x;
-        if (tile_id as usize) * ENTRY_SIZE + 3 < output.len() {
-            let base = (tile_id as usize) * ENTRY_SIZE;
+        if (my_tile as usize) * ENTRY_SIZE + 3 < output.len() {
+            let base = (my_tile as usize) * ENTRY_SIZE;
             unsafe {
-                *output.get_unchecked_mut(base) = stolen_x;
-                *output.get_unchecked_mut(base + 1) = stolen_y;
-                *output.get_unchecked_mut(base + 2) = stolen_z;
+                *output.get_unchecked_mut(base) = my_x;
+                *output.get_unchecked_mut(base + 1) = my_y;
+                *output.get_unchecked_mut(base + 2) = 0;
                 *output.get_unchecked_mut(base + 3) = 0;
             }
         }
 
-        iter += 1;
-    }
-}
+        let resp_ptr = addr_of_mut!(CLC_RESPONSE) as *mut u64;
+        let mut iter = 0u32;
 
-// ============================================================================
-// Test 1: PTX-only compilation test (exercises all 6 intrinsics in one kernel)
-// ============================================================================
-
-/// Minimal kernel that calls every CLC intrinsic to verify PTX generation.
-/// Not intended to run correctly — just validates the compiler pipeline.
-#[kernel]
-#[cluster_launch(2, 1, 1)]
-pub fn test_clc_all_intrinsics(mut output: DisjointSlice<u32>) {
-    static mut RESP: SharedArray<u64, 2, 16> = SharedArray::UNINIT;
-    static mut BAR: Barrier = Barrier::UNINIT;
-
-    let tid = thread::threadIdx_x();
-    if tid != 0 {
-        return;
-    }
-
-    unsafe {
-        mbarrier_init(&raw mut BAR, 1);
-        fence_proxy_async_shared_cta();
-    }
-
-    unsafe { mbarrier_arrive_expect_tx(&raw const BAR, 1, 16) };
-
-    let resp_ptr = addr_of_mut!(RESP) as *mut u64;
-
-    unsafe {
-        clc_try_cancel(resp_ptr as *mut u8, &raw mut BAR);
-    }
-
-    unsafe { while !mbarrier_try_wait_parity(&raw const BAR, 0) {} }
-
-    let lo = unsafe { *resp_ptr };
-    let hi = unsafe { *resp_ptr.add(1) };
-
-    let canceled = unsafe { clc_query_is_canceled(lo, hi) };
-    let ctx = unsafe { clc_query_get_first_ctaid_x(lo, hi) };
-    let cty = unsafe { clc_query_get_first_ctaid_y(lo, hi) };
-    let ctz = unsafe { clc_query_get_first_ctaid_z(lo, hi) };
-
-    if output.len() >= 4 {
+        // Init mbarrier ONCE — it auto-reinits after each phase completes
         unsafe {
-            *output.get_unchecked_mut(0) = canceled;
-            *output.get_unchecked_mut(1) = ctx;
-            *output.get_unchecked_mut(2) = cty;
-            *output.get_unchecked_mut(3) = ctz;
+            mbarrier_init(&raw mut CLC_BAR, 1);
+            fence_proxy_async_shared_cta();
+        }
+
+        loop {
+            let parity = iter & 1;
+
+            unsafe { mbarrier_arrive_expect_tx(&raw const CLC_BAR, 1, 16) };
+
+            unsafe {
+                clc_try_cancel(resp_ptr as *mut u8, &raw mut CLC_BAR);
+            }
+
+            unsafe { while !mbarrier_try_wait_parity(&raw const CLC_BAR, parity) {} }
+
+            let resp_lo = unsafe { *resp_ptr };
+            let resp_hi = unsafe { *resp_ptr.add(1) };
+
+            // is_canceled=1 → CTA was canceled → work available (decode coords)
+            // is_canceled=0 → no pending CTAs → done
+            let is_canceled = unsafe { clc_query_is_canceled(resp_lo, resp_hi) };
+            if is_canceled == 0 {
+                break;
+            }
+
+            let stolen_x = unsafe { clc_query_get_first_ctaid_x(resp_lo, resp_hi) };
+            let stolen_y = unsafe { clc_query_get_first_ctaid_y(resp_lo, resp_hi) };
+            let stolen_z = unsafe { clc_query_get_first_ctaid_z(resp_lo, resp_hi) };
+
+            let tile_id = stolen_y * TILES_X + stolen_x;
+            if (tile_id as usize) * ENTRY_SIZE + 3 < output.len() {
+                let base = (tile_id as usize) * ENTRY_SIZE;
+                unsafe {
+                    *output.get_unchecked_mut(base) = stolen_x;
+                    *output.get_unchecked_mut(base + 1) = stolen_y;
+                    *output.get_unchecked_mut(base + 2) = stolen_z;
+                    *output.get_unchecked_mut(base + 3) = 0;
+                }
+            }
+
+            iter += 1;
+        }
+    }
+
+    // ============================================================================
+    // Test 1: PTX-only compilation test (exercises all 6 intrinsics in one kernel)
+    // ============================================================================
+
+    /// Minimal kernel that calls every CLC intrinsic to verify PTX generation.
+    /// Not intended to run correctly — just validates the compiler pipeline.
+    #[kernel]
+    #[cluster_launch(2, 1, 1)]
+    pub fn test_clc_all_intrinsics(mut output: DisjointSlice<u32>) {
+        static mut RESP: SharedArray<u64, 2, 16> = SharedArray::UNINIT;
+        static mut BAR: Barrier = Barrier::UNINIT;
+
+        let tid = thread::threadIdx_x();
+        if tid != 0 {
+            return;
+        }
+
+        unsafe {
+            mbarrier_init(&raw mut BAR, 1);
+            fence_proxy_async_shared_cta();
+        }
+
+        unsafe { mbarrier_arrive_expect_tx(&raw const BAR, 1, 16) };
+
+        let resp_ptr = addr_of_mut!(RESP) as *mut u64;
+
+        unsafe {
+            clc_try_cancel(resp_ptr as *mut u8, &raw mut BAR);
+        }
+
+        unsafe { while !mbarrier_try_wait_parity(&raw const BAR, 0) {} }
+
+        let lo = unsafe { *resp_ptr };
+        let hi = unsafe { *resp_ptr.add(1) };
+
+        let canceled = unsafe { clc_query_is_canceled(lo, hi) };
+        let ctx = unsafe { clc_query_get_first_ctaid_x(lo, hi) };
+        let cty = unsafe { clc_query_get_first_ctaid_y(lo, hi) };
+        let ctz = unsafe { clc_query_get_first_ctaid_z(lo, hi) };
+
+        if output.len() >= 4 {
+            unsafe {
+                *output.get_unchecked_mut(0) = canceled;
+                *output.get_unchecked_mut(1) = ctx;
+                *output.get_unchecked_mut(2) = cty;
+                *output.get_unchecked_mut(3) = ctz;
+            }
         }
     }
 }
@@ -199,6 +203,7 @@ fn main() {
     let module = ctx
         .load_module_from_file("clc.ptx")
         .expect("Load PTX module");
+    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
     println!("PTX loaded and assembled successfully.\n");
 
     // ====================================================================
@@ -217,18 +222,16 @@ fn main() {
     );
     println!("Total tiles: {}\n", total_tiles);
 
-    let launch_result = cuda_launch! {
-        kernel: test_clc_try_cancel,
-        stream: stream,
-        module: module,
-        config: LaunchConfig {
+    let launch_result = module.test_clc_try_cancel(
+        (stream).as_ref(),
+        LaunchConfig {
             grid_dim: (TILES_X, TILES_Y, 1),
             block_dim: (32, 1, 1),
             shared_mem_bytes: 0,
         },
-        cluster_dim: (2, 1, 1),
-        args: [slice_mut(output_dev), total_tiles]
-    };
+        &mut output_dev,
+        total_tiles,
+    );
 
     match launch_result {
         Ok(_) => match stream.synchronize() {
@@ -282,18 +285,15 @@ fn main() {
 
     let mut all_output = DeviceBuffer::<u32>::zeroed(&stream, 4).unwrap();
 
-    let launch_result = cuda_launch! {
-        kernel: test_clc_all_intrinsics,
-        stream: stream,
-        module: module,
-        config: LaunchConfig {
+    let launch_result = module.test_clc_all_intrinsics(
+        (stream).as_ref(),
+        LaunchConfig {
             grid_dim: (4, 1, 1),
             block_dim: (32, 1, 1),
             shared_mem_bytes: 0,
         },
-        cluster_dim: (2, 1, 1),
-        args: [slice_mut(all_output)]
-    };
+        &mut all_output,
+    );
 
     match launch_result {
         Ok(_) => match stream.synchronize() {

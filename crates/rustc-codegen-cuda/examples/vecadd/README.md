@@ -20,35 +20,43 @@ This example demonstrates the simplest possible CUDA kernel: element-wise vector
 
 #[kernel]
 pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
-    let idx = thread::index_1d();
-    if let Some(c_elem) = c.get_mut(idx) {
-        *c_elem = a[idx.get()] + b[idx.get()];
+    if let Some((c_elem, idx)) = c.get_mut_indexed() {
+        let i = idx.get();
+        *c_elem = a[i] + b[i];
     }
 }
 ```
 
+In this example the kernel lives inside a `#[cuda_module]` module, which also
+generates the typed host-side loader and launch method.
+
 ### Thread Indexing
 
-- `thread::index_1d()` returns a `BoundedIdx` that provides safe bounds checking
-- `idx.in_bounds(len)` checks if thread is within valid range
-- `idx.get()` returns the raw `usize` index
+- `c.get_mut_indexed()` is the one-call form: it mints the per-thread `ThreadIndex` and resolves it to a `&mut T` in a single shot, returning `None` for out-of-bounds threads.
+- The explicit two-step form `let idx = thread::index_1d(); c.get_mut(idx)` is also available when you need the index to address other slices.
+- `idx.get()` returns the raw `usize` index for use against regular slices like `a` and `b`.
 
 ### Memory Safety
 
-- `DisjointSlice<T>` provides mutable access with the guarantee that each thread writes to a unique location
-- Input slices `&[f32]` are read-only on the device
+- `DisjointSlice<T, IndexSpace>` provides mutable access with the guarantee that each thread writes to a unique location.
+- The `ThreadIndex` witness is `!Send + !Sync + !Copy + !Clone` and `'kernel`-scoped, so it can't be smuggled across threads.
+- Input slices `&[f32]` are read-only on the device.
 
-### cuda_launch! Macro
+### Typed Module Loading
 
 ```rust
-cuda_launch! {
-    kernel: vecadd,
-    stream: stream,
-    module: module,
-    config: LaunchConfig::for_num_elems(N as u32),
-    args: [slice(a_dev), slice(b_dev), slice_mut(c_dev)]
-}
+let module = kernels::load(&ctx)?;
+module.vecadd(
+    &stream,
+    LaunchConfig::for_num_elems(N as u32),
+    &a_dev,
+    &b_dev,
+    &mut c_dev,
+)?;
 ```
+
+The `vecadd` method is generated from the kernel signature, so the host call
+has autocomplete for the kernel name and typed `DeviceBuffer<T>` arguments.
 
 ## Build and Run
 
@@ -78,11 +86,11 @@ Output vector (first 5 elements):
 
 ## Potential Errors
 
-| Error                      | Cause                  | Solution                                      |
-|----------------------------|------------------------|-----------------------------------------------|
-| `CUDA_ERROR_NO_DEVICE`     | No GPU found           | Ensure NVIDIA driver is installed             |
-| `Failed to load PTX module`| PTX compilation failed | Check that PTX file exists in crate root      |
-| `Kernel launch failed`     | Invalid launch config  | Ensure grid/block dims don't exceed limits    |
+| Error                                | Cause                      | Solution                                  |
+|--------------------------------------|----------------------------|-------------------------------------------|
+| `CUDA_ERROR_NO_DEVICE`               | No GPU found               | Ensure NVIDIA driver is installed         |
+| `Failed to load embedded CUDA module`| Embedded PTX was not found | Build through `cargo oxide run vecadd`    |
+| `Kernel launch failed`               | Invalid launch config      | Ensure grid/block dims don't exceed limits|
 
 ## How It Works Under the Hood
 
@@ -91,7 +99,7 @@ Output vector (first 5 elements):
    - Finds `cuda_oxide_kernel_<hash>_vecadd` (from `#[kernel]`)
    - Routes it to mir-importer → PTX generation
    - Routes `main` and other host code to standard LLVM
-3. Final binary contains both native host code AND loads external PTX
+3. Final binary contains both native host code and embedded PTX
 
 ## Generated PTX
 

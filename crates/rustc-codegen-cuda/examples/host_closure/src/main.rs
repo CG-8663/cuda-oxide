@@ -14,7 +14,7 @@
 //!
 //! 1. Generic kernel with `Fn` trait bound: `fn map<F: Fn(T) -> T + Copy>(...)`
 //! 2. Closure with captures: `move |x| x * factor`
-//! 3. Automatic capture extraction in `cuda_launch!` macro
+//! 3. Closure values passed through the typed `#[cuda_module]` launch method
 //! 4. Scalarization of closure captures to PTX parameters
 //!
 //! ## Expected Flow
@@ -30,17 +30,22 @@ use cuda_device::{DisjointSlice, kernel, thread};
 // =============================================================================
 // CLOSURE-ACCEPTING GENERIC KERNEL
 // =============================================================================
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-/// Generic map kernel - applies a function to each element.
-///
-/// The key feature: `F` can be a closure with captures!
-/// When called with `map(move |x| x * factor, ...)`, rustc monomorphizes
-/// this to `map<f32, {closure capturing factor}>`.
-#[kernel]
-pub fn map<T: Copy, F: Fn(T) -> T + Copy>(f: F, input: &[T], mut out: DisjointSlice<T>) {
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
-        *out_elem = f(input[idx.get()]);
+    /// Generic map kernel - applies a function to each element.
+    ///
+    /// The key feature: `F` can be a closure with captures!
+    /// When called with `map(move |x| x * factor, ...)`, rustc monomorphizes
+    /// this to `map<f32, {closure capturing factor}>`.
+    #[kernel]
+    pub fn map<T: Copy, F: Fn(T) -> T + Copy>(f: F, input: &[T], mut out: DisjointSlice<T>) {
+        let idx = thread::index_1d();
+        let idx_raw = idx.get();
+        if let Some(out_elem) = out.get_mut(idx) {
+            *out_elem = f(input[idx_raw]);
+        }
     }
 }
 
@@ -48,7 +53,7 @@ pub fn map<T: Copy, F: Fn(T) -> T + Copy>(f: F, input: &[T], mut out: DisjointSl
 // HOST CODE
 // =============================================================================
 
-use cuda_host::cuda_launch;
+use cuda_host::cuda_module;
 
 fn main() {
     println!("=== Unified Closure Kernel Test ===\n");
@@ -69,6 +74,7 @@ fn main() {
     let module = ctx
         .load_module_from_file("host_closure.ptx")
         .expect("Failed to load PTX module");
+    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
 
     // =========================================================================
     // TEST 1: Closure with single capture
@@ -84,13 +90,13 @@ fn main() {
         // 1. Parse the closure
         // 2. Extract `factor` as a captured variable
         // 3. Pass `factor` as a kernel argument
-        let _res = cuda_launch! {
-            kernel: map::<f32, _>,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(N as u32),
-            args: [move |x: f32| x * factor, slice(input_dev), slice_mut(output_dev)]
-        };
+        let _res = module.map::<f32, _>(
+            (stream).as_ref(),
+            LaunchConfig::for_num_elems(N as u32),
+            move |x: f32| x * factor,
+            &input_dev,
+            &mut output_dev,
+        );
 
         // Verify
         let output_host = output_dev
@@ -121,13 +127,13 @@ fn main() {
         output_dev = DeviceBuffer::<f32>::zeroed(&stream, N).expect("Failed to alloc output");
 
         // Closure captures both `scale` and `offset`
-        let _res = cuda_launch! {
-            kernel: map::<f32, _>,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(N as u32),
-            args: [move |x: f32| x * scale + offset, slice(input_dev), slice_mut(output_dev)]
-        };
+        let _res = module.map::<f32, _>(
+            (stream).as_ref(),
+            LaunchConfig::for_num_elems(N as u32),
+            move |x: f32| x * scale + offset,
+            &input_dev,
+            &mut output_dev,
+        );
 
         // Verify
         let output_host = output_dev
@@ -154,13 +160,13 @@ fn main() {
         output_dev = DeviceBuffer::<f32>::zeroed(&stream, N).expect("Failed to alloc output");
 
         // No captures - just inline computation
-        let _res = cuda_launch! {
-            kernel: map::<f32, _>,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(N as u32),
-            args: [|x: f32| x * 2.0, slice(input_dev), slice_mut(output_dev)]
-        };
+        let _res = module.map::<f32, _>(
+            (stream).as_ref(),
+            LaunchConfig::for_num_elems(N as u32),
+            |x: f32| x * 2.0,
+            &input_dev,
+            &mut output_dev,
+        );
 
         // Verify
         let output_host = output_dev
@@ -192,13 +198,13 @@ fn main() {
         output_dev = DeviceBuffer::<f32>::zeroed(&stream, N).expect("Failed to alloc output");
 
         // Closure captures a, b, c (3 captures)
-        let _res = cuda_launch! {
-            kernel: map::<f32, _>,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(N as u32),
-            args: [move |x: f32| a * x * x + b * x + c, slice(input_dev), slice_mut(output_dev)]
-        };
+        let _res = module.map::<f32, _>(
+            (stream).as_ref(),
+            LaunchConfig::for_num_elems(N as u32),
+            move |x: f32| a * x * x + b * x + c,
+            &input_dev,
+            &mut output_dev,
+        );
 
         // Verify: f(x) = 0.5*x^2 + 2*x + 1
         let output_host = output_dev
@@ -241,13 +247,13 @@ fn main() {
         output_dev = DeviceBuffer::<f32>::zeroed(&stream, N).expect("Failed to alloc output");
 
         // Closure captures w1, w2, w3, w4 (4 captures)
-        let _res = cuda_launch! {
-            kernel: map::<f32, _>,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(N as u32),
-            args: [move |x: f32| w1 * x + w2 + w3 * w4, slice(input_dev), slice_mut(output_dev)]
-        };
+        let _res = module.map::<f32, _>(
+            (stream).as_ref(),
+            LaunchConfig::for_num_elems(N as u32),
+            move |x: f32| w1 * x + w2 + w3 * w4,
+            &input_dev,
+            &mut output_dev,
+        );
 
         // Verify: f(x) = 3*x + 5 + 2*7 = 3*x + 19
         let output_host = output_dev

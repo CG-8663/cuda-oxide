@@ -93,7 +93,7 @@ A common workflow for catching device-side errors:
 
 ```rust
 // Launch kernel
-cuda_launch! { /* ... */ }.expect("Launch failed");
+module.vecadd(&stream, config, &a, &b, &mut c).expect("Launch failed");
 
 // Synchronize and check for traps
 stream.synchronize().expect("Kernel trapped -- check gpu_assert! conditions");
@@ -107,11 +107,11 @@ assertions to narrow down the problem.
 
 ### `DriverError`
 
-The synchronous launch path (`cuda_launch!`) returns
+The synchronous launch path returns
 `Result<(), DriverError>`. The `DriverError` wraps a CUDA driver result code:
 
 ```rust
-match cuda_launch! { /* ... */ } {
+match module.vecadd(&stream, config, &a, &b, &mut c) {
     Ok(()) => { /* launched successfully */ }
     Err(e) => eprintln!("Launch failed: {e}"),
 }
@@ -119,7 +119,7 @@ match cuda_launch! { /* ... */ } {
 
 ### `DeviceError`
 
-The async path (`cuda_launch_async!` / `DeviceOperation`) uses `DeviceError`,
+The async path (`{kernel}_async` / `DeviceOperation`) uses `DeviceError`,
 which wraps driver errors alongside context and scheduling failures:
 
 ```rust

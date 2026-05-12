@@ -1,4 +1,5 @@
 target/
+.smoketest-logs/
 *.ptx
 *.ltoir
 .ltoir_arch
@@ -25,6 +26,8 @@ crates/dialect-mir/src/passes/
 **/*.long-type-*.txt
 
 # GPU compilation artifacts
+.oxide-artifacts/
+**/.oxide-artifacts/
 *.cubin
 *.gpu
 *.fatbin

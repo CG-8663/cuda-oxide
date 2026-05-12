@@ -35,10 +35,14 @@
 //! Raw bindings are available as [`sys`] for any driver entry point not yet
 //! wrapped.
 
+#![feature(f16)]
+
 /// CUDA context management (primary context, RAII).
 pub mod context;
 /// Owning device memory buffer with host-device transfer helpers.
 pub mod device_buffer;
+/// Embedded device artifact discovery and CUDA module loading.
+pub mod embedded;
 /// CUDA driver error types and result conversion.
 pub mod error;
 /// CUDA event management (timing, synchronization).
@@ -59,7 +63,8 @@ pub mod vmm;
 pub use context::CudaContext;
 /// Raw CUDA driver bindings re-exported for direct access when needed.
 pub use cuda_bindings as sys;
-pub use device_buffer::DeviceBuffer;
+pub use device_buffer::{DeviceBuffer, DeviceCopy};
+pub use embedded::{EmbeddedModule, EmbeddedModuleError};
 pub use error::{DriverError, IntoResult};
 pub use event::CudaEvent;
 pub use launch::LaunchConfig;

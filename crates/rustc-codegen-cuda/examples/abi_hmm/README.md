@@ -100,7 +100,7 @@ let mut data = Extreme { a: b'X', b: 42 };
 let ptr = &mut data as *mut Extreme;  // HOST stack pointer!
 
 // GPU directly modifies host memory
-cuda_launch! { kernel: modify_extreme_hmm, args: [ptr, 2i128, &mut device_ran] }
+module.modify_extreme_hmm(stream.as_ref(), cfg, ptr, 2i128, &mut device_ran)?;
 
 assert_eq!(data.b, 84);   // GPU wrote to host memory ✓
 assert_eq!(device_ran, 1); // Kernel executed on GPU ✓
@@ -113,7 +113,7 @@ let scale: i128 = 3;
 // move closure: captures `scale` BY VALUE
 let closure = move |p: *mut Extreme| unsafe { (*p).b *= scale };
 
-cuda_launch! { kernel: with_closure_hmm, args: [ptr, &mut device_ran, closure] }
+module.with_closure_hmm(stream.as_ref(), cfg, ptr, &mut device_ran, closure)?;
 
 assert_eq!(data.b, 300);  // 100 * 3 = 300 ✓
 ```
@@ -126,12 +126,15 @@ let scale: i128 = 4;
 // The closure struct contains { scale: &i128 } - a pointer to host memory!
 // GPU accesses this host address via HMM
 
-cuda_launch! {
-    kernel: with_closure_hmm,
-    args: [ptr, &mut device_ran, |p: *mut Extreme| unsafe {
+module.with_closure_hmm(
+    stream.as_ref(),
+    cfg,
+    ptr,
+    &mut device_ran,
+    |p: *mut Extreme| unsafe {
         (*p).b *= scale  // GPU reads &scale via HMM
-    }]
-}
+    },
+)?;
 
 assert_eq!(data.b, 200);  // 50 * 4 = 200 ✓
 ```
@@ -145,32 +148,35 @@ let scale: i128 = 5;
 let offset: i128 = 7;
 // Closure captures BOTH by reference: { scale: &i128, offset: &i128 }
 
-cuda_launch! {
-    kernel: with_closure_hmm,
-    args: [ptr, &mut device_ran, |p: *mut Extreme| unsafe {
+module.with_closure_hmm(
+    stream.as_ref(),
+    cfg,
+    ptr,
+    &mut device_ran,
+    |p: *mut Extreme| unsafe {
         (*p).b = (*p).b * scale + offset  // GPU reads both via HMM
-    }]
-}
+    },
+)?;
 
 assert_eq!(data.b, 57);  // 10 * 5 + 7 = 57 ✓
 ```
 
 ## How Reference Captures Work
 
-For **move closures**, the `cuda_launch!` macro passes each capture by value:
+For **move closures**, the typed launch method passes each capture by value:
 
 ```rust
 move |p| (*p).b *= scale
-// Macro generates: __launch.arg(&scale)  // passes the i128 VALUE
+// Launch passes the i128 VALUE
 ```
 
-For **non-move closures**, the macro passes the **address** of each capture:
+For **non-move closures**, the typed launch method passes the **address** of each capture:
 
 ```rust
 |p| (*p).b *= scale
-// Macro generates:
+// Launch marshalling stores:
 //   let __ref_capture = &scale as *const _;
-//   __launch.arg(&__ref_capture);  // passes the POINTER to host memory
+// which passes the POINTER to host memory
 ```
 
 The GPU then accesses this host pointer via HMM to read the value.

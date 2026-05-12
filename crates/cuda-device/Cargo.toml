@@ -9,3 +9,6 @@ description = "Device-side intrinsics and types for CUDA kernels in Rust"
 
 [dependencies]
 cuda-macros = { workspace = true }
+
+[dev-dependencies]
+trybuild = "1"

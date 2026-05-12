@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#![allow(clippy::not_unsafe_ptr_arg_deref, clippy::missing_safety_doc)]
+
 //! TMA Copy Example (SM90+ / Hopper+)
 //!
 //! Demonstrates TMA (Tensor Memory Accelerator) usage:
@@ -16,7 +18,7 @@
 //!   cargo oxide run tma_copy
 
 use cuda_core::{
-    CudaContext, CudaModule, CudaStream, DeviceBuffer, LaunchConfig,
+    CudaContext, CudaStream, DeviceBuffer, LaunchConfig,
     sys::{
         self as cuda_sys, CUtensorMap, CUtensorMapDataType_enum_CU_TENSOR_MAP_DATA_TYPE_FLOAT32,
         CUtensorMapFloatOOBfill_enum_CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE,
@@ -31,140 +33,150 @@ use cuda_device::barrier::{
 };
 use cuda_device::tma::{TmaDescriptor, cp_async_bulk_tensor_2d_g2s};
 use cuda_device::{DisjointSlice, SharedArray, kernel, thread};
-use cuda_host::cuda_launch;
+use cuda_host::cuda_module;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 
 // =============================================================================
 // KERNELS
 // =============================================================================
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-/// TMA 2D tile copy test kernel.
-///
-/// Pattern: ALL threads participate in barrier
-/// - Thread 0: arrive_expect_tx (arrive + set expected bytes) + issue TMA
-/// - Other threads: regular arrive
-/// - ALL threads: wait on barrier
-#[kernel]
-pub fn tma_copy_2d_test(
-    tensor_map: *const TmaDescriptor,
-    mut out: DisjointSlice<f32>,
-    tile_x: i32,
-    tile_y: i32,
-) {
-    const TILE_SIZE: usize = 64 * 64;
-    const TILE_BYTES: u32 = (TILE_SIZE * 4) as u32;
-    // TMA destinations require 128-byte alignment
-    static mut TILE: SharedArray<f32, TILE_SIZE, 128> = SharedArray::UNINIT;
-    // Barriers use natural alignment (8 bytes for i64)
-    static mut BAR: Barrier = Barrier::UNINIT;
+    /// TMA 2D tile copy test kernel.
+    ///
+    /// Pattern: ALL threads participate in barrier
+    /// - Thread 0: arrive_expect_tx (arrive + set expected bytes) + issue TMA
+    /// - Other threads: regular arrive
+    /// - ALL threads: wait on barrier
+    #[kernel]
+    pub fn tma_copy_2d_test(
+        tensor_map: *const TmaDescriptor,
+        mut out: DisjointSlice<f32>,
+        tile_x: i32,
+        tile_y: i32,
+    ) {
+        const TILE_SIZE: usize = 64 * 64;
+        const TILE_BYTES: u32 = (TILE_SIZE * 4) as u32;
+        // TMA destinations require 128-byte alignment
+        static mut TILE: SharedArray<f32, TILE_SIZE, 128> = SharedArray::UNINIT;
+        // Barriers use natural alignment (8 bytes for i64)
+        static mut BAR: Barrier = Barrier::UNINIT;
 
-    let tid = thread::threadIdx_x();
-    let block_size = thread::blockDim_x();
-    let gid = thread::index_1d();
+        let tid = thread::threadIdx_x();
+        let block_size = thread::blockDim_x();
+        let gid = thread::index_1d();
 
-    // Thread 0 initializes barrier with BLOCK SIZE (all threads will arrive)
-    if tid == 0 {
-        unsafe {
-            mbarrier_init(&raw mut BAR, block_size);
-            // CRITICAL: Fence to make barrier init visible to TMA async proxy!
-            fence_proxy_async_shared_cta();
-        }
-    }
-    thread::sync_threads();
-
-    // Thread 0: issue TMA + arrive with expected bytes
-    if tid == 0 {
-        unsafe {
-            cp_async_bulk_tensor_2d_g2s(
-                &raw mut TILE as *mut u8,
-                tensor_map,
-                tile_x,
-                tile_y,
-                &raw mut BAR,
-            );
-        }
-    }
-
-    // ALL threads arrive at barrier
-    // Thread 0: arrive with expected TX bytes
-    // Other threads: regular arrive
-    let token = unsafe {
+        // Thread 0 initializes barrier with BLOCK SIZE (all threads will arrive)
         if tid == 0 {
-            mbarrier_arrive_expect_tx(&raw const BAR, 1, TILE_BYTES)
-        } else {
-            mbarrier_arrive(&raw const BAR)
+            unsafe {
+                mbarrier_init(&raw mut BAR, block_size);
+                // CRITICAL: Fence to make barrier init visible to TMA async proxy!
+                fence_proxy_async_shared_cta();
+            }
         }
-    };
+        thread::sync_threads();
 
-    // ALL threads wait for barrier completion (using try_wait for better scheduling)
-    unsafe {
-        while !mbarrier_try_wait(&raw const BAR, token) {
-            // Hardware may briefly suspend thread while waiting
+        // Thread 0: issue TMA + arrive with expected bytes
+        if tid == 0 {
+            unsafe {
+                cp_async_bulk_tensor_2d_g2s(
+                    &raw mut TILE as *mut u8,
+                    tensor_map,
+                    tile_x,
+                    tile_y,
+                    &raw mut BAR,
+                );
+            }
+        }
+
+        // ALL threads arrive at barrier
+        // Thread 0: arrive with expected TX bytes
+        // Other threads: regular arrive
+        let token = unsafe {
+            if tid == 0 {
+                mbarrier_arrive_expect_tx(&raw const BAR, 1, TILE_BYTES)
+            } else {
+                mbarrier_arrive(&raw const BAR)
+            }
+        };
+
+        // ALL threads wait for barrier completion (using try_wait for better scheduling)
+        unsafe {
+            while !mbarrier_try_wait(&raw const BAR, token) {
+                // Hardware may briefly suspend thread while waiting
+            }
+        }
+
+        // Now TMA is complete, shared memory has the data
+        thread::sync_threads();
+
+        // Each thread copies one element to output
+        let idx = gid.get();
+        if idx < TILE_SIZE {
+            let val = unsafe { TILE[idx] };
+            if let Some(out_elem) = out.get_mut(gid) {
+                *out_elem = val;
+            }
         }
     }
 
-    // Now TMA is complete, shared memory has the data
-    thread::sync_threads();
+    /// Simple TMA pipeline test - ALL threads participate in barrier.
+    #[kernel]
+    pub fn tma_pipeline_test(tensor_map: *const TmaDescriptor, mut out: DisjointSlice<u32>) {
+        const TILE_SIZE: usize = 1024;
+        const TILE_BYTES: u32 = (TILE_SIZE * 4) as u32;
+        // TMA destinations require 128-byte alignment
+        static mut TILE: SharedArray<f32, TILE_SIZE, 128> = SharedArray::UNINIT;
+        // Barriers use natural alignment (8 bytes for i64)
+        static mut BAR: Barrier = Barrier::UNINIT;
 
-    // Each thread copies one element to output
-    let idx = gid.get();
-    if idx < TILE_SIZE {
-        let val = unsafe { TILE[idx] };
+        let tid = thread::threadIdx_x();
+        let block_size = thread::blockDim_x();
+        let gid = thread::index_1d();
+
+        // Thread 0 initializes barrier
+        if tid == 0 {
+            unsafe {
+                mbarrier_init(&raw mut BAR, block_size);
+                // CRITICAL: Fence to make barrier init visible to TMA async proxy!
+                fence_proxy_async_shared_cta();
+            }
+        }
+        thread::sync_threads();
+
+        // Thread 0 issues TMA
+        if tid == 0 {
+            unsafe {
+                cp_async_bulk_tensor_2d_g2s(
+                    &raw mut TILE as *mut u8,
+                    tensor_map,
+                    0,
+                    0,
+                    &raw mut BAR,
+                );
+            }
+        }
+
+        // ALL threads arrive
+        let token = unsafe {
+            if tid == 0 {
+                mbarrier_arrive_expect_tx(&raw const BAR, 1, TILE_BYTES)
+            } else {
+                mbarrier_arrive(&raw const BAR)
+            }
+        };
+
+        // ALL threads wait (using try_wait for better scheduling)
+        unsafe { while !mbarrier_try_wait(&raw const BAR, token) {} }
+
+        thread::sync_threads();
+
+        // Mark success
         if let Some(out_elem) = out.get_mut(gid) {
-            *out_elem = val;
+            *out_elem = 1u32;
         }
-    }
-}
-
-/// Simple TMA pipeline test - ALL threads participate in barrier.
-#[kernel]
-pub fn tma_pipeline_test(tensor_map: *const TmaDescriptor, mut out: DisjointSlice<u32>) {
-    const TILE_SIZE: usize = 1024;
-    const TILE_BYTES: u32 = (TILE_SIZE * 4) as u32;
-    // TMA destinations require 128-byte alignment
-    static mut TILE: SharedArray<f32, TILE_SIZE, 128> = SharedArray::UNINIT;
-    // Barriers use natural alignment (8 bytes for i64)
-    static mut BAR: Barrier = Barrier::UNINIT;
-
-    let tid = thread::threadIdx_x();
-    let block_size = thread::blockDim_x();
-    let gid = thread::index_1d();
-
-    // Thread 0 initializes barrier
-    if tid == 0 {
-        unsafe {
-            mbarrier_init(&raw mut BAR, block_size);
-            // CRITICAL: Fence to make barrier init visible to TMA async proxy!
-            fence_proxy_async_shared_cta();
-        }
-    }
-    thread::sync_threads();
-
-    // Thread 0 issues TMA
-    if tid == 0 {
-        unsafe {
-            cp_async_bulk_tensor_2d_g2s(&raw mut TILE as *mut u8, tensor_map, 0, 0, &raw mut BAR);
-        }
-    }
-
-    // ALL threads arrive
-    let token = unsafe {
-        if tid == 0 {
-            mbarrier_arrive_expect_tx(&raw const BAR, 1, TILE_BYTES)
-        } else {
-            mbarrier_arrive(&raw const BAR)
-        }
-    };
-
-    // ALL threads wait (using try_wait for better scheduling)
-    unsafe { while !mbarrier_try_wait(&raw const BAR, token) {} }
-
-    thread::sync_threads();
-
-    // Mark success
-    if let Some(out_elem) = out.get_mut(gid) {
-        *out_elem = 1u32;
     }
 }
 
@@ -205,6 +217,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Loading PTX from: {}", ptx_path.display());
     let ptx_file = ptx_path.to_str().ok_or("PTX path is not valid UTF-8")?;
     let module = ctx.load_module_from_file(ptx_file)?;
+    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
     println!("✓ PTX loaded successfully\n");
 
     // Run tests
@@ -239,7 +252,7 @@ fn verify_ptx_only(ctx: &Arc<CudaContext>) -> Result<(), Box<dyn std::error::Err
 
 fn run_tma_copy_test(
     stream: &Arc<CudaStream>,
-    module: &Arc<CudaModule>,
+    module: &kernels::LoadedModule,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Test 1: TMA Copy (tma_copy_2d_test) ---\n");
 
@@ -252,9 +265,9 @@ fn run_tma_copy_test(
     );
 
     let host_input: Vec<f32> = (0..TENSOR_SIZE).map(|i| i as f32).collect();
-    let dev_tensor = DeviceBuffer::from_host(&stream, &host_input)?;
+    let dev_tensor = DeviceBuffer::from_host(stream, &host_input)?;
 
-    let mut dev_output = DeviceBuffer::<f32>::zeroed(&stream, TILE_SIZE)?;
+    let mut dev_output = DeviceBuffer::<f32>::zeroed(stream, TILE_SIZE)?;
 
     println!(
         "2. Creating TMA descriptor (tile: {}x{})",
@@ -269,14 +282,14 @@ fn run_tma_copy_test(
         TILE_HEIGHT,
     )?;
 
-    let dev_tensor_map = DeviceBuffer::from_host(&stream, &tensor_map.opaque[..])?;
+    let dev_tensor_map = DeviceBuffer::from_host(stream, &tensor_map.opaque[..])?;
 
     println!("3. Launching tma_copy_2d_test kernel...");
 
     let tile_x: i32 = 0;
     let tile_y: i32 = 0;
     let block_size = 256u32;
-    let grid_size = ((TILE_SIZE as u32) + block_size - 1) / block_size;
+    let grid_size = (TILE_SIZE as u32).div_ceil(block_size);
 
     let cfg = LaunchConfig {
         grid_dim: (grid_size, 1, 1),
@@ -287,18 +300,19 @@ fn run_tma_copy_test(
     // Get raw device pointer to TMA descriptor
     let tensor_map_ptr = dev_tensor_map.cu_deviceptr() as *const TmaDescriptor;
 
-    cuda_launch! {
-        kernel: tma_copy_2d_test,
-        stream: stream,
-        module: module,
-        config: cfg,
-        args: [tensor_map_ptr, slice_mut(dev_output), tile_x, tile_y]
-    }?;
+    module.tma_copy_2d_test(
+        (stream).as_ref(),
+        cfg,
+        tensor_map_ptr,
+        &mut dev_output,
+        tile_x,
+        tile_y,
+    )?;
 
     stream.synchronize()?;
 
     println!("4. Verifying results...");
-    let host_output = dev_output.to_host_vec(&stream)?;
+    let host_output = dev_output.to_host_vec(stream)?;
 
     let mut errors = 0;
     for row in 0..TILE_HEIGHT as usize {
@@ -333,7 +347,7 @@ fn run_tma_copy_test(
 
 fn run_tma_pipeline_test(
     stream: &Arc<CudaStream>,
-    module: &Arc<CudaModule>,
+    module: &kernels::LoadedModule,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n--- Test 2: TMA Pipeline (tma_pipeline_test) ---\n");
 
@@ -341,10 +355,10 @@ fn run_tma_pipeline_test(
     const PIPELINE_TILE_HEIGHT: u32 = 32;
 
     let host_input: Vec<f32> = (0..TENSOR_SIZE).map(|i| i as f32).collect();
-    let dev_tensor = DeviceBuffer::from_host(&stream, &host_input)?;
+    let dev_tensor = DeviceBuffer::from_host(stream, &host_input)?;
 
     let block_size = 256u32;
-    let mut dev_output = DeviceBuffer::<u32>::zeroed(&stream, block_size as usize)?;
+    let mut dev_output = DeviceBuffer::<u32>::zeroed(stream, block_size as usize)?;
 
     let ptr = dev_tensor.cu_deviceptr();
     let tensor_map = create_tma_descriptor(
@@ -355,7 +369,7 @@ fn run_tma_pipeline_test(
         PIPELINE_TILE_HEIGHT,
     )?;
 
-    let dev_tensor_map = DeviceBuffer::from_host(&stream, &tensor_map.opaque[..])?;
+    let dev_tensor_map = DeviceBuffer::from_host(stream, &tensor_map.opaque[..])?;
 
     println!(
         "1. Launching tma_pipeline_test kernel (tile: {}x{})...",
@@ -371,18 +385,12 @@ fn run_tma_pipeline_test(
     // Get raw device pointer to TMA descriptor
     let tensor_map_ptr = dev_tensor_map.cu_deviceptr() as *const TmaDescriptor;
 
-    cuda_launch! {
-        kernel: tma_pipeline_test,
-        stream: stream,
-        module: module,
-        config: cfg,
-        args: [tensor_map_ptr, slice_mut(dev_output)]
-    }?;
+    module.tma_pipeline_test((stream).as_ref(), cfg, tensor_map_ptr, &mut dev_output)?;
 
     stream.synchronize()?;
 
     println!("2. Verifying results...");
-    let host_output = dev_output.to_host_vec(&stream)?;
+    let host_output = dev_output.to_host_vec(stream)?;
 
     let success_count = host_output.iter().filter(|&&x| x == 1).count();
     if success_count == block_size as usize {

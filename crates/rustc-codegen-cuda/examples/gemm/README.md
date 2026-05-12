@@ -16,6 +16,8 @@ Demonstrates matrix multiplication C = α·A·B + β·C using the simplest possi
 ### 2D Thread Indexing
 
 ```rust
+use cuda_device::thread::Runtime2DIndex;
+
 #[kernel]
 pub fn sgemm_naive(
     m: u32, n: u32, k: u32,
@@ -23,17 +25,19 @@ pub fn sgemm_naive(
     a: &[f32],  // M x K
     b: &[f32],  // K x N
     beta: f32,
-    mut c: DisjointSlice<f32>,  // M x N
+    mut c: DisjointSlice<f32, Runtime2DIndex>,  // M x N, runtime stride = N
 ) {
+    let n_sz = n as usize;
     let row = thread::index_2d_row();    // blockIdx.y * blockDim.y + threadIdx.y
     let col = thread::index_2d_col();    // blockIdx.x * blockDim.x + threadIdx.x
 
-    if let Some(c_idx) = thread::index_2d(n as usize) {
-        // col < n guaranteed by index_2d returning Some
+    // SAFETY: every thread sees the same `n_sz` (kernel argument).
+    if let Some(c_idx) = unsafe { thread::index_2d_runtime(n_sz) } {
+        // col < n_sz guaranteed by `Some` -- no manual check needed
         if row < m as usize {
             let mut sum = 0.0f32;
             for i in 0..k as usize {
-                sum += a[row * k as usize + i] * b[i * n as usize + col];
+                sum += a[row * k as usize + i] * b[i * n_sz + col];
             }
             if let Some(c_elem) = c.get_mut(c_idx) {
                 *c_elem = alpha * sum + beta * (*c_elem);
@@ -42,6 +46,11 @@ pub fn sgemm_naive(
     }
 }
 ```
+
+For kernels where the row stride is known at compile time, prefer
+`thread::index_2d::<STRIDE>()` with a `DisjointSlice<f32, Index2D<STRIDE>>` --
+the const generic encodes the stride in the witness type, turning a
+mismatched-stride bug into a compile error instead of a contract.
 
 ### 2D Launch Configuration
 

@@ -26,8 +26,8 @@
 
 | Module               | Description                                                                  | GPU     |
 |----------------------|------------------------------------------------------------------------------|---------|
-| `thread`             | Thread/block IDs, `index_1d`/`index_2d`, `sync_threads`                      | All     |
-| `disjoint`           | `DisjointSlice<T>` -- safe parallel writes via `ThreadIndex`                 | All     |
+| `thread`             | Thread/block IDs, `index_1d`/`index_2d::<S>`, `sync_threads`                 | All     |
+| `disjoint`           | `DisjointSlice<T, IndexSpace>` -- safe parallel writes via `ThreadIndex`     | All     |
 | `shared`             | `SharedArray<T, N>`, `DynamicSharedArray<T>` -- block-scoped shared memory   | All     |
 | `warp`               | Shuffle (xor/up/down/idx for i32 and f32), lane_id, vote (all/any/ballot)    | All     |
 | `atomic`             | Scoped GPU atomics; `core::sync::atomic` types also supported on device      | sm_70+  |
@@ -47,21 +47,27 @@
 
 ## Key Types
 
-### `ThreadIndex` and `DisjointSlice<T>`
+### `ThreadIndex<'kernel, IndexSpace>` and `DisjointSlice<T, IndexSpace>`
 
-`ThreadIndex` can only be constructed by `index_1d()` / `index_2d()`. `index_1d()` is unconditionally unique per thread; `index_2d(row_stride)` is **currently unsound** -- uniqueness only holds when every call in the kernel passes the same `row_stride`, and nothing yet enforces that at the type level. Until the principled fix lands (stride lifted into the witness type, witness made non-transferable across threads), pin `row_stride` to one binding per kernel and pass that binding everywhere. `DisjointSlice<T>` accepts only `ThreadIndex` for mutable access, preventing data races by construction (subject to the `index_2d` caveat above).
+`ThreadIndex` is an opaque witness with no public constructor. The trusted index functions are:
+
+- `thread::index_1d()` -- unconditionally unique per thread (1D grids).
+- `thread::index_2d::<S>()` -- const-stride 2D index. The witness type carries `S`, so a `DisjointSlice<T, Index2D<S>>` rejects mismatched strides at compile time.
+- `unsafe thread::index_2d_runtime(s)` -- escape hatch for runtime strides; the `unsafe` is the contract that every thread used the same `s`.
+
+The witness is `!Send + !Sync + !Copy + !Clone` and `'kernel`-scoped, so threads can't launder it through shared memory and it can't outlive the kernel body. `DisjointSlice<T, IndexSpace>` accepts only a `ThreadIndex` whose `IndexSpace` matches its own.
 
 ```rust
 #[kernel]
 pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
-    let idx = thread::index_1d();
-    if let Some(c_elem) = c.get_mut(idx) {    // bounds-checked, returns Option
-        *c_elem = a[idx.get()] + b[idx.get()];
+    if let Some((c_elem, idx)) = c.get_mut_indexed() {   // mints + resolves in one call
+        let i = idx.get();
+        *c_elem = a[i] + b[i];
     }
 }
 ```
 
-For non-trivial patterns (reductions, histograms), `get_unchecked_mut(usize)` is the `unsafe` escape hatch.
+The explicit two-step form `let idx = thread::index_1d(); c.get_mut(idx)` is also available when you need the index for arithmetic against multiple slices. For non-trivial patterns (reductions, histograms), `get_unchecked_mut(usize)` is the `unsafe` escape hatch.
 
 ### `SharedArray<T, N, ALIGN>` and `DynamicSharedArray<T, ALIGN>`
 

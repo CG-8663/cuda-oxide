@@ -53,6 +53,7 @@ next tile along the K dimension.
 at compile time. You declare it as a `static mut` inside the kernel:
 
 ```rust
+use cuda_device::thread::Runtime2DIndex;
 use cuda_device::{kernel, thread, DisjointSlice, SharedArray};
 
 const TILE: usize = 16;
@@ -61,11 +62,12 @@ const TILE: usize = 16;
 pub fn tiled_sgemm(
     m: u32, n: u32, k: u32,
     a: &[f32], b: &[f32],
-    mut c: DisjointSlice<f32>,
+    mut c: DisjointSlice<f32, Runtime2DIndex>,
 ) {
     static mut TILE_A: SharedArray<f32, 256> = SharedArray::UNINIT;
     static mut TILE_B: SharedArray<f32, 256> = SharedArray::UNINIT;
 
+    let n_sz = n as usize;
     let row = thread::index_2d_row();
     let col = thread::index_2d_col();
     let tx = thread::threadIdx_x() as usize;
@@ -80,7 +82,7 @@ pub fn tiled_sgemm(
         // Phase 1: cooperative load
         unsafe {
             TILE_A[ty * TILE + tx] = a[row * k as usize + tile_offset + tx];
-            TILE_B[ty * TILE + tx] = b[(tile_offset + ty) * n as usize + col];
+            TILE_B[ty * TILE + tx] = b[(tile_offset + ty) * n_sz + col];
         }
 
         // All threads must finish loading before any thread reads
@@ -101,7 +103,8 @@ pub fn tiled_sgemm(
         t += 1;
     }
 
-    if let Some(c_idx) = thread::index_2d(n as usize) {
+    // SAFETY: every thread sees the same `n_sz`.
+    if let Some(c_idx) = unsafe { thread::index_2d_runtime(n_sz) } {
         if let Some(c_elem) = c.get_mut(c_idx) {
             *c_elem = sum;
         }

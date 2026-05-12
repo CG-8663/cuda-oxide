@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#![allow(clippy::too_many_arguments)]
+
 //! Unified GEMM Example (Naive Implementation)
 //!
 //! Demonstrates matrix multiplication: C = alpha * A * B + beta * C
@@ -13,50 +15,54 @@
 
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
 use cuda_device::{DisjointSlice, kernel, thread};
-use cuda_host::cuda_launch;
+use cuda_host::cuda_module;
 use std::time::Instant;
 
 // =============================================================================
 // KERNEL - Naive SGEMM
 // =============================================================================
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-/// Naive GEMM kernel: C = alpha * A * B + beta * C
-///
-/// Each thread computes ONE element of C.
-/// Matrix layout: Row-major
-/// - A is M x K
-/// - B is K x N
-/// - C is M x N
-#[kernel]
-pub fn sgemm_naive(
-    m: u32,
-    n: u32,
-    k: u32,
-    alpha: f32,
-    a: &[f32], // M x K matrix
-    b: &[f32], // K x N matrix
-    beta: f32,
-    mut c: DisjointSlice<f32>, // M x N matrix (output)
-) {
-    let row = thread::index_2d_row();
-    let col = thread::index_2d_col();
+    /// Naive GEMM kernel: C = alpha * A * B + beta * C
+    ///
+    /// Each thread computes ONE element of C.
+    /// Matrix layout: Row-major
+    /// - A is M x K
+    /// - B is K x N
+    /// - C is M x N
+    #[kernel]
+    pub fn sgemm_naive(
+        m: u32,
+        n: u32,
+        k: u32,
+        alpha: f32,
+        a: &[f32], // M x K matrix
+        b: &[f32], // K x N matrix
+        beta: f32,
+        mut c: DisjointSlice<f32, thread::Runtime2DIndex>, // M x N matrix (output)
+    ) {
+        let row = thread::index_2d_row();
+        let col = thread::index_2d_col();
 
-    if let Some(c_idx) = thread::index_2d(n as usize) {
-        // col < n guaranteed by index_2d returning Some
-        if row < m as usize {
-            let n_size = n as usize;
-            let k_size = k as usize;
+        if let Some(c_idx) = unsafe { thread::index_2d_runtime(n as usize) } {
+            // col < n guaranteed by index_2d_runtime returning Some
+            if row < m as usize {
+                let n_size = n as usize;
+                let k_size = k as usize;
 
-            // Compute dot product of row of A and column of B
-            let mut sum = 0.0f32;
-            let mut i = 0usize;
-            while i < k_size {
-                sum = sum + a[row * k_size + i] * b[i * n_size + col];
-                i = i + 1;
-            }
+                // Compute dot product of row of A and column of B
+                let mut sum = 0.0f32;
+                let mut i = 0usize;
+                while i < k_size {
+                    sum += a[row * k_size + i] * b[i * n_size + col];
+                    i += 1;
+                }
 
-            if let Some(c_elem) = c.get_mut(c_idx) {
-                *c_elem = alpha * sum + beta * (*c_elem);
+                if let Some(c_elem) = c.get_mut(c_idx) {
+                    *c_elem = alpha * sum + beta * (*c_elem);
+                }
             }
         }
     }
@@ -109,11 +115,12 @@ fn main() {
     let module = ctx
         .load_module_from_file("gemm.ptx")
         .expect("Failed to load PTX module");
+    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
 
     // Configure launch: 16x16 threads per block
     let block_size = 16u32;
-    let grid_x = (N as u32 + block_size - 1) / block_size;
-    let grid_y = (M as u32 + block_size - 1) / block_size;
+    let grid_x = (N as u32).div_ceil(block_size);
+    let grid_y = (M as u32).div_ceil(block_size);
 
     println!(
         "Grid: ({}, {}), Block: ({}, {})",
@@ -133,14 +140,20 @@ fn main() {
 
     // Warmup
     println!("\nWarmup...");
-    cuda_launch! {
-        kernel: sgemm_naive,
-        stream: stream,
-        module: module,
-        config: cfg,
-        args: [m_arg, n_arg, k_arg, ALPHA, slice(a_dev), slice(b_dev), BETA, slice_mut(c_dev)]
-    }
-    .expect("Kernel launch failed");
+    module
+        .sgemm_naive(
+            (stream).as_ref(),
+            cfg,
+            m_arg,
+            n_arg,
+            k_arg,
+            ALPHA,
+            &a_dev,
+            &b_dev,
+            BETA,
+            &mut c_dev,
+        )
+        .expect("Kernel launch failed");
     stream.synchronize().unwrap();
 
     // Timed runs
@@ -148,14 +161,20 @@ fn main() {
     println!("Running {} iterations...", NUM_RUNS);
     let start = Instant::now();
     for _ in 0..NUM_RUNS {
-        cuda_launch! {
-            kernel: sgemm_naive,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [m_arg, n_arg, k_arg, ALPHA, slice(a_dev), slice(b_dev), BETA, slice_mut(c_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .sgemm_naive(
+                (stream).as_ref(),
+                cfg,
+                m_arg,
+                n_arg,
+                k_arg,
+                ALPHA,
+                &a_dev,
+                &b_dev,
+                BETA,
+                &mut c_dev,
+            )
+            .expect("Kernel launch failed");
     }
     stream.synchronize().unwrap();
     let elapsed = start.elapsed();

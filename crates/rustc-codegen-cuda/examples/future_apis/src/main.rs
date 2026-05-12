@@ -14,218 +14,222 @@
 use cuda_device::cusimd::CuSimd;
 use cuda_device::{Barrier, GeneralBarrier, ManagedBarrier, TmaBarrier, Uninit};
 use cuda_device::{DisjointSlice, kernel, thread};
-use cuda_host::cuda_launch;
+use cuda_host::cuda_module;
 
 // =============================================================================
 // CUSIMD KERNELS
 // =============================================================================
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-/// Test kernel demonstrating CuSimd<T, N> usage patterns.
-#[kernel]
-pub fn test_cusimd(mut output: DisjointSlice<f32>) {
-    let idx = thread::index_1d();
-    let tid = idx.get();
+    /// Test kernel demonstrating CuSimd<T, N> usage patterns.
+    #[kernel]
+    pub fn test_cusimd(mut output: DisjointSlice<f32>) {
+        let idx = thread::index_1d();
+        let tid = idx.get();
 
-    // Test 1: Construct CuSimd<f32, 4> from array
-    let values: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
-    let simd4 = CuSimd::<f32, 4>::new(values);
+        // Test 1: Construct CuSimd<f32, 4> from array
+        let values: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
+        let simd4 = CuSimd::<f32, 4>::new(values);
 
-    // Test 2: Runtime index access via Index trait
-    let val_at_tid = simd4[tid % 4];
+        // Test 2: Runtime index access via Index trait
+        let val_at_tid = simd4[tid % 4];
 
-    // Test 3: Shorthand accessors
-    let x_val = simd4.x();
-    let y_val = simd4.y();
-    let z_val = simd4.z();
-    let w_val = simd4.w();
+        // Test 3: Shorthand accessors
+        let x_val = simd4.x();
+        let y_val = simd4.y();
+        let z_val = simd4.z();
+        let w_val = simd4.w();
 
-    // Test 4: Compile-time indexed access
-    let first = simd4.get::<0>();
-    let last = simd4.get::<3>();
+        // Test 4: Compile-time indexed access
+        let first = simd4.get::<0>();
+        let last = simd4.get::<3>();
 
-    // Test 5: Runtime at() method
-    let dynamic = simd4.at(tid % 4);
+        // Test 5: Runtime at() method
+        let dynamic = simd4.at(tid % 4);
 
-    // Test 6: Convert to array
-    let arr = simd4.to_array();
+        // Test 6: Convert to array
+        let arr = simd4.to_array();
 
-    // Test 7: CuSimd<f32, 2> with lo/hi accessors
-    let simd2 = CuSimd::<f32, 2>::new([10.0, 20.0]);
-    let (lo, hi) = simd2.xy();
+        // Test 7: CuSimd<f32, 2> with lo/hi accessors
+        let simd2 = CuSimd::<f32, 2>::new([10.0, 20.0]);
+        let (lo, hi) = simd2.xy();
 
-    // Compute result based on thread ID
-    let result = match tid % 8 {
-        0 => val_at_tid,      // simd4[0] = 1.0
-        1 => x_val,           // 1.0
-        2 => y_val + z_val,   // 2.0 + 3.0 = 5.0
-        3 => w_val,           // 4.0
-        4 => first + last,    // 1.0 + 4.0 = 5.0
-        5 => dynamic,         // simd4[5%4] = 2.0
-        6 => arr[0] + arr[3], // 1.0 + 4.0 = 5.0
-        7 => lo + hi,         // 10.0 + 20.0 = 30.0
-        _ => 0.0,
-    };
+        // Compute result based on thread ID
+        let result = match tid % 8 {
+            0 => val_at_tid,      // simd4[0] = 1.0
+            1 => x_val,           // 1.0
+            2 => y_val + z_val,   // 2.0 + 3.0 = 5.0
+            3 => w_val,           // 4.0
+            4 => first + last,    // 1.0 + 4.0 = 5.0
+            5 => dynamic,         // simd4[5%4] = 2.0
+            6 => arr[0] + arr[3], // 1.0 + 4.0 = 5.0
+            7 => lo + hi,         // 10.0 + 20.0 = 30.0
+            _ => 0.0,
+        };
 
-    if let Some(output_elem) = output.get_mut(idx) {
-        *output_elem = result;
-    }
-}
-
-/// Test kernel for CuSimd<u32, 4>
-#[kernel]
-pub fn test_cusimd_u32(mut output: DisjointSlice<u32>) {
-    let idx = thread::index_1d();
-    let tid = idx.get();
-
-    let simd = CuSimd::<u32, 4>::new([10, 20, 30, 40]);
-
-    // Use runtime indexing
-    let val = simd[tid % 4];
-
-    if let Some(output_elem) = output.get_mut(idx) {
-        *output_elem = val;
-    }
-}
-
-// =============================================================================
-// BARRIER TYPESTATE KERNELS
-// =============================================================================
-
-/// Test kernel demonstrating ManagedBarrier<State, Kind> typestate pattern.
-///
-/// This kernel tests the basic typestate flow with a single barrier:
-/// 1. from_static() - Create handle from static
-/// 2. init() - State transition from Uninit -> Ready
-/// 3. arrive() - All threads arrive at barrier
-/// 4. wait() - All threads wait for completion
-/// 5. inval() - State transition from Ready -> Invalidated
-#[kernel]
-pub fn test_managed_barrier(mut output: DisjointSlice<u32>) {
-    // Declare barrier explicitly (like SharedArray)
-    static mut BAR: Barrier = Barrier::UNINIT;
-
-    let tid = thread::threadIdx_x();
-    let is_thread0 = tid == 0;
-
-    // ALL threads create Uninit handle (wraps same shared static)
-    let bar = ManagedBarrier::<Uninit, GeneralBarrier>::from_static(&raw mut BAR);
-
-    // ALL threads call init - only thread 0 actually initializes
-    // init() includes: thread 0 mbarrier_init + fence + sync_threads
-    // All threads get Ready handle
-    let bar = unsafe { bar.init(32) }; // 32 threads will participate
-
-    // All threads arrive and wait
-    let token = bar.arrive();
-    bar.wait(token);
-
-    // Thread 0 invalidates the barrier
-    thread::sync_threads();
-    if is_thread0 {
-        // inval() transforms Ready -> Invalidated (consumes bar)
-        let _dead = unsafe { bar.inval() };
-    }
-
-    // Write results - simple success indicator
-    let idx = thread::index_1d();
-    if let Some(output_elem) = output.get_mut(idx) {
-        // If we reach here, barrier sync worked - write 42
-        *output_elem = 42;
-    }
-}
-
-/// Test kernel for multiple barriers using explicit static declarations.
-#[kernel]
-pub fn test_multi_barrier(mut output: DisjointSlice<u32>) {
-    // Declare barriers explicitly - each gets a unique AllocId
-    static mut BAR_TMA: Barrier = Barrier::UNINIT;
-    static mut BAR_GEN: Barrier = Barrier::UNINIT;
-
-    let tid = thread::threadIdx_x();
-    let is_thread0 = tid == 0;
-
-    // ALL threads create Uninit handles
-    let bar_tma = ManagedBarrier::<Uninit, TmaBarrier>::from_static(&raw mut BAR_TMA);
-    let bar_gen = ManagedBarrier::<Uninit, GeneralBarrier>::from_static(&raw mut BAR_GEN);
-
-    // ALL threads call init - each includes sync_threads internally
-    let bar_tma = unsafe { bar_tma.init(32) };
-    let bar_gen = unsafe { bar_gen.init(32) };
-
-    // Use TMA barrier
-    let token_tma = bar_tma.arrive();
-    bar_tma.wait(token_tma);
-
-    // Use General barrier
-    let token_gen = bar_gen.arrive();
-    bar_gen.wait(token_gen);
-
-    // Thread 0 invalidates
-    thread::sync_threads();
-    if is_thread0 {
-        unsafe {
-            bar_tma.inval();
-            bar_gen.inval();
+        if let Some(output_elem) = output.get_mut(idx) {
+            *output_elem = result;
         }
     }
 
-    // Write results
-    let idx = thread::index_1d();
-    if let Some(output_elem) = output.get_mut(idx) {
-        // If we reach here, both barrier syncs worked - write 99
-        *output_elem = 99;
-    }
-}
+    /// Test kernel for CuSimd<u32, 4>
+    #[kernel]
+    pub fn test_cusimd_u32(mut output: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        let tid = idx.get();
 
-/// Test kernel for double-buffered barriers (ping-pong pattern).
-#[kernel]
-pub fn test_double_buffered_barriers(mut output: DisjointSlice<u32>) {
-    // Two barriers for double-buffering (explicit statics)
-    static mut BUF0_BAR: Barrier = Barrier::UNINIT;
-    static mut BUF1_BAR: Barrier = Barrier::UNINIT;
+        let simd = CuSimd::<u32, 4>::new([10, 20, 30, 40]);
 
-    let tid = thread::threadIdx_x();
-    let is_thread0 = tid == 0;
+        // Use runtime indexing
+        let val = simd[tid % 4];
 
-    // ALL threads create Uninit handles
-    let b0 = ManagedBarrier::<Uninit, TmaBarrier>::from_static(&raw mut BUF0_BAR);
-    let b1 = ManagedBarrier::<Uninit, TmaBarrier>::from_static(&raw mut BUF1_BAR);
-
-    // ALL threads call init - each includes sync_threads internally
-    let buf0_bar = unsafe { b0.init(32) };
-    let buf1_bar = unsafe { b1.init(32) };
-
-    // Simulate double-buffering: alternate between barriers
-    let mut sum: u32 = 0;
-
-    // Iteration 0: use buf0
-    let t0 = buf0_bar.arrive();
-    buf0_bar.wait(t0);
-    sum += 1;
-
-    // Iteration 1: use buf1
-    let t1 = buf1_bar.arrive();
-    buf1_bar.wait(t1);
-    sum += 1;
-
-    // Iteration 2: use buf0 again (barriers are reusable within phase)
-    let t2 = buf0_bar.arrive();
-    buf0_bar.wait(t2);
-    sum += 1;
-
-    // Cleanup
-    thread::sync_threads();
-    if is_thread0 {
-        unsafe {
-            buf0_bar.inval();
-            buf1_bar.inval();
+        if let Some(output_elem) = output.get_mut(idx) {
+            *output_elem = val;
         }
     }
 
-    // Write result
-    let idx = thread::index_1d();
-    if let Some(output_elem) = output.get_mut(idx) {
-        *output_elem = sum; // Should be 3
+    // =============================================================================
+    // BARRIER TYPESTATE KERNELS
+    // =============================================================================
+
+    /// Test kernel demonstrating ManagedBarrier<State, Kind> typestate pattern.
+    ///
+    /// This kernel tests the basic typestate flow with a single barrier:
+    /// 1. from_static() - Create handle from static
+    /// 2. init() - State transition from Uninit -> Ready
+    /// 3. arrive() - All threads arrive at barrier
+    /// 4. wait() - All threads wait for completion
+    /// 5. inval() - State transition from Ready -> Invalidated
+    #[kernel]
+    pub fn test_managed_barrier(mut output: DisjointSlice<u32>) {
+        // Declare barrier explicitly (like SharedArray)
+        static mut BAR: Barrier = Barrier::UNINIT;
+
+        let tid = thread::threadIdx_x();
+        let is_thread0 = tid == 0;
+
+        // ALL threads create Uninit handle (wraps same shared static)
+        let bar = ManagedBarrier::<Uninit, GeneralBarrier>::from_static(&raw mut BAR);
+
+        // ALL threads call init - only thread 0 actually initializes
+        // init() includes: thread 0 mbarrier_init + fence + sync_threads
+        // All threads get Ready handle
+        let bar = unsafe { bar.init(32) }; // 32 threads will participate
+
+        // All threads arrive and wait
+        let token = bar.arrive();
+        bar.wait(token);
+
+        // Thread 0 invalidates the barrier
+        thread::sync_threads();
+        if is_thread0 {
+            // inval() transforms Ready -> Invalidated (consumes bar)
+            let _dead = unsafe { bar.inval() };
+        }
+
+        // Write results - simple success indicator
+        let idx = thread::index_1d();
+        if let Some(output_elem) = output.get_mut(idx) {
+            // If we reach here, barrier sync worked - write 42
+            *output_elem = 42;
+        }
+    }
+
+    /// Test kernel for multiple barriers using explicit static declarations.
+    #[kernel]
+    pub fn test_multi_barrier(mut output: DisjointSlice<u32>) {
+        // Declare barriers explicitly - each gets a unique AllocId
+        static mut BAR_TMA: Barrier = Barrier::UNINIT;
+        static mut BAR_GEN: Barrier = Barrier::UNINIT;
+
+        let tid = thread::threadIdx_x();
+        let is_thread0 = tid == 0;
+
+        // ALL threads create Uninit handles
+        let bar_tma = ManagedBarrier::<Uninit, TmaBarrier>::from_static(&raw mut BAR_TMA);
+        let bar_gen = ManagedBarrier::<Uninit, GeneralBarrier>::from_static(&raw mut BAR_GEN);
+
+        // ALL threads call init - each includes sync_threads internally
+        let bar_tma = unsafe { bar_tma.init(32) };
+        let bar_gen = unsafe { bar_gen.init(32) };
+
+        // Use TMA barrier
+        let token_tma = bar_tma.arrive();
+        bar_tma.wait(token_tma);
+
+        // Use General barrier
+        let token_gen = bar_gen.arrive();
+        bar_gen.wait(token_gen);
+
+        // Thread 0 invalidates
+        thread::sync_threads();
+        if is_thread0 {
+            unsafe {
+                bar_tma.inval();
+                bar_gen.inval();
+            }
+        }
+
+        // Write results
+        let idx = thread::index_1d();
+        if let Some(output_elem) = output.get_mut(idx) {
+            // If we reach here, both barrier syncs worked - write 99
+            *output_elem = 99;
+        }
+    }
+
+    /// Test kernel for double-buffered barriers (ping-pong pattern).
+    #[kernel]
+    pub fn test_double_buffered_barriers(mut output: DisjointSlice<u32>) {
+        // Two barriers for double-buffering (explicit statics)
+        static mut BUF0_BAR: Barrier = Barrier::UNINIT;
+        static mut BUF1_BAR: Barrier = Barrier::UNINIT;
+
+        let tid = thread::threadIdx_x();
+        let is_thread0 = tid == 0;
+
+        // ALL threads create Uninit handles
+        let b0 = ManagedBarrier::<Uninit, TmaBarrier>::from_static(&raw mut BUF0_BAR);
+        let b1 = ManagedBarrier::<Uninit, TmaBarrier>::from_static(&raw mut BUF1_BAR);
+
+        // ALL threads call init - each includes sync_threads internally
+        let buf0_bar = unsafe { b0.init(32) };
+        let buf1_bar = unsafe { b1.init(32) };
+
+        // Simulate double-buffering: alternate between barriers
+        let mut sum: u32 = 0;
+
+        // Iteration 0: use buf0
+        let t0 = buf0_bar.arrive();
+        buf0_bar.wait(t0);
+        sum += 1;
+
+        // Iteration 1: use buf1
+        let t1 = buf1_bar.arrive();
+        buf1_bar.wait(t1);
+        sum += 1;
+
+        // Iteration 2: use buf0 again (barriers are reusable within phase)
+        let t2 = buf0_bar.arrive();
+        buf0_bar.wait(t2);
+        sum += 1;
+
+        // Cleanup
+        thread::sync_threads();
+        if is_thread0 {
+            unsafe {
+                buf0_bar.inval();
+                buf1_bar.inval();
+            }
+        }
+
+        // Write result
+        let idx = thread::index_1d();
+        if let Some(output_elem) = output.get_mut(idx) {
+            *output_elem = sum; // Should be 3
+        }
     }
 }
 
@@ -242,6 +246,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stream = ctx.default_stream();
 
     let module = ctx.load_module_from_file("future_apis.ptx")?;
+    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
 
     // ====================================================================
     // Test 1: CuSimd<f32, 4>
@@ -257,13 +262,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             shared_mem_bytes: 0,
         };
 
-        cuda_launch! {
-            kernel: test_cusimd,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice_mut(output_dev)]
-        }?;
+        module.test_cusimd((stream).as_ref(), cfg, &mut output_dev)?;
         stream.synchronize()?;
 
         let output: Vec<f32> = output_dev.to_host_vec(&stream)?;
@@ -302,13 +301,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             shared_mem_bytes: 0,
         };
 
-        cuda_launch! {
-            kernel: test_cusimd_u32,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice_mut(output_dev)]
-        }?;
+        module.test_cusimd_u32((stream).as_ref(), cfg, &mut output_dev)?;
         stream.synchronize()?;
 
         let output: Vec<u32> = output_dev.to_host_vec(&stream)?;
@@ -338,13 +331,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             shared_mem_bytes: 0,
         };
 
-        cuda_launch! {
-            kernel: test_managed_barrier,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice_mut(output_dev)]
-        }?;
+        module.test_managed_barrier((stream).as_ref(), cfg, &mut output_dev)?;
         stream.synchronize()?;
 
         let output: Vec<u32> = output_dev.to_host_vec(&stream)?;
@@ -375,13 +362,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             shared_mem_bytes: 0,
         };
 
-        cuda_launch! {
-            kernel: test_multi_barrier,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice_mut(output_dev)]
-        }?;
+        module.test_multi_barrier((stream).as_ref(), cfg, &mut output_dev)?;
         stream.synchronize()?;
 
         let output: Vec<u32> = output_dev.to_host_vec(&stream)?;
@@ -412,13 +393,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             shared_mem_bytes: 0,
         };
 
-        cuda_launch! {
-            kernel: test_double_buffered_barriers,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice_mut(output_dev)]
-        }?;
+        module.test_double_buffered_barriers((stream).as_ref(), cfg, &mut output_dev)?;
         stream.synchronize()?;
 
         let output: Vec<u32> = output_dev.to_host_vec(&stream)?;

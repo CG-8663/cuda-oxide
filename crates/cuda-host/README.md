@@ -1,139 +1,148 @@
 # cuda-host
 
-Host-side infrastructure for launching CUDA kernels compiled by cuda-oxide. Provides the `cuda_launch!` and `cuda_launch_async!` macros, kernel marker traits, argument wrappers, and tcgen05 tiling utilities.
+Host-side infrastructure for typed CUDA module loading and kernel launches in
+cuda-oxide.
 
-```text
-  #[kernel]
-  pub fn vecadd(...)           cuda-macros generates:
-       │                        • cuda_oxide_kernel_<hash>_vecadd (entry point)
-       │                        • __vecadd_CudaKernel (marker struct)
-       ▼
-  cuda_launch! {               cuda-host provides:
-      kernel: vecadd,           • CudaKernel / GenericCudaKernel traits
-      stream: ...,              • Argument wrappers (Scalar, ReadOnly, WriteOnly)
-      module: ...,              • cuda_launch! / cuda_launch_async! (re-exported from cuda-macros)
-      config: ...,              • HasLength trait for DeviceBuffer
-      args: [...]
-  }
-```
-
-## Kernel Launch
-
-### Synchronous (`cuda_launch!`)
+The primary interface is `#[cuda_module]`. Place kernels in an inline module,
+keep `#[kernel]` on the actual GPU entry points, then load the embedded device
+artifact as a typed Rust value.
 
 ```rust
-use cuda_device::{kernel, thread, DisjointSlice};
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
-use cuda_host::cuda_launch;
+use cuda_device::{DisjointSlice, kernel, thread};
+use cuda_host::cuda_module;
 
-#[kernel]
-pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
-    let idx = thread::index_1d();
-    if let Some(c_elem) = c.get_mut(idx) {
-        *c_elem = a[idx.get()] + b[idx.get()];
+#[cuda_module]
+mod kernels {
+    use super::*;
+
+    #[kernel]
+    pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
+        let idx = thread::index_1d();
+        if let Some(c_elem) = c.get_mut(idx) {
+            *c_elem = a[idx.get()] + b[idx.get()];
+        }
     }
 }
 
-fn main() {
-    let ctx = CudaContext::new(0).unwrap();
-    let module = ctx.load_module_from_file("vecadd.ptx").unwrap();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let ctx = CudaContext::new(0)?;
     let stream = ctx.default_stream();
 
     const N: usize = 1024;
-    let a_dev = DeviceBuffer::from_host(&stream, &vec![1.0f32; N]).unwrap();
-    let b_dev = DeviceBuffer::from_host(&stream, &vec![2.0f32; N]).unwrap();
-    let mut c_dev = DeviceBuffer::<f32>::zeroed(&stream, N).unwrap();
+    let a_dev = DeviceBuffer::from_host(&stream, &vec![1.0f32; N])?;
+    let b_dev = DeviceBuffer::from_host(&stream, &vec![2.0f32; N])?;
+    let mut c_dev = DeviceBuffer::<f32>::zeroed(&stream, N)?;
 
-    cuda_launch! {
-        kernel: vecadd,
-        stream: stream,
-        module: module,
-        config: LaunchConfig::for_num_elems(N as u32),
-        args: [slice(a_dev), slice(b_dev), slice_mut(c_dev)]
-    }
-    .unwrap();
+    let module = kernels::load(&ctx)?;
+    module.vecadd(
+        &stream,
+        LaunchConfig::for_num_elems(N as u32),
+        &a_dev,
+        &b_dev,
+        &mut c_dev,
+    )?;
+
+    Ok(())
 }
 ```
 
-### Asynchronous (`cuda_launch_async!`)
+## Generated API
 
-Returns an `AsyncKernelLaunch` implementing `DeviceOperation` for use with `cuda-async` scheduling. No `stream:` field -- the stream is chosen by the async scheduler.
+`#[cuda_module]` adds these items to the annotated module:
+
+| Item | Purpose |
+|------|---------|
+| `LoadedModule` | Typed handle around the embedded CUDA module and cached kernel functions |
+| `load(&Arc<CudaContext>)` | Load the current crate's embedded artifact bundle |
+| `load_named(&Arc<CudaContext>, name)` | Load a specific embedded bundle by name |
+| `from_module(Arc<CudaModule>)` | Wrap an already-loaded CUDA module |
+| `LoadedModule::{kernel}` | One launch method per `#[kernel]` function |
+| `load_async(device_id)` | With feature `async`, load from a `cuda-async` device context |
+| `LoadedModule::{kernel}_async` | With feature `async`, build a lazy `AsyncKernelLaunch` |
+| `LoadedModule::{kernel}_async_owned` | With feature `async`, build an owned async launch that returns its buffers |
+
+Kernel parameters are mapped into host launch parameters:
+
+| Kernel parameter | Host method parameter |
+|------------------|-----------------------|
+| `&[T]` | `&DeviceBuffer<T>` |
+| `&mut [T]` | `&mut DeviceBuffer<T>` |
+| `DisjointSlice<T>` | `&mut DeviceBuffer<T>` |
+| `Copy` scalar, struct, closure, or raw pointer | unchanged |
+
+Because the launches are ordinary methods, rust-analyzer and rustc can complete
+kernel names, show argument names, and type-check arguments before the program
+runs. By-value arguments are copied into the CUDA launch packet through the
+`KernelScalar` boundary; device slices are encoded as pointer-plus-length pairs.
+
+Enable the `async` feature to generate async launch methods. They use the same
+scalar mapping, but take no stream argument:
 
 ```rust
-use cuda_host::cuda_launch_async;
+use cuda_async::device_operation::DeviceOperation;
 
-let op = cuda_launch_async! {
-    kernel: vecadd,
-    module: module,
-    config: LaunchConfig::for_num_elems(N as u32),
-    args: [slice(a_dev), slice(b_dev), slice_mut(c_dev)]
-};
-op.sync()?;  // or .await in async context
+let module = kernels::load_async(0)?;
+module
+    .vecadd_async(LaunchConfig::for_num_elems(N as u32), &a_dev, &b_dev, &mut c_dev)?
+    .sync()?;
 ```
 
-### Macro Fields
+For async launches, device-slice parameters accept either `DeviceBuffer<T>` or
+`cuda_async::device_box::DeviceBox<[T]>`. Borrowed methods return
+`AsyncKernelLaunch<'_>`, so Rust keeps referenced buffers and non-`'static`
+scalar arguments borrowed until the lazy operation is dropped, `.sync()` has
+returned, or `.await` has completed.
 
-| Field          | Required | Description                                              |
-|----------------|----------|----------------------------------------------------------|
-| `kernel`       | Yes      | Kernel name or `name::<T>` for generics                  |
-| `stream`       | Sync only| CUDA stream for execution                                |
-| `module`       | Yes      | Loaded PTX module                                        |
-| `config`       | Yes      | `LaunchConfig` (grid/block dims)                         |
-| `cluster_dim`  | No       | `(x, y, z)` cluster dimensions (uses `launch_kernel_ex`) |
-| `cooperative`  | No       | `true` enables `Grid::sync()` (uses cooperative launch)  |
-| `args`         | Yes      | `[...]` argument list                                    |
+Use `{kernel}_async_owned` when the operation needs to leave the current stack
+frame, for example in a spawned Tokio task or a long-lived pipeline:
 
-### Argument Syntax
+```rust
+let (a_dev, b_dev, c_dev) = module
+    .vecadd_async_owned(LaunchConfig::for_num_elems(N as u32), a_dev, b_dev, c_dev)?
+    .await?;
+```
 
-| Syntax          | Kernel Parameter        | What's Passed                  |
-|-----------------|-------------------------|--------------------------------|
-| `expr`          | `T` (scalar)            | `&value` as raw pointer        |
-| `slice(buf)`    | `&[T]`                  | device ptr + len (two args)    |
-| `slice_mut(buf)`| `DisjointSlice<T>`      | device ptr + len (two args)    |
-| `move \|..\| ..`| Closure `F`             | Each capture as separate arg   |
-| `\|..\| ..`     | Closure `F` (by-ref)    | Pointers to captures (HMM)     |
+Owned async launch methods take device-slice arguments by value, keep them alive
+for the GPU work, and return them as the operation output after completion.
+Scalar arguments for owned async launches must be `'static`.
 
-## Traits
+## Lower-Level Pieces
 
-| Trait                | Purpose                                              |
-|----------------------|------------------------------------------------------|
-| `CudaKernel`         | Non-generic kernels; `const PTX_NAME: &str`          |
-| `GenericCudaKernel`  | Generic kernels; `fn ptx_name() -> &'static str`     |
-| `HasLength`          | Types with `.len()` (implemented for `DeviceBuffer`) |
+`CudaKernel` and `GenericCudaKernel` remain the marker traits generated by
+`#[kernel]` and used by the typed loader. `cuda_launch!` remains available as a
+low-level migration path for cuda-oxide kernels, but new host code should prefer
+`#[cuda_module]`.
 
-## Argument Wrappers
+`cuda_launch_async!` is also lower-level. It can describe lazy work from raw
+device pointers, so callers must ensure the pointed-to allocations outlive the
+operation. Generated borrowed async methods encode that requirement as Rust
+borrows, and generated owned async methods move buffers into the operation for
+spawned tasks.
 
-| Type             | Description                         |
-|------------------|-------------------------------------|
-| `Scalar<T>`      | Pass-by-value scalar                |
-| `ReadOnly<'a,T>` | Read-only device buffer reference   |
-| `WriteOnly<'a,T>`| Write-only device buffer reference  |
+`#[cuda_module]` owns launch ergonomics, not target-selection policy. It loads
+whatever embedded payload the compiler produced for the current crate. LTOIR,
+fatbin, or multi-architecture packaging decisions belong in the compiler and
+artifact layers, so the typed launch API does not need to change when those
+payload formats evolve.
 
 ## Tiling Utilities (tcgen05)
 
-Host-side layout transformations for Blackwell tensor cores. tcgen05 requires specific 8x8 tile arrangements:
+Host-side layout transformations for Blackwell tensor cores. tcgen05 requires
+specific 8x8 tile arrangements:
 
-| Function               | Description                               |
-|------------------------|-------------------------------------------|
-| `to_k_major_f16`       | Row-major → tcgen05 K-major (matrix A)    |
-| `to_mn_major_f16`      | Row-major → tcgen05 MN-major (matrix B)   |
-| `k_major_index`        | Compute linear index in K-major layout    |
-| `mn_major_index`       | Compute linear index in MN-major layout   |
-| `print_layout_indices` | Debug print layout as 2D table            |
-| `TILE_SIZE`            | Constant `8` (8x8 tile for f16/bf16)      |
-
-## Source Layout
-
-```text
-src/
-├── lib.rs       # Re-exports from launch, tiling, and cuda-macros
-├── launch.rs    # CudaKernel, GenericCudaKernel, argument wrappers, HasLength
-└── tiling.rs    # tcgen05 tile layout transformations
-```
+| Function | Description |
+|----------|-------------|
+| `to_k_major_f16` | Row-major to tcgen05 K-major, matrix A |
+| `to_mn_major_f16` | Row-major to tcgen05 MN-major, matrix B |
+| `k_major_index` | Compute linear index in K-major layout |
+| `mn_major_index` | Compute linear index in MN-major layout |
+| `print_layout_indices` | Debug print layout as 2D table |
+| `TILE_SIZE` | Constant `8` |
 
 ## Further Reading
 
 - [cuda-device](../cuda-device/) -- device-side intrinsics
 - [cuda-macros](../cuda-macros/) -- proc-macro implementations
 - [cuda-core](../cuda-core/) -- CUDA driver API, `DeviceBuffer`, `LaunchConfig`
-- [cuda-async](../cuda-async/) -- async scheduling for `cuda_launch_async!`
+- [cuda-async](../cuda-async/) -- async scheduling

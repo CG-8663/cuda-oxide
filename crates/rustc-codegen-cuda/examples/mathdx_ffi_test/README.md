@@ -19,6 +19,13 @@ compiles them to LTOIR, and links them with cuda-oxide generated code.
 2. **MathDx Library** - Download from: https://developer.nvidia.com/cublasdx-downloads
 3. **cuda-oxide compiler** toolchain
 
+If your default host compiler is newer than the CUDA Toolkit supports, set
+`NVCC_CCBIN` or `CUDAHOSTCXX` before running the example:
+
+```bash
+NVCC_CCBIN=/usr/bin/g++-15 cargo oxide run mathdx_ffi_test --emit-nvvm-ir --arch=sm_120
+```
+
 ## Directory Structure
 
 ```text

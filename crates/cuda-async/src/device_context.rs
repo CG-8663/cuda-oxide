@@ -283,28 +283,6 @@ pub fn load_module_from_file(
     })?
 }
 
-/// Async counterpart of [`cuda_host::load_kernel_module`].
-///
-/// Loads a kernel module by stem name on `device_id`. The on-disk fall-through
-/// is identical to the sync helper: tries `<name>.cubin`, then `<name>.ptx`,
-/// and finally builds a cubin from `<name>.ll` plus libdevice when cuda-oxide
-/// auto-detected CUDA math intrinsics during the build. The async version
-/// just routes the underlying [`cuda_core::CudaContext`] through the
-/// per-device async context map via [`with_cuda_context`].
-///
-/// Use this in async scaffolds (and from `cuda_launch_async!` callers) so a
-/// kernel that later adds `sqrt` / `sin` / `pow` keeps working without
-/// rewriting the `main`.
-pub fn load_kernel_module_async(
-    name: &str,
-    device_id: usize,
-) -> Result<Arc<CudaModule>, DeviceError> {
-    with_cuda_context(device_id, |ctx| {
-        cuda_host::load_kernel_module(ctx, name)
-            .map_err(|e| DeviceError::KernelCache(e.to_string()))
-    })?
-}
-
 /// Loads a CUDA module from PTX source text on `device_id`.
 pub fn load_module_from_ptx(
     ptx_src: &str,

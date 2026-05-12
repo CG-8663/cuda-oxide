@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// Thread-local scratch is indexed by `i`; iterator form doesn't apply.
+#![allow(clippy::needless_range_loop)]
+
 //! MathDx FFI Test - cuda-oxide kernel calling MathDx (cuFFTDx, cuBLASDx) via LTOIR
 //!
 //! This example demonstrates calling NVIDIA MathDx device extension libraries
@@ -24,7 +27,7 @@
 //! ```
 
 use cuda_device::{device, kernel, shared::DynamicSharedArray};
-use cuda_host::cuda_launch;
+use cuda_host::cuda_module;
 
 #[cfg(feature = "libmathdx")]
 use std::ffi::CString;
@@ -106,265 +109,275 @@ unsafe extern "C" {
 // =============================================================================
 // Test Kernels
 // =============================================================================
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-/// Test kernel: 8-point FFT forward then inverse (should recover original)
-///
-/// Each thread:
-/// 1. Loads 8 complex values from global memory into local array
-/// 2. Performs forward FFT
-/// 3. Performs inverse FFT
-/// 4. Stores result back to global memory
-///
-/// After FFT -> IFFT, data should be scaled by FFT size (8).
-#[kernel]
-fn test_fft_8_roundtrip(input: *const f32, output: *mut f32) {
-    let tid = cuda_device::thread::threadIdx_x() as usize;
+    /// Test kernel: 8-point FFT forward then inverse (should recover original)
+    ///
+    /// Each thread:
+    /// 1. Loads 8 complex values from global memory into local array
+    /// 2. Performs forward FFT
+    /// 3. Performs inverse FFT
+    /// 4. Stores result back to global memory
+    ///
+    /// After FFT -> IFFT, data should be scaled by FFT size (8).
+    #[kernel]
+    pub fn test_fft_8_roundtrip(input: *const f32, output: *mut f32) {
+        let tid = cuda_device::thread::threadIdx_x() as usize;
 
-    // Each thread processes 8 complex numbers = 16 floats
-    let offset = tid * 16;
+        // Each thread processes 8 complex numbers = 16 floats
+        let offset = tid * 16;
 
-    // Local storage for FFT (8 complex = 16 floats)
-    let mut local_data: [f32; 16] = [0.0; 16];
+        // Local storage for FFT (8 complex = 16 floats)
+        let mut local_data: [f32; 16] = [0.0; 16];
 
-    // Load from global memory
-    for i in 0..16 {
-        local_data[i] = unsafe { *input.add(offset + i) };
-    }
-
-    // Forward FFT
-    unsafe {
-        cufftdx_fft_8_c2c_f32_forward(local_data.as_mut_ptr());
-    }
-
-    // Inverse FFT
-    unsafe {
-        cufftdx_fft_8_c2c_f32_inverse(local_data.as_mut_ptr());
-    }
-
-    // Store to global memory (result is scaled by N=8)
-    for i in 0..16 {
-        unsafe {
-            *output.add(offset + i) = local_data[i];
+        // Load from global memory
+        for i in 0..16 {
+            local_data[i] = unsafe { *input.add(offset + i) };
         }
-    }
-}
 
-/// Test kernel: 16-point FFT forward then inverse
-#[kernel]
-fn test_fft_16_roundtrip(input: *const f32, output: *mut f32) {
-    let tid = cuda_device::thread::threadIdx_x() as usize;
-
-    // Each thread processes 16 complex numbers = 32 floats
-    let offset = tid * 32;
-
-    // Local storage for FFT (16 complex = 32 floats)
-    let mut local_data: [f32; 32] = [0.0; 32];
-
-    // Load from global memory
-    for i in 0..32 {
-        local_data[i] = unsafe { *input.add(offset + i) };
-    }
-
-    // Forward FFT
-    unsafe {
-        cufftdx_fft_16_c2c_f32_forward(local_data.as_mut_ptr());
-    }
-
-    // Inverse FFT
-    unsafe {
-        cufftdx_fft_16_c2c_f32_inverse(local_data.as_mut_ptr());
-    }
-
-    // Store to global memory (result is scaled by N=16)
-    for i in 0..32 {
+        // Forward FFT
         unsafe {
-            *output.add(offset + i) = local_data[i];
+            cufftdx_fft_8_c2c_f32_forward(local_data.as_mut_ptr());
         }
-    }
-}
 
-/// Test kernel: 32x32x32 block-level GEMM
-///
-/// C = A * B
-/// - A: 32x32 row-major
-/// - B: 32x32 col-major
-/// - C: 32x32 output
-///
-/// All 256 threads in the block cooperate.
-#[kernel]
-fn test_gemm_32x32x32(a: *const f32, b: *const f32, c: *mut f32) {
-    // Get shared memory for cuBLASDx
-    // cuBLASDx requires specific alignment, use 128-byte alignment
-    let smem: *mut i8 = DynamicSharedArray::<i8, 128>::get();
-
-    // All threads call the GEMM function together
-    unsafe {
-        cublasdx_gemm_32x32x32_f32(a, b, c, smem);
-    }
-}
-
-/// Test kernel: 32x32x32 GEMM with alpha/beta scaling
-///
-/// C = alpha * A * B + beta * C
-#[kernel]
-fn test_gemm_32x32x32_alphabeta(alpha: f32, a: *const f32, b: *const f32, beta: f32, c: *mut f32) {
-    let smem: *mut i8 = DynamicSharedArray::<i8, 128>::get();
-
-    unsafe {
-        cublasdx_gemm_32x32x32_f32_alphabeta(alpha, a, b, beta, c, smem);
-    }
-}
-
-/// Debug kernel: Copy through local array using as_mut_ptr()
-/// This tests if the as_mut_ptr() path works correctly for memory-backed arrays.
-#[kernel]
-fn debug_copy_through_local(input: *const f32, output: *mut f32) {
-    let tid = cuda_device::thread::threadIdx_x() as usize;
-    let offset = tid * 16;
-
-    // Local storage (same as FFT-8 test)
-    let mut local_data: [f32; 16] = [0.0; 16];
-
-    // Load from global memory using runtime index (triggers memory-backing)
-    for i in 0..16 {
-        local_data[i] = unsafe { *input.add(offset + i) };
-    }
-
-    // Get pointer via as_mut_ptr() - THIS IS WHAT WE'RE TESTING
-    let ptr = local_data.as_mut_ptr();
-
-    // Use the pointer to read/write (simulating what FFT would do)
-    // Just double each value through the pointer
-    for i in 0..16 {
+        // Inverse FFT
         unsafe {
-            let val = *ptr.add(i);
-            *ptr.add(i) = val * 2.0;
+            cufftdx_fft_8_c2c_f32_inverse(local_data.as_mut_ptr());
+        }
+
+        // Store to global memory (result is scaled by N=8)
+        for i in 0..16 {
+            unsafe {
+                *output.add(offset + i) = local_data[i];
+            }
         }
     }
 
-    // Store to global memory using runtime index
-    for i in 0..16 {
+    /// Test kernel: 16-point FFT forward then inverse
+    #[kernel]
+    pub fn test_fft_16_roundtrip(input: *const f32, output: *mut f32) {
+        let tid = cuda_device::thread::threadIdx_x() as usize;
+
+        // Each thread processes 16 complex numbers = 32 floats
+        let offset = tid * 32;
+
+        // Local storage for FFT (16 complex = 32 floats)
+        let mut local_data: [f32; 32] = [0.0; 32];
+
+        // Load from global memory
+        for i in 0..32 {
+            local_data[i] = unsafe { *input.add(offset + i) };
+        }
+
+        // Forward FFT
         unsafe {
-            *output.add(offset + i) = local_data[i];
+            cufftdx_fft_16_c2c_f32_forward(local_data.as_mut_ptr());
+        }
+
+        // Inverse FFT
+        unsafe {
+            cufftdx_fft_16_c2c_f32_inverse(local_data.as_mut_ptr());
+        }
+
+        // Store to global memory (result is scaled by N=16)
+        for i in 0..32 {
+            unsafe {
+                *output.add(offset + i) = local_data[i];
+            }
         }
     }
-}
 
-/// Debug kernel: Test extern function that writes through a pointer
-/// This tests if extern functions can modify data through pointer arguments.
-#[kernel]
-fn debug_extern_double(input: *const f32, output: *mut f32) {
-    let tid = cuda_device::thread::threadIdx_x() as usize;
-    let offset = tid * 16;
+    /// Test kernel: 32x32x32 block-level GEMM
+    ///
+    /// C = A * B
+    /// - A: 32x32 row-major
+    /// - B: 32x32 col-major
+    /// - C: 32x32 output
+    ///
+    /// All 256 threads in the block cooperate.
+    #[kernel]
+    pub fn test_gemm_32x32x32(a: *const f32, b: *const f32, c: *mut f32) {
+        // Get shared memory for cuBLASDx
+        // cuBLASDx requires specific alignment, use 128-byte alignment
+        let smem: *mut i8 = DynamicSharedArray::<i8, 128>::get();
 
-    // Local storage
-    let mut local_data: [f32; 16] = [0.0; 16];
-
-    // Load from global memory
-    for i in 0..16 {
-        local_data[i] = unsafe { *input.add(offset + i) };
-    }
-
-    // Call EXTERN function to double the values via as_mut_ptr()
-    unsafe {
-        debug_extern_double_array(local_data.as_mut_ptr(), 16);
-    }
-
-    // Store to global memory
-    for i in 0..16 {
+        // All threads call the GEMM function together
         unsafe {
-            *output.add(offset + i) = local_data[i];
+            cublasdx_gemm_32x32x32_f32(a, b, c, smem);
         }
     }
-}
 
-/// Debug kernel: Test extern function that writes through GLOBAL memory pointer
-/// This tests if the issue is specific to local memory vs global memory.
-#[kernel]
-fn debug_extern_double_global(inout: *mut f32) {
-    let tid = cuda_device::thread::threadIdx_x() as usize;
-    let offset = tid * 16;
+    /// Test kernel: 32x32x32 GEMM with alpha/beta scaling
+    ///
+    /// C = alpha * A * B + beta * C
+    #[kernel]
+    pub fn test_gemm_32x32x32_alphabeta(
+        alpha: f32,
+        a: *const f32,
+        b: *const f32,
+        beta: f32,
+        c: *mut f32,
+    ) {
+        let smem: *mut i8 = DynamicSharedArray::<i8, 128>::get();
 
-    // Call EXTERN function directly on GLOBAL memory pointer
-    unsafe {
-        debug_extern_double_array(inout.add(offset), 16);
-    }
-}
-
-/// Query kernel: Get cuFFTDx configuration values
-#[kernel]
-fn query_fft_config(output: *mut i32) {
-    let tid = cuda_device::thread::threadIdx_x();
-    if tid == 0 {
         unsafe {
-            // FFT-8 config
-            *output.add(0) = cufftdx_fft_8_storage_size();
-            *output.add(1) = cufftdx_fft_8_elements_per_thread();
-
-            // FFT-16 config
-            *output.add(2) = cufftdx_fft_16_storage_size();
-            *output.add(3) = cufftdx_fft_16_elements_per_thread();
-
-            // FFT-32 config
-            *output.add(4) = cufftdx_fft_32_storage_size();
+            cublasdx_gemm_32x32x32_f32_alphabeta(alpha, a, b, beta, c, smem);
         }
     }
-}
 
-/// Query kernel: Get cuBLASDx configuration values
-#[kernel]
-fn query_gemm_config(output: *mut i32) {
-    let tid = cuda_device::thread::threadIdx_x();
-    if tid == 0 {
-        unsafe {
-            *output.add(0) = cublasdx_gemm_32x32x32_smem_size();
-            *output.add(1) = cublasdx_gemm_32x32x32_smem_size_ab();
-            *output.add(2) = cublasdx_gemm_32x32x32_block_dim_x();
-            *output.add(3) = cublasdx_gemm_32x32x32_block_dim_y();
-            *output.add(4) = cublasdx_gemm_32x32x32_block_dim_z();
+    /// Debug kernel: Copy through local array using as_mut_ptr()
+    /// This tests if the as_mut_ptr() path works correctly for memory-backed arrays.
+    #[kernel]
+    pub fn debug_copy_through_local(input: *const f32, output: *mut f32) {
+        let tid = cuda_device::thread::threadIdx_x() as usize;
+        let offset = tid * 16;
+
+        // Local storage (same as FFT-8 test)
+        let mut local_data: [f32; 16] = [0.0; 16];
+
+        // Load from global memory using runtime index (triggers memory-backing)
+        for i in 0..16 {
+            local_data[i] = unsafe { *input.add(offset + i) };
+        }
+
+        // Get pointer via as_mut_ptr() - THIS IS WHAT WE'RE TESTING
+        let ptr = local_data.as_mut_ptr();
+
+        // Use the pointer to read/write (simulating what FFT would do)
+        // Just double each value through the pointer
+        for i in 0..16 {
+            unsafe {
+                let val = *ptr.add(i);
+                *ptr.add(i) = val * 2.0;
+            }
+        }
+
+        // Store to global memory using runtime index
+        for i in 0..16 {
+            unsafe {
+                *output.add(offset + i) = local_data[i];
+            }
         }
     }
-}
 
-// =============================================================================
-// libmathdx-generated FFT Test Kernels (Option B)
-// Only available when the "libmathdx" feature is enabled.
-// =============================================================================
+    /// Debug kernel: Test extern function that writes through a pointer
+    /// This tests if extern functions can modify data through pointer arguments.
+    #[kernel]
+    pub fn debug_extern_double(input: *const f32, output: *mut f32) {
+        let tid = cuda_device::thread::threadIdx_x() as usize;
+        let offset = tid * 16;
 
-/// Test kernel: 16-point FFT using libmathdx-generated LTOIR
-///
-/// Uses functions generated at build time via libmathdx C API.
-/// This demonstrates "Option B" - no hand-written C++ wrappers needed.
-#[cfg(feature = "libmathdx")]
-#[kernel]
-fn test_libmathdx_fft_16_roundtrip(input: *const f32, output: *mut f32) {
-    let tid = cuda_device::thread::threadIdx_x() as usize;
+        // Local storage
+        let mut local_data: [f32; 16] = [0.0; 16];
 
-    // Each thread processes 16 complex numbers = 32 floats
-    let offset = tid * 32;
+        // Load from global memory
+        for i in 0..16 {
+            local_data[i] = unsafe { *input.add(offset + i) };
+        }
 
-    // Local storage for FFT (16 complex = 32 floats)
-    let mut local_data: [f32; 32] = [0.0; 32];
-
-    // Load from global memory
-    for i in 0..32 {
-        local_data[i] = unsafe { *input.add(offset + i) };
-    }
-
-    // Forward FFT using libmathdx-generated function
-    unsafe {
-        libmathdx_fft_16_forward(local_data.as_mut_ptr());
-    }
-
-    // Inverse FFT using libmathdx-generated function
-    unsafe {
-        libmathdx_fft_16_inverse(local_data.as_mut_ptr());
-    }
-
-    // Store to global memory (result is scaled by N=16)
-    for i in 0..32 {
+        // Call EXTERN function to double the values via as_mut_ptr()
         unsafe {
-            *output.add(offset + i) = local_data[i];
+            debug_extern_double_array(local_data.as_mut_ptr(), 16);
+        }
+
+        // Store to global memory
+        for i in 0..16 {
+            unsafe {
+                *output.add(offset + i) = local_data[i];
+            }
+        }
+    }
+
+    /// Debug kernel: Test extern function that writes through GLOBAL memory pointer
+    /// This tests if the issue is specific to local memory vs global memory.
+    #[kernel]
+    pub fn debug_extern_double_global(inout: *mut f32) {
+        let tid = cuda_device::thread::threadIdx_x() as usize;
+        let offset = tid * 16;
+
+        // Call EXTERN function directly on GLOBAL memory pointer
+        unsafe {
+            debug_extern_double_array(inout.add(offset), 16);
+        }
+    }
+
+    /// Query kernel: Get cuFFTDx configuration values
+    #[kernel]
+    pub fn query_fft_config(output: *mut i32) {
+        let tid = cuda_device::thread::threadIdx_x();
+        if tid == 0 {
+            unsafe {
+                // FFT-8 config
+                *output.add(0) = cufftdx_fft_8_storage_size();
+                *output.add(1) = cufftdx_fft_8_elements_per_thread();
+
+                // FFT-16 config
+                *output.add(2) = cufftdx_fft_16_storage_size();
+                *output.add(3) = cufftdx_fft_16_elements_per_thread();
+
+                // FFT-32 config
+                *output.add(4) = cufftdx_fft_32_storage_size();
+            }
+        }
+    }
+
+    /// Query kernel: Get cuBLASDx configuration values
+    #[kernel]
+    pub fn query_gemm_config(output: *mut i32) {
+        let tid = cuda_device::thread::threadIdx_x();
+        if tid == 0 {
+            unsafe {
+                *output.add(0) = cublasdx_gemm_32x32x32_smem_size();
+                *output.add(1) = cublasdx_gemm_32x32x32_smem_size_ab();
+                *output.add(2) = cublasdx_gemm_32x32x32_block_dim_x();
+                *output.add(3) = cublasdx_gemm_32x32x32_block_dim_y();
+                *output.add(4) = cublasdx_gemm_32x32x32_block_dim_z();
+            }
+        }
+    }
+
+    // =============================================================================
+    // libmathdx-generated FFT Test Kernels (Option B)
+    // Only available when the "libmathdx" feature is enabled.
+    // =============================================================================
+
+    /// Test kernel: 16-point FFT using libmathdx-generated LTOIR
+    ///
+    /// Uses functions generated at build time via libmathdx C API.
+    /// This demonstrates "Option B" - no hand-written C++ wrappers needed.
+    #[cfg(feature = "libmathdx")]
+    #[kernel]
+    pub fn test_libmathdx_fft_16_roundtrip(input: *const f32, output: *mut f32) {
+        let tid = cuda_device::thread::threadIdx_x() as usize;
+
+        // Each thread processes 16 complex numbers = 32 floats
+        let offset = tid * 32;
+
+        // Local storage for FFT (16 complex = 32 floats)
+        let mut local_data: [f32; 32] = [0.0; 32];
+
+        // Load from global memory
+        for i in 0..32 {
+            local_data[i] = unsafe { *input.add(offset + i) };
+        }
+
+        // Forward FFT using libmathdx-generated function
+        unsafe {
+            libmathdx_fft_16_forward(local_data.as_mut_ptr());
+        }
+
+        // Inverse FFT using libmathdx-generated function
+        unsafe {
+            libmathdx_fft_16_inverse(local_data.as_mut_ptr());
+        }
+
+        // Store to global memory (result is scaled by N=16)
+        for i in 0..32 {
+            unsafe {
+                *output.add(offset + i) = local_data[i];
+            }
         }
     }
 }
@@ -664,10 +677,10 @@ fn file_needs_rebuild(target: &Path, sources: &[&Path]) -> bool {
     }
     let target_time = target.metadata().and_then(|m| m.modified()).ok();
     for src in sources {
-        if let Ok(src_time) = src.metadata().and_then(|m| m.modified()) {
-            if target_time.map(|t| src_time > t).unwrap_or(true) {
-                return true;
-            }
+        if let Ok(src_time) = src.metadata().and_then(|m| m.modified())
+            && target_time.map(|t| src_time > t).unwrap_or(true)
+        {
+            return true;
         }
     }
     false
@@ -819,7 +832,7 @@ fn build_pipeline() -> Result<std::path::PathBuf, String> {
 // Host-side test infrastructure
 // =============================================================================
 
-use cuda_core::{CudaContext, CudaModule, DeviceBuffer, LaunchConfig};
+use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
 use std::sync::Arc;
 
 /// Mirrors the detection logic in `extern-libs/build.sh`: first honour
@@ -881,6 +894,7 @@ fn main() {
     let module = ctx
         .load_module_from_file(cubin_path.to_str().expect("cubin path must be valid UTF-8"))
         .expect("Failed to load cubin module");
+    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
 
     let mut passed = 0i32;
     let mut failed = 0i32;
@@ -924,7 +938,7 @@ fn main() {
 
 fn test_fft_config_query(
     ctx: &Arc<CudaContext>,
-    module: &Arc<CudaModule>,
+    module: &kernels::LoadedModule,
     passed: &mut i32,
     failed: &mut i32,
 ) {
@@ -941,14 +955,9 @@ fn test_fft_config_query(
     };
 
     let output_ptr = d_output.cu_deviceptr() as *mut i32;
-    cuda_launch! {
-        kernel: query_fft_config,
-        stream: stream,
-        module: module,
-        config: config,
-        args: [output_ptr]
-    }
-    .expect("Kernel launch failed");
+    module
+        .query_fft_config((stream).as_ref(), config, output_ptr)
+        .expect("Kernel launch failed");
 
     let h_output = d_output.to_host_vec(&stream).unwrap();
 
@@ -974,7 +983,7 @@ fn test_fft_config_query(
 
 fn test_gemm_config_query(
     ctx: &Arc<CudaContext>,
-    module: &Arc<CudaModule>,
+    module: &kernels::LoadedModule,
     passed: &mut i32,
     failed: &mut i32,
 ) {
@@ -991,14 +1000,9 @@ fn test_gemm_config_query(
     };
 
     let output_ptr = d_output.cu_deviceptr() as *mut i32;
-    cuda_launch! {
-        kernel: query_gemm_config,
-        stream: stream,
-        module: module,
-        config: config,
-        args: [output_ptr]
-    }
-    .expect("Kernel launch failed");
+    module
+        .query_gemm_config((stream).as_ref(), config, output_ptr)
+        .expect("Kernel launch failed");
 
     let h_output = d_output.to_host_vec(&stream).unwrap();
 
@@ -1024,7 +1028,7 @@ fn test_gemm_config_query(
 
 fn debug_copy_through_local_runner(
     ctx: &Arc<CudaContext>,
-    module: &Arc<CudaModule>,
+    module: &kernels::LoadedModule,
     passed: &mut i32,
     failed: &mut i32,
 ) {
@@ -1052,14 +1056,9 @@ fn debug_copy_through_local_runner(
 
     let input_ptr = d_input.cu_deviceptr() as *const f32;
     let output_ptr = d_output.cu_deviceptr() as *mut f32;
-    cuda_launch! {
-        kernel: debug_copy_through_local,
-        stream: stream,
-        module: module,
-        config: config,
-        args: [input_ptr, output_ptr]
-    }
-    .expect("Kernel launch failed");
+    module
+        .debug_copy_through_local((stream).as_ref(), config, input_ptr, output_ptr)
+        .expect("Kernel launch failed");
 
     let h_output = d_output.to_host_vec(&stream).unwrap();
 
@@ -1094,7 +1093,7 @@ fn debug_copy_through_local_runner(
 
 fn debug_extern_double_global_runner(
     ctx: &Arc<CudaContext>,
-    module: &Arc<CudaModule>,
+    module: &kernels::LoadedModule,
     passed: &mut i32,
     failed: &mut i32,
 ) {
@@ -1119,14 +1118,9 @@ fn debug_extern_double_global_runner(
     };
 
     let inout_ptr = d_inout.cu_deviceptr() as *mut f32;
-    cuda_launch! {
-        kernel: debug_extern_double_global,
-        stream: stream,
-        module: module,
-        config: config,
-        args: [inout_ptr]
-    }
-    .expect("Kernel launch failed");
+    module
+        .debug_extern_double_global((stream).as_ref(), config, inout_ptr)
+        .expect("Kernel launch failed");
 
     let h_output = d_inout.to_host_vec(&stream).unwrap();
 
@@ -1156,7 +1150,7 @@ fn debug_extern_double_global_runner(
 
 fn debug_extern_double_runner(
     ctx: &Arc<CudaContext>,
-    module: &Arc<CudaModule>,
+    module: &kernels::LoadedModule,
     passed: &mut i32,
     failed: &mut i32,
 ) {
@@ -1183,14 +1177,9 @@ fn debug_extern_double_runner(
 
     let input_ptr = d_input.cu_deviceptr() as *const f32;
     let output_ptr = d_output.cu_deviceptr() as *mut f32;
-    cuda_launch! {
-        kernel: debug_extern_double,
-        stream: stream,
-        module: module,
-        config: config,
-        args: [input_ptr, output_ptr]
-    }
-    .expect("Kernel launch failed");
+    module
+        .debug_extern_double((stream).as_ref(), config, input_ptr, output_ptr)
+        .expect("Kernel launch failed");
 
     let h_output = d_output.to_host_vec(&stream).unwrap();
 
@@ -1225,7 +1214,7 @@ fn debug_extern_double_runner(
 
 fn test_fft_8_roundtrip_runner(
     ctx: &Arc<CudaContext>,
-    module: &Arc<CudaModule>,
+    module: &kernels::LoadedModule,
     passed: &mut i32,
     failed: &mut i32,
 ) {
@@ -1254,14 +1243,9 @@ fn test_fft_8_roundtrip_runner(
 
     let input_ptr = d_input.cu_deviceptr() as *const f32;
     let output_ptr = d_output.cu_deviceptr() as *mut f32;
-    cuda_launch! {
-        kernel: test_fft_8_roundtrip,
-        stream: stream,
-        module: module,
-        config: config,
-        args: [input_ptr, output_ptr]
-    }
-    .expect("Kernel launch failed");
+    module
+        .test_fft_8_roundtrip((stream).as_ref(), config, input_ptr, output_ptr)
+        .expect("Kernel launch failed");
 
     let h_output = d_output.to_host_vec(&stream).unwrap();
 
@@ -1291,7 +1275,7 @@ fn test_fft_8_roundtrip_runner(
 
 fn test_fft_16_roundtrip_runner(
     ctx: &Arc<CudaContext>,
-    module: &Arc<CudaModule>,
+    module: &kernels::LoadedModule,
     passed: &mut i32,
     failed: &mut i32,
 ) {
@@ -1319,14 +1303,9 @@ fn test_fft_16_roundtrip_runner(
 
     let input_ptr = d_input.cu_deviceptr() as *const f32;
     let output_ptr = d_output.cu_deviceptr() as *mut f32;
-    cuda_launch! {
-        kernel: test_fft_16_roundtrip,
-        stream: stream,
-        module: module,
-        config: config,
-        args: [input_ptr, output_ptr]
-    }
-    .expect("Kernel launch failed");
+    module
+        .test_fft_16_roundtrip((stream).as_ref(), config, input_ptr, output_ptr)
+        .expect("Kernel launch failed");
 
     let h_output = d_output.to_host_vec(&stream).unwrap();
 
@@ -1352,7 +1331,7 @@ fn test_fft_16_roundtrip_runner(
 
 fn test_gemm_32x32x32_runner(
     ctx: &Arc<CudaContext>,
-    module: &Arc<CudaModule>,
+    module: &kernels::LoadedModule,
     passed: &mut i32,
     failed: &mut i32,
 ) {
@@ -1395,14 +1374,9 @@ fn test_gemm_32x32x32_runner(
     let a_ptr = d_a.cu_deviceptr() as *const f32;
     let b_ptr = d_b.cu_deviceptr() as *const f32;
     let c_ptr = d_c.cu_deviceptr() as *mut f32;
-    cuda_launch! {
-        kernel: test_gemm_32x32x32,
-        stream: stream,
-        module: module,
-        config: config,
-        args: [a_ptr, b_ptr, c_ptr]
-    }
-    .expect("Kernel launch failed");
+    module
+        .test_gemm_32x32x32((stream).as_ref(), config, a_ptr, b_ptr, c_ptr)
+        .expect("Kernel launch failed");
 
     let h_c = d_c.to_host_vec(&stream).unwrap();
 
@@ -1436,7 +1410,7 @@ fn test_gemm_32x32x32_runner(
 
 fn test_gemm_32x32x32_alphabeta_runner(
     ctx: &Arc<CudaContext>,
-    module: &Arc<CudaModule>,
+    module: &kernels::LoadedModule,
     passed: &mut i32,
     failed: &mut i32,
 ) {
@@ -1482,14 +1456,9 @@ fn test_gemm_32x32x32_alphabeta_runner(
     let a_ptr = d_a.cu_deviceptr() as *const f32;
     let b_ptr = d_b.cu_deviceptr() as *const f32;
     let c_ptr = d_c.cu_deviceptr() as *mut f32;
-    cuda_launch! {
-        kernel: test_gemm_32x32x32_alphabeta,
-        stream: stream,
-        module: module,
-        config: config,
-        args: [alpha, a_ptr, b_ptr, beta, c_ptr]
-    }
-    .expect("Kernel launch failed");
+    module
+        .test_gemm_32x32x32_alphabeta((stream).as_ref(), config, alpha, a_ptr, b_ptr, beta, c_ptr)
+        .expect("Kernel launch failed");
 
     let h_result = d_c.to_host_vec(&stream).unwrap();
 
@@ -1530,7 +1499,7 @@ fn test_gemm_32x32x32_alphabeta_runner(
 #[cfg(feature = "libmathdx")]
 fn test_libmathdx_fft_16_roundtrip_runner(
     ctx: &Arc<CudaContext>,
-    module: &Arc<CudaModule>,
+    module: &kernels::LoadedModule,
     passed: &mut i32,
     failed: &mut i32,
 ) {
@@ -1558,14 +1527,9 @@ fn test_libmathdx_fft_16_roundtrip_runner(
 
     let input_ptr = d_input.cu_deviceptr() as *const f32;
     let output_ptr = d_output.cu_deviceptr() as *mut f32;
-    cuda_launch! {
-        kernel: test_libmathdx_fft_16_roundtrip,
-        stream: stream,
-        module: module,
-        config: config,
-        args: [input_ptr, output_ptr]
-    }
-    .expect("Kernel launch failed");
+    module
+        .test_libmathdx_fft_16_roundtrip((stream).as_ref(), config, input_ptr, output_ptr)
+        .expect("Kernel launch failed");
 
     let h_output = d_output.to_host_vec(&stream).unwrap();
 

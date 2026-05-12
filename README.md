@@ -27,17 +27,22 @@ Please see [CONTRIBUTING.md](CONTRIBUTING.md) if you're interested in contributi
 ## Quick Start
 
 ```rust
-use cuda_device::{kernel, thread, DisjointSlice};
+use cuda_device::{cuda_module, kernel, thread, DisjointSlice};
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
-use cuda_host::{cuda_launch, load_kernel_module};
 
 // Device: generic kernel that applies any function to each element.
 // F can be a closure with captures — rustc monomorphizes it to a concrete type.
-#[kernel]
-pub fn map<T: Copy, F: Fn(T) -> T + Copy>(f: F, input: &[T], mut out: DisjointSlice<T>) {
-    let idx = thread::index_1d();
-    if let Some(out_elem) = out.get_mut(idx) {
-        *out_elem = f(input[idx.get()]);
+#[cuda_module]
+mod kernels {
+    use super::*;
+
+    #[kernel]
+    pub fn map<T: Copy, F: Fn(T) -> T + Copy>(f: F, input: &[T], mut out: DisjointSlice<T>) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        if let Some(out_elem) = out.get_mut(idx) {
+            *out_elem = f(input[i]);
+        }
     }
 }
 
@@ -49,17 +54,19 @@ fn main() {
     let input = DeviceBuffer::from_host(&stream, &data).unwrap();
     let mut output = DeviceBuffer::<f32>::zeroed(&stream, 1024).unwrap();
 
-    let module = load_kernel_module(&ctx, "host_closure").unwrap();
+    let module = kernels::load(&ctx).unwrap();
 
     // Launch with a closure — factor is captured and passed to the GPU automatically
     let factor = 2.5f32;
-    cuda_launch! {
-        kernel: map::<f32, _>,
-        stream: stream,
-        module: module,
-        config: LaunchConfig::for_num_elems(1024),
-        args: [move |x: f32| x * factor, slice(input), slice_mut(output)]
-    }.unwrap();
+    module
+        .map::<f32, _>(
+            &stream,
+            LaunchConfig::for_num_elems(1024),
+            move |x: f32| x * factor,
+            &input,
+            &mut output,
+        )
+        .unwrap();
 
     let result = output.to_host_vec(&stream).unwrap();
     assert!((result[1] - 2.5).abs() < 1e-5);
@@ -67,29 +74,28 @@ fn main() {
 ```
 
 The above example defines a generic `#[kernel]` function `map` that accepts any
-`Fn(T) -> T` closure. On the host side, `CudaContext` and `DeviceBuffer` manage
-the GPU context and memory, and `cuda_launch!` dispatches the kernel to the GPU.
-The closure `move |x| x * factor` is captured, scalarized, and passed as PTX
-kernel parameters automatically. PTX is generated alongside the host binary in a
-single `cargo build` invocation.
+`Fn(T) -> T` closure. `#[cuda_module]` embeds the generated device artifact into
+the host binary and generates a typed `module.map::<f32, _>(...)` launch method.
+The closure `move |x| x * factor` is captured, scalarized, and passed as kernel
+parameters automatically.
 
-For composable async GPU work, the same launch site looks almost identical:
-`stream:` disappears, `cuda_launch_async!` returns a lazy `DeviceOperation`,
-and execution happens when you call `.sync()` or `.await`.
+For composable async GPU work, `stream:` disappears, `{kernel}_async` returns a
+lazy `DeviceOperation`, and execution happens when you call `.sync()` or
+`.await`.
 
 ```rust
 use cuda_async::device_operation::DeviceOperation;
-use cuda_host::cuda_launch_async;
 
 // Assuming `module`, `input`, and `output` come from the cuda-async setup:
 let factor = 2.5f32;
-cuda_launch_async! {
-    kernel: map::<f32, _>,
-    module: module,
-    config: LaunchConfig::for_num_elems(1024),
-    args: [move |x: f32| x * factor, slice(input), slice_mut(output)]
-}
-.sync()?;
+module
+    .map_async::<f32, _>(
+        LaunchConfig::for_num_elems(1024),
+        move |x: f32| x * factor,
+        &input,
+        &mut output,
+    )?
+    .sync()?;
 // or: .await?;
 ```
 
@@ -178,15 +184,25 @@ sudo apt install clang-21   # or libclang-common-21-dev
 
 #### Docker
 
-A development image is available in [`docker/`](docker/). It uses Ubuntu 24.04,
+A development image is documented in [`docker/docs/`](docker/docs/). It uses Ubuntu 24.04,
 CUDA Toolkit 13.0, LLVM 21, Clang 21, and the pinned Rust nightly. This is useful
 when you want a reproducible environment matching the documented setup.
 
 ```bash
-docker build -f docker/Dockerfile -t cuda-oxide-dev .
+docker build -f docker/Dockerfile \
+  --build-arg USER_UID="$(id -u)" \
+  --build-arg USER_GID="$(id -g)" \
+  -t cuda-oxide-dev .
 docker run --rm -it --gpus all -v "$PWD":/workspace/cuda-oxide \
   -w /workspace/cuda-oxide cuda-oxide-dev
 ```
+
+When you use the bind-mounted repo workflow, build the image with your host
+UID/GID as shown above. `cargo oxide` writes both Cargo artifacts under
+`target/` and generated kernel artifacts such as `vecadd.ptx` into the example
+directory, so a default `1000:1000` container user will fail on checkouts owned
+by a different host user. Changing only `CARGO_TARGET_DIR` is not enough
+because PTX export still writes into the example directory.
 
 Inside the container, run:
 
@@ -240,8 +256,8 @@ cargo oxide run gemm_sol
 | Crate               | Description                                                               |
 |---------------------|---------------------------------------------------------------------------|
 | `cuda-device`       | Device intrinsics (`thread::*`, `warp::*`, barriers)                      |
-| `cuda-host`         | Host utilities (`cuda_launch!`, `cuda_launch_async!`, `ltoir` helper)     |
-| `cuda-macros`       | Proc macros (`#[kernel]`, `#[device]`, `gpu_printf!`)                     |
+| `cuda-host`         | Typed module loading, launch helpers, LTOIR loader                        |
+| `cuda-macros`       | Proc macros (`#[cuda_module]`, `#[kernel]`, `gpu_printf!`)                |
 | `cuda-bindings`     | Raw `bindgen` FFI bindings to `cuda.h`                                    |
 | `cuda-core`         | Safe RAII wrappers (`CudaContext`, `CudaStream`, `DeviceBuffer<T>`)       |
 | `cuda-async`        | Async execution layer (`DeviceOperation`, `DeviceFuture`, `DeviceBox<T>`) |

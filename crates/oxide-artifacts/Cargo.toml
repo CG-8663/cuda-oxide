@@ -1,0 +1,17 @@
+[package]
+name = "oxide-artifacts"
+version = "0.1.0"
+edition.workspace = true
+description = "Architecture-neutral embedded device artifact metadata for cuda-oxide"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+object = ["object-read", "object-write"]
+object-read = ["dep:object", "object/read", "object/std"]
+object-write = ["dep:object", "object/write"]
+
+[dependencies]
+object = { version = "0.36", optional = true, default-features = false }

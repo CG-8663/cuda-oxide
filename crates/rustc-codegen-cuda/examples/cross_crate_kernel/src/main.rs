@@ -32,7 +32,6 @@
 //! ```
 
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
-use cuda_host::cuda_launch;
 
 // Import everything from the kernel library!
 // This includes the #[kernel] functions and their generated helpers:
@@ -41,7 +40,7 @@ use cuda_host::cuda_launch;
 //   by `crates/reserved-oxide-symbols/` so this crate isn't a load-bearing
 //   string-literal site)
 // - __*_CudaKernel (marker types for CudaKernel trait)
-use kernel_lib::*;
+use kernel_lib::kernels;
 
 fn main() {
     println!("=== Cross-Crate Kernel Test ===\n");
@@ -56,6 +55,7 @@ fn main() {
     let module = ctx
         .load_module_from_file("cross_crate_kernel.ptx")
         .expect("Failed to load PTX module");
+    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
 
     // Test data
     const N: usize = 1024;
@@ -71,14 +71,15 @@ fn main() {
         let input_dev = DeviceBuffer::from_host(&stream, &input).unwrap();
         let mut output_dev = DeviceBuffer::<f32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: scale::<f32>,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(N as u32),
-            args: [factor, slice(input_dev), slice_mut(output_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .scale::<f32>(
+                (stream).as_ref(),
+                LaunchConfig::for_num_elems(N as u32),
+                factor,
+                &input_dev,
+                &mut output_dev,
+            )
+            .expect("Kernel launch failed");
 
         let output: Vec<f32> = output_dev.to_host_vec(&stream).unwrap();
 
@@ -105,14 +106,15 @@ fn main() {
         let input_dev = DeviceBuffer::from_host(&stream, &input).unwrap();
         let mut output_dev = DeviceBuffer::<i32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: scale::<i32>,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(N as u32),
-            args: [factor, slice(input_dev), slice_mut(output_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .scale::<i32>(
+                (stream).as_ref(),
+                LaunchConfig::for_num_elems(N as u32),
+                factor,
+                &input_dev,
+                &mut output_dev,
+            )
+            .expect("Kernel launch failed");
 
         let output: Vec<i32> = output_dev.to_host_vec(&stream).unwrap();
 
@@ -138,14 +140,15 @@ fn main() {
         let b_dev = DeviceBuffer::from_host(&stream, &b).unwrap();
         let mut c_dev = DeviceBuffer::<f32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: add::<f32>,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(N as u32),
-            args: [slice(a_dev), slice(b_dev), slice_mut(c_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .add::<f32>(
+                (stream).as_ref(),
+                LaunchConfig::for_num_elems(N as u32),
+                &a_dev,
+                &b_dev,
+                &mut c_dev,
+            )
+            .expect("Kernel launch failed");
 
         let c: Vec<f32> = c_dev.to_host_vec(&stream).unwrap();
 
@@ -172,14 +175,15 @@ fn main() {
         let input_dev = DeviceBuffer::from_host(&stream, &input).unwrap();
         let mut output_dev = DeviceBuffer::<f32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: scale_with_helper::<f32>,
-            stream: stream,
-            module: module,
-            config: LaunchConfig::for_num_elems(N as u32),
-            args: [factor, slice(input_dev), slice_mut(output_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .scale_with_helper::<f32>(
+                (stream).as_ref(),
+                LaunchConfig::for_num_elems(N as u32),
+                factor,
+                &input_dev,
+                &mut output_dev,
+            )
+            .expect("Kernel launch failed");
 
         let output: Vec<f32> = output_dev.to_host_vec(&stream).unwrap();
 

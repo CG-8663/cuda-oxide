@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#![allow(clippy::needless_range_loop)]
+
 //! Device FFI Test - cuda-oxide kernel calling external LTOIR functions
 //!
 //! This example demonstrates calling device functions defined in external LTOIR
@@ -19,7 +21,7 @@
 //! ```
 
 use cuda_device::{device, gpu_printf, kernel, shared::DynamicSharedArray};
-use cuda_host::cuda_launch;
+use cuda_host::cuda_module;
 
 // =============================================================================
 // External device functions from external_device_funcs.cu
@@ -62,170 +64,174 @@ unsafe extern "C" {
 // =============================================================================
 // Test Kernels
 // =============================================================================
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-/// Test kernel using simple device functions
-#[kernel]
-fn test_simple_device_funcs(output: *mut f32) {
-    let tid = cuda_device::thread::threadIdx_x();
+    /// Test kernel using simple device functions
+    #[kernel]
+    pub fn test_simple_device_funcs(output: *mut f32) {
+        let tid = cuda_device::thread::threadIdx_x();
 
-    // Test pure function
-    let x = tid as f32;
-    let y = (tid + 1) as f32;
-    let mag = unsafe { magnitude_squared(x, y) };
+        // Test pure function
+        let x = tid as f32;
+        let y = (tid + 1) as f32;
+        let mag = unsafe { magnitude_squared(x, y) };
 
-    // Test simple function
-    let added = unsafe { simple_add(mag, 1.0) };
+        // Test simple function
+        let added = unsafe { simple_add(mag, 1.0) };
 
-    // Test convergent function (all threads participate)
-    let sum = unsafe { warp_reduce_sum(added) };
+        // Test convergent function (all threads participate)
+        let sum = unsafe { warp_reduce_sum(added) };
 
-    // Lane 0 writes result
-    if tid % 32 == 0 {
-        unsafe {
-            *output.add((tid / 32) as usize) = sum;
-        }
-    }
-}
-
-/// Test kernel using CUB warp reduce
-#[kernel]
-fn test_cub_warp_reduce(input: *const f32, output: *mut f32) {
-    let tid = cuda_device::thread::threadIdx_x();
-    let lane = tid % 32;
-    let warp_id = tid / 32;
-
-    // Each thread loads a value
-    let value = unsafe { *input.add(tid as usize) };
-
-    // Warp-level reduction using CUB
-    let warp_sum = unsafe { cub_warp_reduce_sum_f32(value) };
-
-    // Lane 0 of each warp writes result
-    if lane == 0 {
-        unsafe {
-            *output.add(warp_id as usize) = warp_sum;
-        }
-    }
-}
-
-/// Test kernel with multiple attribute combinations
-#[kernel]
-fn test_mixed_attrs(a: *const f32, b: *const f32, output: *mut f32, n: i32) {
-    let tid = cuda_device::thread::threadIdx_x() as usize;
-
-    // Use readonly function
-    let dot = unsafe { dot_product(a, b, n) };
-
-    // Use pure function
-    let rsqrt = unsafe { fast_rsqrt(dot) };
-
-    // Use convergent function
-    let ballot = unsafe { warp_ballot(if rsqrt > 0.5 { 1 } else { 0 }) };
-    unsafe {
-        *output.add(tid) = rsqrt * (ballot as f32);
-    }
-}
-
-/// Test dynamic shared memory alignment with extern functions.
-///
-/// This kernel tests what happens when:
-/// - Rust uses DynamicSharedArray with 16B alignment (default)
-/// - Extern C++ function expects 128B alignment (TmaAligned128)
-///
-/// The question: Does the linker take the max alignment (128B)?
-/// Or does Rust's 16B declaration "win" and cause misalignment?
-///
-/// Scenario A (16B only from Rust side):
-/// ```
-/// .extern .shared .align 16 .b8 __dynamic_smem_test_smem_alignment_cross_module[];
-/// ```
-///
-/// Scenario B (if linker merges correctly):
-/// ```
-/// .extern .shared .align 128 .b8 ...;  // max(16, 128) = 128
-/// ```
-#[kernel]
-fn test_smem_alignment_cross_module(output: *mut u64) {
-    let tid = cuda_device::thread::threadIdx_x();
-
-    // Rust side: request 16B alignment (deliberately low)
-    let rust_smem: *mut f32 = DynamicSharedArray::<f32, 16>::get();
-
-    // Get addresses from both Rust and extern C++ perspectives
-    let rust_addr = rust_smem as u64;
-    let extern_addr = unsafe { smem_get_base_addr() };
-
-    if tid == 0 {
-        gpu_printf!("[DEBUG] Rust smem addr: {:x}\n", rust_addr);
-        gpu_printf!("[DEBUG] Extern smem addr: {:x}\n", extern_addr);
-        gpu_printf!("[DEBUG] Before write: rust[0] = {:.2f}\n", unsafe {
-            *rust_smem
-        });
-    }
-
-    // Write via extern function (expects 128B alignment internally)
-    if tid == 0 {
-        unsafe {
-            gpu_printf!("[DEBUG] Writing 42.0 via extern function...\n");
-            smem_write_aligned_128(0, 42.0);
-            gpu_printf!("[DEBUG] Write done\n");
+        // Lane 0 writes result
+        if tid.is_multiple_of(32) {
+            unsafe {
+                *output.add((tid / 32) as usize) = sum;
+            }
         }
     }
 
-    cuda_device::sync_threads();
+    /// Test kernel using CUB warp reduce
+    #[kernel]
+    pub fn test_cub_warp_reduce(input: *const f32, output: *mut f32) {
+        let tid = cuda_device::thread::threadIdx_x();
+        let lane = tid % 32;
+        let warp_id = tid / 32;
 
-    // Read back via Rust pointer
-    let value_via_rust = unsafe { *rust_smem };
+        // Each thread loads a value
+        let value = unsafe { *input.add(tid as usize) };
 
-    // Read back via extern function
-    let value_via_extern = unsafe { smem_read_aligned_128(0) };
+        // Warp-level reduction using CUB
+        let warp_sum = unsafe { cub_warp_reduce_sum_f32(value) };
 
-    if tid == 0 {
-        // Use pointer cast to get actual bits (to_bits() might not work on GPU)
-        let rust_bits: u32 = unsafe { *((&value_via_rust) as *const f32 as *const u32) };
-        let extern_bits: u32 = unsafe { *((&value_via_extern) as *const f32 as *const u32) };
+        // Lane 0 of each warp writes result
+        if lane == 0 {
+            unsafe {
+                *output.add(warp_id as usize) = warp_sum;
+            }
+        }
+    }
 
-        gpu_printf!("[DEBUG] After write:\n");
-        gpu_printf!(
-            "[DEBUG]   Rust read:   {:.2f} (bits via cast: {:x})\n",
-            value_via_rust,
-            rust_bits
-        );
-        gpu_printf!(
-            "[DEBUG]   Extern read: {:.2f} (bits via cast: {:x})\n",
-            value_via_extern,
-            extern_bits
-        );
-        gpu_printf!(
-            "[DEBUG]   to_bits():   rust={:x}, extern={:x}\n",
-            value_via_rust.to_bits(),
-            value_via_extern.to_bits()
-        );
+    /// Test kernel with multiple attribute combinations
+    #[kernel]
+    pub fn test_mixed_attrs(a: *const f32, b: *const f32, output: *mut f32, n: i32) {
+        let tid = cuda_device::thread::threadIdx_x() as usize;
 
-        // Also try direct write via Rust and read via extern
-        gpu_printf!("[DEBUG] Writing 99.0 via Rust pointer...\n");
-        unsafe { *rust_smem = 99.0 };
-        let extern_read_after_rust_write = unsafe { smem_read_aligned_128(0) };
-        gpu_printf!(
-            "[DEBUG]   Extern read after Rust write: {:.2f}\n",
-            extern_read_after_rust_write
-        );
+        // Use readonly function
+        let dot = unsafe { dot_product(a, b, n) };
 
-        // Output results using pointer cast for bits
+        // Use pure function
+        let rsqrt = unsafe { fast_rsqrt(dot) };
+
+        // Use convergent function
+        let ballot = unsafe { warp_ballot(if rsqrt > 0.5 { 1 } else { 0 }) };
         unsafe {
-            *output.add(0) = rust_addr;
-            *output.add(1) = extern_addr;
-            *output.add(2) = rust_bits as u64;
-            *output.add(3) = extern_bits as u64;
-            *output.add(4) = rust_addr % 128;
-            *output.add(5) = extern_addr % 128;
+            *output.add(tid) = rsqrt * (ballot as f32);
+        }
+    }
+
+    /// Test dynamic shared memory alignment with extern functions.
+    ///
+    /// This kernel tests what happens when:
+    /// - Rust uses DynamicSharedArray with 16B alignment (default)
+    /// - Extern C++ function expects 128B alignment (TmaAligned128)
+    ///
+    /// The question: Does the linker take the max alignment (128B)?
+    /// Or does Rust's 16B declaration "win" and cause misalignment?
+    ///
+    /// Scenario A (16B only from Rust side):
+    /// ```
+    /// .extern .shared .align 16 .b8 __dynamic_smem_test_smem_alignment_cross_module[];
+    /// ```
+    ///
+    /// Scenario B (if linker merges correctly):
+    /// ```
+    /// .extern .shared .align 128 .b8 ...;  // max(16, 128) = 128
+    /// ```
+    #[kernel]
+    pub fn test_smem_alignment_cross_module(output: *mut u64) {
+        let tid = cuda_device::thread::threadIdx_x();
+
+        // Rust side: request 16B alignment (deliberately low)
+        let rust_smem: *mut f32 = DynamicSharedArray::<f32, 16>::get();
+
+        // Get addresses from both Rust and extern C++ perspectives
+        let rust_addr = rust_smem as u64;
+        let extern_addr = unsafe { smem_get_base_addr() };
+
+        if tid == 0 {
+            gpu_printf!("[DEBUG] Rust smem addr: {:x}\n", rust_addr);
+            gpu_printf!("[DEBUG] Extern smem addr: {:x}\n", extern_addr);
+            gpu_printf!("[DEBUG] Before write: rust[0] = {:.2f}\n", unsafe {
+                *rust_smem
+            });
         }
 
-        gpu_printf!(
-            "[DEBUG] Output written: bits[2]={:x}, bits[3]={:x}\n",
-            rust_bits,
-            extern_bits
-        );
+        // Write via extern function (expects 128B alignment internally)
+        if tid == 0 {
+            unsafe {
+                gpu_printf!("[DEBUG] Writing 42.0 via extern function...\n");
+                smem_write_aligned_128(0, 42.0);
+                gpu_printf!("[DEBUG] Write done\n");
+            }
+        }
+
+        cuda_device::sync_threads();
+
+        // Read back via Rust pointer
+        let value_via_rust = unsafe { *rust_smem };
+
+        // Read back via extern function
+        let value_via_extern = unsafe { smem_read_aligned_128(0) };
+
+        if tid == 0 {
+            // Use pointer cast to get actual bits (to_bits() might not work on GPU)
+            let rust_bits: u32 = unsafe { *((&value_via_rust) as *const f32 as *const u32) };
+            let extern_bits: u32 = unsafe { *((&value_via_extern) as *const f32 as *const u32) };
+
+            gpu_printf!("[DEBUG] After write:\n");
+            gpu_printf!(
+                "[DEBUG]   Rust read:   {:.2f} (bits via cast: {:x})\n",
+                value_via_rust,
+                rust_bits
+            );
+            gpu_printf!(
+                "[DEBUG]   Extern read: {:.2f} (bits via cast: {:x})\n",
+                value_via_extern,
+                extern_bits
+            );
+            gpu_printf!(
+                "[DEBUG]   to_bits():   rust={:x}, extern={:x}\n",
+                value_via_rust.to_bits(),
+                value_via_extern.to_bits()
+            );
+
+            // Also try direct write via Rust and read via extern
+            gpu_printf!("[DEBUG] Writing 99.0 via Rust pointer...\n");
+            unsafe { *rust_smem = 99.0 };
+            let extern_read_after_rust_write = unsafe { smem_read_aligned_128(0) };
+            gpu_printf!(
+                "[DEBUG]   Extern read after Rust write: {:.2f}\n",
+                extern_read_after_rust_write
+            );
+
+            // Output results using pointer cast for bits
+            unsafe {
+                *output.add(0) = rust_addr;
+                *output.add(1) = extern_addr;
+                *output.add(2) = rust_bits as u64;
+                *output.add(3) = extern_bits as u64;
+                *output.add(4) = rust_addr % 128;
+                *output.add(5) = extern_addr % 128;
+            }
+
+            gpu_printf!(
+                "[DEBUG] Output written: bits[2]={:x}, bits[3]={:x}\n",
+                rust_bits,
+                extern_bits
+            );
+        }
     }
 }
 
@@ -294,10 +300,10 @@ fn file_needs_rebuild(target: &Path, sources: &[&Path]) -> bool {
     }
     let target_time = target.metadata().and_then(|m| m.modified()).ok();
     for src in sources {
-        if let Ok(src_time) = src.metadata().and_then(|m| m.modified()) {
-            if target_time.map(|t| src_time > t).unwrap_or(true) {
-                return true;
-            }
+        if let Ok(src_time) = src.metadata().and_then(|m| m.modified())
+            && target_time.map(|t| src_time > t).unwrap_or(true)
+        {
+            return true;
         }
     }
     false
@@ -467,7 +473,7 @@ fn build_pipeline() -> Result<std::path::PathBuf, String> {
 // Uses cuda-driver to load the merged cubin, launch kernels, and verify results.
 // =============================================================================
 
-use cuda_core::{CudaContext, CudaModule, DeviceBuffer, LaunchConfig};
+use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
 use std::sync::Arc;
 
 /// Main entry point - builds the pipeline and runs GPU tests.
@@ -497,6 +503,7 @@ fn main() {
     let module = ctx
         .load_module_from_file(cubin_path_str)
         .expect("Failed to load cubin module");
+    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
 
     let mut tests_passed = 0;
     let mut tests_failed = 0;
@@ -526,7 +533,7 @@ fn main() {
 //
 // Each test runner:
 // 1. Allocates device memory
-// 2. Launches the corresponding kernel via cuda_launch!
+// 2. Launches the corresponding kernel via the typed module API
 // 3. Copies results back to host
 // 4. Verifies the results
 // =============================================================================
@@ -537,7 +544,7 @@ fn main() {
 /// where x = threadIdx and y = threadIdx + 1
 fn test_simple_device_funcs_runner(
     ctx: &Arc<CudaContext>,
-    module: &Arc<CudaModule>,
+    module: &kernels::LoadedModule,
     passed: &mut i32,
     failed: &mut i32,
 ) {
@@ -556,14 +563,13 @@ fn test_simple_device_funcs_runner(
         shared_mem_bytes: 0,
     };
 
-    cuda_launch! {
-        kernel: test_simple_device_funcs,
-        stream: stream,
-        module: module,
-        config: config,
-        args: [d_output.cu_deviceptr() as *mut f32]
-    }
-    .expect("Kernel launch failed");
+    module
+        .test_simple_device_funcs(
+            (stream).as_ref(),
+            config,
+            d_output.cu_deviceptr() as *mut f32,
+        )
+        .expect("Kernel launch failed");
 
     let h_output = d_output.to_host_vec(&stream).unwrap();
 
@@ -598,7 +604,7 @@ fn test_simple_device_funcs_runner(
 /// Expected result: each warp outputs 0+1+2+...+31 = 496
 fn test_cub_warp_reduce_runner(
     ctx: &Arc<CudaContext>,
-    module: &Arc<CudaModule>,
+    module: &kernels::LoadedModule,
     passed: &mut i32,
     failed: &mut i32,
 ) {
@@ -619,17 +625,14 @@ fn test_cub_warp_reduce_runner(
         shared_mem_bytes: 0,
     };
 
-    cuda_launch! {
-        kernel: test_cub_warp_reduce,
-        stream: stream,
-        module: module,
-        config: config,
-        args: [
+    module
+        .test_cub_warp_reduce(
+            (stream).as_ref(),
+            config,
             d_input.cu_deviceptr() as *const f32,
             d_output.cu_deviceptr() as *mut f32,
-        ]
-    }
-    .expect("Kernel launch failed");
+        )
+        .expect("Kernel launch failed");
 
     let h_output = d_output.to_host_vec(&stream).unwrap();
 
@@ -659,7 +662,7 @@ fn test_cub_warp_reduce_runner(
 /// Verifies outputs are finite (not NaN/Inf).
 fn test_mixed_attrs_runner(
     ctx: &Arc<CudaContext>,
-    module: &Arc<CudaModule>,
+    module: &kernels::LoadedModule,
     passed: &mut i32,
     failed: &mut i32,
 ) {
@@ -683,19 +686,16 @@ fn test_mixed_attrs_runner(
         shared_mem_bytes: 0,
     };
 
-    cuda_launch! {
-        kernel: test_mixed_attrs,
-        stream: stream,
-        module: module,
-        config: config,
-        args: [
+    module
+        .test_mixed_attrs(
+            (stream).as_ref(),
+            config,
             d_a.cu_deviceptr() as *const f32,
             d_b.cu_deviceptr() as *const f32,
             d_output.cu_deviceptr() as *mut f32,
             vec_size,
-        ]
-    }
-    .expect("Kernel launch failed");
+        )
+        .expect("Kernel launch failed");
 
     let h_output = d_output.to_host_vec(&stream).unwrap();
 
@@ -720,7 +720,7 @@ fn test_mixed_attrs_runner(
 /// This verifies whether the linker takes max(16, 128) = 128.
 fn test_smem_alignment_cross_module_runner(
     ctx: &Arc<CudaContext>,
-    module: &Arc<CudaModule>,
+    module: &kernels::LoadedModule,
     passed: &mut i32,
     failed: &mut i32,
 ) {
@@ -736,14 +736,13 @@ fn test_smem_alignment_cross_module_runner(
         shared_mem_bytes: 256, // Enough for the test
     };
 
-    cuda_launch! {
-        kernel: test_smem_alignment_cross_module,
-        stream: stream,
-        module: module,
-        config: config,
-        args: [d_output.cu_deviceptr() as *mut u64]
-    }
-    .expect("Kernel launch failed");
+    module
+        .test_smem_alignment_cross_module(
+            (stream).as_ref(),
+            config,
+            d_output.cu_deviceptr() as *mut u64,
+        )
+        .expect("Kernel launch failed");
 
     // Synchronize to flush printf output
     stream.synchronize().expect("Sync failed");

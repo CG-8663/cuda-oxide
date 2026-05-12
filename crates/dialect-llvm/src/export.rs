@@ -1084,6 +1084,22 @@ impl<'a> ModuleExportState<'a> {
 
             let block = entry_block.deref(self.ctx);
             let args = block.arguments();
+            // Parameters are emitted bare: `<type> %vN` with no LLVM parameter
+            // attributes (no `noalias`, `nocapture`, `dereferenceable`, etc.).
+            // This is deliberate and load-bearing for `DisjointSlice`.
+            //
+            // `DisjointSlice::from_raw_parts` is `unsafe fn` whose contract
+            // says callers must not construct two slices over the same range.
+            // Violating that contract creates two `&mut T` to the same byte —
+            // which is simply UB. Today, because we don't tag pointer
+            // parameters with `noalias`, LLVM treats them conservatively and
+            // the violation doesn't *miscompile*; it just runs as written.
+            //
+            // If a future change here adds `noalias` (e.g. for a perf win on
+            // read-only `&[T]` inputs), that property goes away and any code
+            // that double-constructed a `DisjointSlice` starts seeing folded
+            // writes / reordered reads on PTX. Don't add parameter attributes
+            // here without re-auditing the `from_raw_parts` callers.
             for (i, arg) in args.enumerate() {
                 if i > 0 {
                     write!(output, ", ").unwrap();

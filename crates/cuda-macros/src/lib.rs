@@ -50,17 +50,20 @@ pub fn gpu_printf(input: TokenStream) -> TokenStream {
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use reserved_oxide_symbols::{
-    DEVICE_EXTERN_PREFIX, DEVICE_PREFIX, INSTANTIATE_PREFIX, KERNEL_PREFIX, RESERVED_ROOT,
+    DEVICE_EXTERN_PREFIX, DEVICE_PREFIX, INSTANTIATE_PREFIX, KERNEL_PREFIX, KERNEL_SCOPE_LOCAL,
+    RESERVED_ROOT, kernel_symbol,
 };
 use std::collections::HashSet;
 use syn::{
-    FnArg, ForeignItem, GenericParam, Ident, ItemFn, ItemForeignMod, Pat, Token, Type, bracketed,
-    parenthesized,
+    Expr, ExprCall, ExprMethodCall, ExprPath, FnArg, ForeignItem, GenericArgument, GenericParam,
+    Ident, Item, ItemFn, ItemForeignMod, ItemMod, Pat, Path, PathArguments, Stmt, Token, Type,
+    bracketed, parenthesized,
     parse::{Parse, ParseStream},
-    parse_macro_input,
+    parse_macro_input, parse_quote,
     punctuated::Punctuated,
     spanned::Spanned,
     visit::Visit,
+    visit_mut::{self, VisitMut},
 };
 
 /// Reject function names that start with the reserved cuda-oxide prefix
@@ -113,6 +116,826 @@ impl Parse for KernelArgs {
             instantiate_types: types.into_iter().collect(),
         })
     }
+}
+
+/// Generates a typed host-side loader and launch surface for the kernels in an
+/// inline module.
+///
+/// The generated API loads the current crate's embedded artifact bundle and
+/// exposes synchronous methods per `#[kernel]` function. When `cuda-host` is
+/// built with its `async` feature, the macro also emits borrowed async and owned
+/// async methods. Kernel parameter types are mapped to host-side launch types:
+///
+/// - `&[T]` -> `&cuda_core::DeviceBuffer<T>`
+/// - `&mut [T]` -> `&mut cuda_core::DeviceBuffer<T>`
+/// - `DisjointSlice<T>` -> `&mut cuda_core::DeviceBuffer<T>`
+/// - `Copy` scalar/struct/closure/raw-pointer arguments keep their original
+///   type and pass through `cuda_host::KernelScalar`
+///
+/// # Example
+///
+/// ```ignore
+/// #[cuda_module]
+/// mod kernels {
+///     use super::*;
+///
+///     #[kernel]
+///     pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
+///         // ...
+///     }
+/// }
+///
+/// let module = kernels::load(&ctx)?;
+/// module.vecadd(&stream, LaunchConfig::for_num_elems(n), &a, &b, &mut c)?;
+///
+/// let module = kernels::load_async(0)?;
+/// module.vecadd_async(LaunchConfig::for_num_elems(n), &a, &b, &mut c)?.sync()?;
+///
+/// let (a, b, c) = module
+///     .vecadd_async_owned(LaunchConfig::for_num_elems(n), a, b, c)?
+///     .await?;
+/// ```
+#[proc_macro_attribute]
+pub fn cuda_module(attr: TokenStream, item: TokenStream) -> TokenStream {
+    if !attr.is_empty() {
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "cuda_module does not take arguments yet",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let input = parse_macro_input!(item as ItemMod);
+    match expand_cuda_module(input) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+struct CudaModuleKernel {
+    vis: syn::Visibility,
+    cfg_attrs: Vec<syn::Attribute>,
+    method_attrs: Vec<syn::Attribute>,
+    unsafety: Option<Token![unsafe]>,
+    fn_name: Ident,
+    generics: syn::Generics,
+    params: Vec<CudaModuleParam>,
+    cluster_dim: Option<(u32, u32, u32)>,
+    is_generic: bool,
+}
+
+struct CudaModuleParam {
+    name: Ident,
+    sync_host_ty: TokenStream2,
+    async_host_ty: TokenStream2,
+    marshal: CudaModuleParamMarshal,
+}
+
+enum CudaModuleParamMarshal {
+    Scalar,
+    ReadOnlyDeviceBuffer { elem_ty: TokenStream2 },
+    WritableDeviceBuffer { elem_ty: TokenStream2 },
+}
+
+fn expand_cuda_module(module: ItemMod) -> syn::Result<TokenStream2> {
+    let module_attrs = &module.attrs;
+    let vis = &module.vis;
+    let ident = &module.ident;
+    let Some((_brace, items)) = &module.content else {
+        return Err(syn::Error::new_spanned(
+            &module.ident,
+            "cuda_module requires an inline module so kernel signatures are visible",
+        ));
+    };
+
+    let kernels = collect_cuda_module_kernels(items)?;
+    if kernels.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &module.ident,
+            "cuda_module found no #[kernel] functions in this module",
+        ));
+    }
+
+    let non_generic_kernels = kernels.iter().filter(|kernel| !kernel.is_generic);
+    let function_fields = non_generic_kernels.clone().map(|kernel| {
+        let cfg_attrs = &kernel.cfg_attrs;
+        let field = cuda_module_function_field(&kernel.fn_name);
+        quote! {
+            #(#cfg_attrs)*
+            #field: ::cuda_core::CudaFunction,
+        }
+    });
+
+    let function_initializers = non_generic_kernels.map(|kernel| {
+        let cfg_attrs = &kernel.cfg_attrs;
+        let field = cuda_module_function_field(&kernel.fn_name);
+        let marker = cuda_kernel_marker_name(&kernel.fn_name);
+        quote! {
+            #(#cfg_attrs)*
+            #field: module.load_function(<#marker as ::cuda_host::CudaKernel>::PTX_NAME)?,
+        }
+    });
+
+    let launch_methods = kernels.iter().map(generate_cuda_module_launch_method);
+    let async_module_items = if cfg!(feature = "async") {
+        quote! {
+            pub fn load_async(
+                device_id: usize,
+            ) -> ::core::result::Result<LoadedModule, ::cuda_host::cuda_async::error::DeviceError> {
+                load_async_named(device_id, env!("CARGO_PKG_NAME"))
+            }
+
+            pub fn load_async_named(
+                device_id: usize,
+                name: &str,
+            ) -> ::core::result::Result<LoadedModule, ::cuda_host::cuda_async::error::DeviceError> {
+                ::cuda_host::load_cuda_module_from_async_context(device_id, |ctx| load_named(ctx, name))
+            }
+        }
+    } else {
+        TokenStream2::new()
+    };
+    let async_launch_methods = if cfg!(feature = "async") {
+        let async_launch_methods = kernels.iter().map(generate_cuda_module_async_launch_method);
+        let owned_async_launch_methods = kernels
+            .iter()
+            .map(generate_cuda_module_owned_async_launch_method);
+        quote! {
+            #(#async_launch_methods)*
+            #(#owned_async_launch_methods)*
+        }
+    } else {
+        TokenStream2::new()
+    };
+
+    Ok(quote! {
+        #(#module_attrs)*
+        #vis mod #ident {
+            #(#items)*
+
+            #[derive(Clone, Debug)]
+            pub struct LoadedModule {
+                __module: ::std::sync::Arc<::cuda_core::CudaModule>,
+                __generic_functions: ::std::sync::Arc<
+                    ::std::sync::Mutex<
+                        ::std::collections::HashMap<&'static str, ::cuda_core::CudaFunction>
+                    >
+                >,
+                #(#function_fields)*
+            }
+
+            pub fn load(
+                ctx: &::std::sync::Arc<::cuda_core::CudaContext>,
+            ) -> ::core::result::Result<LoadedModule, ::cuda_core::EmbeddedModuleError> {
+                load_named(ctx, env!("CARGO_PKG_NAME"))
+            }
+
+            pub fn load_named(
+                ctx: &::std::sync::Arc<::cuda_core::CudaContext>,
+                name: &str,
+            ) -> ::core::result::Result<LoadedModule, ::cuda_core::EmbeddedModuleError> {
+                let module = ::cuda_core::embedded::load_embedded_module(ctx, name)?;
+                from_module(module).map_err(::cuda_core::EmbeddedModuleError::Driver)
+            }
+
+            pub fn from_module(
+                module: ::std::sync::Arc<::cuda_core::CudaModule>,
+            ) -> ::core::result::Result<LoadedModule, ::cuda_core::DriverError> {
+                Ok(LoadedModule {
+                    __module: module.clone(),
+                    __generic_functions: ::std::sync::Arc::new(
+                        ::std::sync::Mutex::new(::std::collections::HashMap::new())
+                    ),
+                    #(#function_initializers)*
+                })
+            }
+
+            #async_module_items
+
+            impl LoadedModule {
+                pub fn as_cuda_module(&self) -> &::std::sync::Arc<::cuda_core::CudaModule> {
+                    &self.__module
+                }
+
+                #(#launch_methods)*
+                #async_launch_methods
+            }
+        }
+    })
+}
+
+fn collect_cuda_module_kernels(items: &[Item]) -> syn::Result<Vec<CudaModuleKernel>> {
+    let mut kernels = Vec::new();
+    for item in items {
+        let Item::Fn(item_fn) = item else {
+            continue;
+        };
+        if !has_attr_named(&item_fn.attrs, "kernel") {
+            continue;
+        }
+        let cluster_dim = cuda_module_cluster_dim(&item_fn.attrs)?;
+        let params = cuda_module_params(item_fn)?;
+        let is_generic = item_fn
+            .sig
+            .generics
+            .params
+            .iter()
+            .any(|param| matches!(param, GenericParam::Type(_)));
+        kernels.push(CudaModuleKernel {
+            vis: item_fn.vis.clone(),
+            cfg_attrs: cuda_module_cfg_attrs(&item_fn.attrs),
+            method_attrs: cuda_module_method_attrs(&item_fn.attrs),
+            unsafety: item_fn.sig.unsafety,
+            fn_name: item_fn.sig.ident.clone(),
+            generics: item_fn.sig.generics.clone(),
+            params,
+            cluster_dim,
+            is_generic,
+        });
+    }
+    Ok(kernels)
+}
+
+fn cuda_module_method_attrs(attrs: &[syn::Attribute]) -> Vec<syn::Attribute> {
+    attrs
+        .iter()
+        .filter(|attr| attr_path_ends_with(attr, "doc"))
+        .cloned()
+        .collect()
+}
+
+fn cuda_module_cfg_attrs(attrs: &[syn::Attribute]) -> Vec<syn::Attribute> {
+    attrs
+        .iter()
+        .filter(|attr| attr_path_ends_with(attr, "cfg"))
+        .cloned()
+        .collect()
+}
+
+fn has_attr_named(attrs: &[syn::Attribute], name: &str) -> bool {
+    attrs.iter().any(|attr| attr_path_ends_with(attr, name))
+}
+
+fn attr_path_ends_with(attr: &syn::Attribute, name: &str) -> bool {
+    attr.path()
+        .segments
+        .last()
+        .map(|segment| segment.ident == name)
+        .unwrap_or(false)
+}
+
+fn cuda_module_cluster_dim(attrs: &[syn::Attribute]) -> syn::Result<Option<(u32, u32, u32)>> {
+    for attr in attrs {
+        if attr_path_ends_with(attr, "cluster_launch") {
+            let args = attr.parse_args::<ClusterArgs>()?;
+            return Ok(Some((args.x, args.y, args.z)));
+        }
+    }
+    Ok(None)
+}
+
+fn cuda_module_params(item_fn: &ItemFn) -> syn::Result<Vec<CudaModuleParam>> {
+    item_fn
+        .sig
+        .inputs
+        .iter()
+        .map(|arg| match arg {
+            FnArg::Receiver(receiver) => Err(syn::Error::new_spanned(
+                receiver,
+                "cuda_module kernels cannot take self parameters",
+            )),
+            FnArg::Typed(pat_type) => cuda_module_param_from_typed(pat_type),
+        })
+        .collect()
+}
+
+fn cuda_module_param_from_typed(pat_type: &syn::PatType) -> syn::Result<CudaModuleParam> {
+    let Pat::Ident(pat_ident) = &*pat_type.pat else {
+        return Err(syn::Error::new_spanned(
+            &pat_type.pat,
+            "cuda_module only supports simple identifier kernel parameters",
+        ));
+    };
+    let name = pat_ident.ident.clone();
+    let (sync_host_ty, async_host_ty, marshal) = cuda_module_host_type(&pat_type.ty)?;
+    Ok(CudaModuleParam {
+        name,
+        sync_host_ty,
+        async_host_ty,
+        marshal,
+    })
+}
+
+fn cuda_module_host_type(
+    ty: &Type,
+) -> syn::Result<(TokenStream2, TokenStream2, CudaModuleParamMarshal)> {
+    if let Some((elem_ty, mutable)) = cuda_module_slice_elem(ty) {
+        let sync_host_ty = if mutable {
+            quote! { &mut ::cuda_core::DeviceBuffer<#elem_ty> }
+        } else {
+            quote! { &::cuda_core::DeviceBuffer<#elem_ty> }
+        };
+        let (async_host_ty, marshal) = if mutable {
+            (
+                quote! { &'__cuda_module_async mut impl ::cuda_host::KernelSliceArgMut<Elem = #elem_ty> },
+                CudaModuleParamMarshal::WritableDeviceBuffer {
+                    elem_ty: quote! { #elem_ty },
+                },
+            )
+        } else {
+            (
+                quote! { &'__cuda_module_async impl ::cuda_host::KernelSliceArg<Elem = #elem_ty> },
+                CudaModuleParamMarshal::ReadOnlyDeviceBuffer {
+                    elem_ty: quote! { #elem_ty },
+                },
+            )
+        };
+        return Ok((sync_host_ty, async_host_ty, marshal));
+    }
+
+    if let Some(elem_ty) = cuda_module_disjoint_slice_elem(ty) {
+        return Ok((
+            quote! { &mut ::cuda_core::DeviceBuffer<#elem_ty> },
+            quote! { &'__cuda_module_async mut impl ::cuda_host::KernelSliceArgMut<Elem = #elem_ty> },
+            CudaModuleParamMarshal::WritableDeviceBuffer {
+                elem_ty: quote! { #elem_ty },
+            },
+        ));
+    }
+
+    if matches!(ty, Type::Reference(_)) {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "cuda_module only supports slice references; use &[T], &mut [T], DisjointSlice<T>, a raw pointer, or a by-value KernelScalar",
+        ));
+    }
+
+    Ok((
+        quote! { #ty },
+        quote! { #ty },
+        CudaModuleParamMarshal::Scalar,
+    ))
+}
+
+fn cuda_module_slice_elem(ty: &Type) -> Option<(TokenStream2, bool)> {
+    let Type::Reference(type_ref) = ty else {
+        return None;
+    };
+    let Type::Slice(slice) = &*type_ref.elem else {
+        return None;
+    };
+    let elem = &slice.elem;
+    Some((quote! { #elem }, type_ref.mutability.is_some()))
+}
+
+fn cuda_module_disjoint_slice_elem(ty: &Type) -> Option<TokenStream2> {
+    let Type::Path(type_path) = ty else {
+        return None;
+    };
+    let segment = type_path.path.segments.last()?;
+    if segment.ident != "DisjointSlice" {
+        return None;
+    }
+    let PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return None;
+    };
+    args.args.iter().find_map(|arg| {
+        if let GenericArgument::Type(ty) = arg {
+            Some(quote! { #ty })
+        } else {
+            None
+        }
+    })
+}
+
+fn generate_cuda_module_launch_method(kernel: &CudaModuleKernel) -> TokenStream2 {
+    let vis = &kernel.vis;
+    let cfg_attrs = &kernel.cfg_attrs;
+    let method_attrs = &kernel.method_attrs;
+    let unsafety = &kernel.unsafety;
+    let fn_name = &kernel.fn_name;
+    let generics = cuda_module_launch_generics(kernel);
+    let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
+    let params = kernel.params.iter().map(|param| {
+        let name = &param.name;
+        let host_ty = &param.sync_host_ty;
+        quote! { #name: #host_ty }
+    });
+    let arg_marshalling = kernel
+        .params
+        .iter()
+        .enumerate()
+        .map(|(index, param)| cuda_module_arg_marshalling(index, param));
+    let function_binding = cuda_module_function_binding(kernel);
+    let launch_call = cuda_module_launch_call(kernel);
+
+    quote! {
+        #(#cfg_attrs)*
+        #(#method_attrs)*
+        #[allow(clippy::multiple_bound_locations, clippy::too_many_arguments)]
+        #vis #unsafety fn #fn_name #impl_generics (
+            &self,
+            stream: &::cuda_core::CudaStream,
+            config: ::cuda_core::LaunchConfig,
+            #(#params),*
+        ) -> ::core::result::Result<(), ::cuda_core::DriverError>
+        #where_clause
+        {
+            #function_binding
+            let mut __args: ::std::vec::Vec<*mut ::std::ffi::c_void> = ::std::vec::Vec::new();
+            #(#arg_marshalling)*
+            #launch_call
+        }
+    }
+}
+
+fn generate_cuda_module_async_launch_method(kernel: &CudaModuleKernel) -> TokenStream2 {
+    let vis = &kernel.vis;
+    let cfg_attrs = &kernel.cfg_attrs;
+    let method_attrs = &kernel.method_attrs;
+    let unsafety = &kernel.unsafety;
+    let fn_name = format_ident!("{}_async", kernel.fn_name);
+    let generics = cuda_module_async_launch_generics(kernel);
+    let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
+    let params = kernel.params.iter().map(|param| {
+        let name = &param.name;
+        let host_ty = &param.async_host_ty;
+        quote! { #name: #host_ty }
+    });
+    let arg_marshalling = kernel.params.iter().map(cuda_module_async_arg_marshalling);
+    let function_binding = cuda_module_function_binding(kernel);
+    let cluster_dim = kernel.cluster_dim.map(|(x, y, z)| quote! { (#x, #y, #z) });
+    let set_cluster_dim = cluster_dim.map(|cluster_dim| {
+        quote! {
+            ::cuda_host::set_async_kernel_cluster_dim(&mut __launch, #cluster_dim);
+        }
+    });
+
+    quote! {
+        #(#cfg_attrs)*
+        #(#method_attrs)*
+        #[allow(clippy::multiple_bound_locations, clippy::too_many_arguments)]
+        #vis #unsafety fn #fn_name #impl_generics (
+            &self,
+            config: ::cuda_core::LaunchConfig,
+            #(#params),*
+        ) -> ::core::result::Result<::cuda_host::AsyncKernelLaunch<'__cuda_module_async>, ::cuda_core::DriverError>
+        #where_clause
+        {
+            #function_binding
+            let mut __launch = ::cuda_host::new_async_kernel_launch(__func.clone(), config);
+            #set_cluster_dim
+            #(#arg_marshalling)*
+            Ok(__launch)
+        }
+    }
+}
+
+fn generate_cuda_module_owned_async_launch_method(kernel: &CudaModuleKernel) -> TokenStream2 {
+    let vis = &kernel.vis;
+    let cfg_attrs = &kernel.cfg_attrs;
+    let method_attrs = &kernel.method_attrs;
+    let unsafety = &kernel.unsafety;
+    let fn_name = format_ident!("{}_async_owned", kernel.fn_name);
+    let resources = cuda_module_owned_resource_params(kernel);
+    let generics = cuda_module_owned_async_launch_generics(kernel, &resources);
+    let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
+    let params = kernel.params.iter().enumerate().map(|(index, param)| {
+        let name = &param.name;
+        match &param.marshal {
+            CudaModuleParamMarshal::Scalar => {
+                let host_ty = &param.async_host_ty;
+                quote! { #name: #host_ty }
+            }
+            CudaModuleParamMarshal::ReadOnlyDeviceBuffer { .. } => {
+                let resource_ty = cuda_module_owned_resource_type(index);
+                quote! { #name: #resource_ty }
+            }
+            CudaModuleParamMarshal::WritableDeviceBuffer { .. } => {
+                let resource_ty = cuda_module_owned_resource_type(index);
+                quote! { mut #name: #resource_ty }
+            }
+        }
+    });
+    let arg_marshalling = kernel
+        .params
+        .iter()
+        .map(cuda_module_owned_async_arg_marshalling);
+    let function_binding = cuda_module_function_binding(kernel);
+    let cluster_dim = kernel.cluster_dim.map(|(x, y, z)| quote! { (#x, #y, #z) });
+    let set_cluster_dim = cluster_dim.map(|cluster_dim| {
+        quote! {
+            ::cuda_host::set_async_kernel_cluster_dim(&mut __launch, #cluster_dim);
+        }
+    });
+    let resources_ty = cuda_module_owned_resources_ty(&resources);
+    let resource_names = resources.iter().map(|(_, name, _, _)| name);
+    let resources_expr = if resources.is_empty() {
+        quote! { () }
+    } else {
+        quote! { (#(#resource_names),*) }
+    };
+
+    quote! {
+        #(#cfg_attrs)*
+        #(#method_attrs)*
+        #[allow(clippy::multiple_bound_locations, clippy::too_many_arguments)]
+        #vis #unsafety fn #fn_name #impl_generics (
+            &self,
+            config: ::cuda_core::LaunchConfig,
+            #(#params),*
+        ) -> ::core::result::Result<::cuda_host::OwnedAsyncKernelLaunch<#resources_ty>, ::cuda_core::DriverError>
+        #where_clause
+        {
+            #function_binding
+            let mut __launch: ::cuda_host::AsyncKernelLaunch<'static> =
+                ::cuda_host::new_async_kernel_launch(__func.clone(), config);
+            #set_cluster_dim
+            #(#arg_marshalling)*
+            Ok(::cuda_host::new_owned_async_kernel_launch(__launch, #resources_expr))
+        }
+    }
+}
+
+fn cuda_module_launch_generics(kernel: &CudaModuleKernel) -> syn::Generics {
+    let mut generics = kernel.generics.clone();
+    for param in &kernel.params {
+        if matches!(param.marshal, CudaModuleParamMarshal::Scalar) {
+            let host_ty = &param.sync_host_ty;
+            generics
+                .make_where_clause()
+                .predicates
+                .push(syn::parse_quote! { #host_ty: ::cuda_host::KernelScalar });
+        }
+    }
+    generics
+}
+
+fn cuda_module_owned_async_launch_generics(
+    kernel: &CudaModuleKernel,
+    resources: &[(usize, Ident, TokenStream2, bool)],
+) -> syn::Generics {
+    let mut generics = kernel.generics.clone();
+    for (index, _, elem_ty, writable) in resources {
+        let resource_ty = cuda_module_owned_resource_type(*index);
+        generics.params.push(syn::parse_quote! { #resource_ty });
+        let predicate: syn::WherePredicate = if *writable {
+            syn::parse_quote! {
+                #resource_ty: ::cuda_host::KernelSliceArgMut<Elem = #elem_ty> + Send + 'static
+            }
+        } else {
+            syn::parse_quote! {
+                #resource_ty: ::cuda_host::KernelSliceArg<Elem = #elem_ty> + Send + 'static
+            }
+        };
+        generics.make_where_clause().predicates.push(predicate);
+    }
+    for param in &kernel.params {
+        if matches!(param.marshal, CudaModuleParamMarshal::Scalar) {
+            let host_ty = &param.async_host_ty;
+            generics
+                .make_where_clause()
+                .predicates
+                .push(syn::parse_quote! { #host_ty: ::cuda_host::KernelScalar + 'static });
+        }
+    }
+    generics
+}
+
+fn cuda_module_async_launch_generics(kernel: &CudaModuleKernel) -> syn::Generics {
+    let mut generics = kernel.generics.clone();
+    generics
+        .params
+        .insert(0, syn::parse_quote! { '__cuda_module_async });
+    for param in &kernel.params {
+        if matches!(param.marshal, CudaModuleParamMarshal::Scalar) {
+            let host_ty = &param.async_host_ty;
+            generics.make_where_clause().predicates.push(
+                syn::parse_quote! { #host_ty: ::cuda_host::KernelScalar + '__cuda_module_async },
+            );
+        }
+    }
+    generics
+}
+
+fn cuda_module_owned_resource_params(
+    kernel: &CudaModuleKernel,
+) -> Vec<(usize, Ident, TokenStream2, bool)> {
+    kernel
+        .params
+        .iter()
+        .enumerate()
+        .filter_map(|(index, param)| match &param.marshal {
+            CudaModuleParamMarshal::Scalar => None,
+            CudaModuleParamMarshal::ReadOnlyDeviceBuffer { elem_ty } => {
+                Some((index, param.name.clone(), elem_ty.clone(), false))
+            }
+            CudaModuleParamMarshal::WritableDeviceBuffer { elem_ty } => {
+                Some((index, param.name.clone(), elem_ty.clone(), true))
+            }
+        })
+        .collect()
+}
+
+fn cuda_module_owned_resource_type(index: usize) -> Ident {
+    format_ident!("__CudaModuleArg{index}")
+}
+
+fn cuda_module_owned_resources_ty(
+    resources: &[(usize, Ident, TokenStream2, bool)],
+) -> TokenStream2 {
+    if resources.is_empty() {
+        quote! { () }
+    } else {
+        let resource_tys = resources
+            .iter()
+            .map(|(index, _, _, _)| cuda_module_owned_resource_type(*index));
+        quote! { (#(#resource_tys),*) }
+    }
+}
+
+fn cuda_module_arg_marshalling(index: usize, param: &CudaModuleParam) -> TokenStream2 {
+    let name = &param.name;
+    let value_name = format_ident!("__arg_{index}");
+    match param.marshal {
+        CudaModuleParamMarshal::Scalar => {
+            quote! {
+                let mut #value_name = #name;
+                ::cuda_host::push_kernel_scalar(&mut __args, &mut #value_name);
+            }
+        }
+        CudaModuleParamMarshal::ReadOnlyDeviceBuffer { .. } => {
+            let ptr_name = format_ident!("__arg_{index}_ptr");
+            let len_name = format_ident!("__arg_{index}_len");
+            quote! {
+                let (mut #ptr_name, mut #len_name) =
+                    ::cuda_host::read_only_device_buffer_arg(#name);
+                ::cuda_host::push_kernel_device_slice(
+                    &mut __args,
+                    &mut #ptr_name,
+                    &mut #len_name,
+                );
+            }
+        }
+        CudaModuleParamMarshal::WritableDeviceBuffer { .. } => {
+            let ptr_name = format_ident!("__arg_{index}_ptr");
+            let len_name = format_ident!("__arg_{index}_len");
+            quote! {
+                let (mut #ptr_name, mut #len_name) =
+                    ::cuda_host::writable_device_buffer_arg(#name);
+                ::cuda_host::push_kernel_device_slice(
+                    &mut __args,
+                    &mut #ptr_name,
+                    &mut #len_name,
+                );
+            }
+        }
+    }
+}
+
+fn cuda_module_owned_async_arg_marshalling(param: &CudaModuleParam) -> TokenStream2 {
+    let name = &param.name;
+    match param.marshal {
+        CudaModuleParamMarshal::Scalar => {
+            quote! {
+                ::cuda_host::push_async_kernel_scalar(&mut __launch, #name);
+            }
+        }
+        CudaModuleParamMarshal::ReadOnlyDeviceBuffer { .. } => {
+            quote! {
+                ::cuda_host::push_async_read_only_device_slice(&mut __launch, &#name);
+            }
+        }
+        CudaModuleParamMarshal::WritableDeviceBuffer { .. } => {
+            quote! {
+                ::cuda_host::push_async_writable_device_slice(&mut __launch, &mut #name);
+            }
+        }
+    }
+}
+
+fn cuda_module_async_arg_marshalling(param: &CudaModuleParam) -> TokenStream2 {
+    let name = &param.name;
+    match param.marshal {
+        CudaModuleParamMarshal::Scalar => {
+            quote! {
+                ::cuda_host::push_async_kernel_scalar(&mut __launch, #name);
+            }
+        }
+        CudaModuleParamMarshal::ReadOnlyDeviceBuffer { .. } => {
+            quote! {
+                ::cuda_host::push_async_read_only_device_slice(&mut __launch, #name);
+            }
+        }
+        CudaModuleParamMarshal::WritableDeviceBuffer { .. } => {
+            quote! {
+                ::cuda_host::push_async_writable_device_slice(&mut __launch, #name);
+            }
+        }
+    }
+}
+
+fn cuda_module_function_binding(kernel: &CudaModuleKernel) -> TokenStream2 {
+    if kernel.is_generic {
+        let fn_name = &kernel.fn_name;
+        let marker = cuda_kernel_marker_name(fn_name);
+        let type_params = cuda_module_type_param_names(&kernel.generics);
+        let kernel_entry = format_ident!("{}", kernel_symbol(&fn_name.to_string()));
+        let turbofish = if type_params.is_empty() {
+            quote! {}
+        } else {
+            quote! { ::<#(#type_params),*> }
+        };
+        let marker_args = if type_params.is_empty() {
+            quote! {}
+        } else {
+            quote! { <#(#type_params),*> }
+        };
+        quote! {
+            let __kernel_ptr = #kernel_entry #turbofish as *const ();
+            unsafe {
+                let mut __force_mono: *const () = ::core::ptr::null();
+                ::core::ptr::write_volatile(&mut __force_mono, __kernel_ptr);
+                let _ = ::core::ptr::read_volatile(&__force_mono);
+            }
+            let __ptx_name =
+                <#marker #marker_args as ::cuda_host::GenericCudaKernel>::ptx_name();
+            let __func_storage = {
+                let mut __cache = self
+                    .__generic_functions
+                    .lock()
+                    .expect("cuda_module generic function cache poisoned");
+                if let Some(__func) = __cache.get(__ptx_name) {
+                    __func.clone()
+                } else {
+                    let __func = self.__module.load_function(__ptx_name)?;
+                    __cache.insert(__ptx_name, __func.clone());
+                    __func
+                }
+            };
+            let __func = &__func_storage;
+        }
+    } else {
+        let field = cuda_module_function_field(&kernel.fn_name);
+        quote! {
+            let __func = &self.#field;
+        }
+    }
+}
+
+fn cuda_module_launch_call(kernel: &CudaModuleKernel) -> TokenStream2 {
+    let cluster_dim = kernel.cluster_dim.map(|(x, y, z)| quote! { (#x, #y, #z) });
+    if let Some(cluster_dim) = cluster_dim {
+        quote! {
+            unsafe {
+                ::cuda_core::launch_kernel_ex_on_stream(
+                    __func,
+                    config.grid_dim,
+                    config.block_dim,
+                    config.shared_mem_bytes,
+                    #cluster_dim,
+                    stream,
+                    &mut __args,
+                )
+            }
+        }
+    } else {
+        quote! {
+            unsafe {
+                ::cuda_core::launch_kernel_on_stream(
+                    __func,
+                    config.grid_dim,
+                    config.block_dim,
+                    config.shared_mem_bytes,
+                    stream,
+                    &mut __args,
+                )
+            }
+        }
+    }
+}
+
+fn cuda_module_type_param_names(generics: &syn::Generics) -> Vec<Ident> {
+    generics
+        .params
+        .iter()
+        .filter_map(|param| {
+            if let GenericParam::Type(type_param) = param {
+                Some(type_param.ident.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn cuda_module_function_field(fn_name: &Ident) -> Ident {
+    format_ident!("__{}_function", fn_name)
+}
+
+fn cuda_kernel_marker_name(fn_name: &Ident) -> Ident {
+    format_ident!("__{}_CudaKernel", fn_name)
 }
 
 /// Marks a function as a CUDA kernel.
@@ -260,8 +1083,211 @@ fn strip_mut_from_inputs(
         .collect()
 }
 
+/// True when `path`'s *last* segment is `name`.
+///
+/// We deliberately match on the tail only, so all of these resolve to the
+/// same intrinsic:
+///
+/// ```ignore
+/// index_1d()
+/// thread::index_1d()
+/// cuda_device::thread::index_1d()
+/// ::cuda_device::thread::index_1d()
+/// ```
+///
+/// And imports/aliases work too:
+///
+/// ```ignore
+/// use cuda_device::thread::index_1d;          // bare ident → matches
+/// use cuda_device::thread::index_1d as foo;   // aliased    → won't match (path tail is `foo`)
+/// ```
+///
+/// The aliased form is intentionally not rewritten — if the user picked a
+/// new name, they get the bare-stub-panic behaviour, not silent capture.
+///
+/// Caveat: if the user defines a *local* `fn index_1d` (or any other
+/// reserved name) and calls it from inside `#[kernel]` / `#[device]`,
+/// that call gets rewritten too. See the `Reserved names` section in
+/// `ThreadIndex`'s doc-block — the convention is to pick a different
+/// name (e.g. `compute_index_1d`) for any helper you want to keep.
+fn is_thread_index_path(path: &Path, name: &str) -> bool {
+    path.segments.last().is_some_and(|seg| seg.ident == name)
+}
+
+/// Build the rewritten path that points the user's call at the
+/// `__internal::<name>` shim, preserving whatever prefix the user wrote.
+///
+/// The motivation is unused-import hygiene. If the user wrote
+/// `use cuda_device::thread;` and called `thread::index_1d()`, replacing
+/// the whole call with an absolute path makes rustc see the `thread`
+/// import as unused. Instead, we splice `__internal` in front of the
+/// last segment and keep everything before it intact:
+///
+/// ```ignore
+/// thread::index_1d()                   →  thread::__internal::index_1d(&scope)
+/// cuda_device::thread::index_1d()      →  cuda_device::thread::__internal::index_1d(&scope)
+/// ::cuda_device::thread::index_1d()    →  ::cuda_device::thread::__internal::index_1d(&scope)
+/// ```
+///
+/// Bare-ident calls are the only shape that can't carry a prefix, so for
+/// those we fall back to the absolute path (the user wasn't naming
+/// anything to import; see the bare-ident case in `is_thread_index_path`'s
+/// doc-comment for why we still rewrite those):
+///
+/// ```ignore
+/// index_1d()                           →  ::cuda_device::thread::__internal::index_1d(&scope)
+/// ```
+fn internal_thread_path(user_path: &Path, name: &str, arguments: syn::PathArguments) -> Path {
+    let ident = format_ident!("{}", name);
+
+    if user_path.segments.len() == 1 {
+        let mut absolute: Path = parse_quote! { ::cuda_device::thread::__internal::#ident };
+        if let Some(last) = absolute.segments.last_mut() {
+            last.arguments = arguments;
+        }
+        return absolute;
+    }
+
+    let leading_colon = user_path.leading_colon;
+    let prefix_segments: Vec<&syn::PathSegment> = user_path
+        .segments
+        .iter()
+        .take(user_path.segments.len() - 1)
+        .collect();
+    let mut rewritten: Path =
+        parse_quote! { #leading_colon #(#prefix_segments)::* :: __internal :: #ident };
+    if let Some(last) = rewritten.segments.last_mut() {
+        last.arguments = arguments;
+    }
+    rewritten
+}
+
+/// One scoped intrinsic the rewriter knows about.
+///
+/// Adding a new `thread::*` function that needs the `'kernel` scope is a
+/// one-line entry here, plus the matching public stub and `__internal::*`
+/// impl in `cuda-device`.
+struct ScopedIntrinsic {
+    /// The unqualified function name (last segment of the path we match).
+    name: &'static str,
+    /// If true, copy the call-site's turbofish onto the rewritten path
+    /// (e.g. `index_2d::<S>` → `__internal::index_2d::<S>`).
+    preserve_turbofish: bool,
+    /// If true, forward the original call arguments after the scope ref
+    /// (e.g. `index_2d_runtime(s)` → `__internal::index_2d_runtime(&scope, s)`).
+    forward_args: bool,
+}
+
+const SCOPED_INTRINSICS: &[ScopedIntrinsic] = &[
+    ScopedIntrinsic {
+        name: "index_1d",
+        preserve_turbofish: false,
+        forward_args: false,
+    },
+    ScopedIntrinsic {
+        name: "index_2d",
+        preserve_turbofish: true,
+        forward_args: false,
+    },
+    ScopedIntrinsic {
+        name: "index_2d_runtime",
+        preserve_turbofish: false,
+        forward_args: true,
+    },
+];
+
+/// Method names whose zero-arg call sites get the kernel scope spliced in
+/// as a leading `&scope` argument.
+///
+/// These are matched on the *method name only* (not the receiver type, which
+/// the macro can't see anyway). The scope is only injected when the user
+/// wrote a zero-arg call like `slice.get_mut_indexed()`; if they passed
+/// arguments themselves, we leave the call alone and let typeck decide.
+///
+/// Same caveat as `SCOPED_INTRINSICS`: a local method on an unrelated type
+/// with the same name and a zero-arg form will get the scope appended,
+/// which will cause a typeck error ("expected 0 arguments, got 1"). Pick
+/// a different name (e.g. `pop_indexed`) for any helper you want to keep.
+const SCOPED_METHODS: &[&str] = &["get_mut_indexed"];
+
+fn is_scoped_method(method: &Ident) -> bool {
+    SCOPED_METHODS.iter().any(|name| method == name)
+}
+
+struct ThreadIndexCallRewriter {
+    scope_ident: Ident,
+    rewrote_index_call: bool,
+}
+
+impl VisitMut for ThreadIndexCallRewriter {
+    fn visit_expr_mut(&mut self, expr: &mut Expr) {
+        visit_mut::visit_expr_mut(self, expr);
+
+        match expr {
+            Expr::Call(ExprCall { func, args, .. }) => {
+                let Expr::Path(ExprPath { path, .. }) = &**func else {
+                    return;
+                };
+                let Some(intrinsic) = SCOPED_INTRINSICS
+                    .iter()
+                    .find(|i| is_thread_index_path(path, i.name))
+                else {
+                    return;
+                };
+
+                let last_args = path
+                    .segments
+                    .last()
+                    .map(|seg| seg.arguments.clone())
+                    .unwrap_or(syn::PathArguments::None);
+                let path_args = if intrinsic.preserve_turbofish {
+                    last_args
+                } else {
+                    syn::PathArguments::None
+                };
+                let internal_path = internal_thread_path(path, intrinsic.name, path_args);
+                let scope_ident = &self.scope_ident;
+
+                *expr = if intrinsic.forward_args {
+                    parse_quote! { #internal_path(&#scope_ident, #args) }
+                } else {
+                    parse_quote! { #internal_path(&#scope_ident) }
+                };
+                self.rewrote_index_call = true;
+            }
+            Expr::MethodCall(ExprMethodCall { method, args, .. }) => {
+                if !is_scoped_method(method) || !args.is_empty() {
+                    return;
+                }
+                let scope_ident = &self.scope_ident;
+                args.push(parse_quote! { &#scope_ident });
+                self.rewrote_index_call = true;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn inject_thread_index_scope(input: &mut ItemFn) {
+    let scope_ident = format_ident!("{}", KERNEL_SCOPE_LOCAL);
+    let mut rewriter = ThreadIndexCallRewriter {
+        scope_ident: scope_ident.clone(),
+        rewrote_index_call: false,
+    };
+    rewriter.visit_block_mut(&mut input.block);
+
+    if rewriter.rewrote_index_call {
+        let scope_stmt: Stmt = parse_quote! {
+            let #scope_ident = unsafe { ::cuda_device::thread::__internal::make_kernel_scope() };
+        };
+        input.block.stmts.insert(0, scope_stmt);
+    }
+}
+
 /// Generate a generic kernel that will be instantiated from call sites (nvcc-style)
-fn generate_generic_kernel_no_instantiation(input: ItemFn) -> TokenStream {
+fn generate_generic_kernel_no_instantiation(mut input: ItemFn) -> TokenStream {
+    inject_thread_index_scope(&mut input);
+
     let fn_name = &input.sig.ident;
     let vis = &input.vis;
     let generics = &input.sig.generics;
@@ -415,6 +1441,8 @@ fn _generate_dummy_binding(name: &Ident, ty: &Type) -> TokenStream2 {
 
 /// Generate a simple non-generic kernel
 fn generate_simple_kernel(mut input: ItemFn) -> TokenStream {
+    inject_thread_index_scope(&mut input);
+
     let fn_name = input.sig.ident.clone();
     let new_name = format_ident!("{}{}", KERNEL_PREFIX, fn_name);
 
@@ -549,7 +1577,9 @@ fn generate_cuda_kernel_impl(fn_name: &Ident, ptx_name: &str, _func: &ItemFn) ->
 }
 
 /// Generate wrapper kernels for a generic kernel
-fn generate_generic_kernel(input: ItemFn, instantiate_types: Vec<Type>) -> TokenStream {
+fn generate_generic_kernel(mut input: ItemFn, instantiate_types: Vec<Type>) -> TokenStream {
+    inject_thread_index_scope(&mut input);
+
     let fn_name = &input.sig.ident;
     let vis = &input.vis;
     let generics = &input.sig.generics;
@@ -973,6 +2003,7 @@ fn generate_device_function(mut input: ItemFn) -> TokenStream {
     if let Some(err) = reject_reserved_name(&input.sig.ident) {
         return err;
     }
+    inject_thread_index_scope(&mut input);
 
     let fn_name = input.sig.ident.clone();
     let vis = input.vis.clone();
@@ -1062,7 +2093,7 @@ fn generate_device_function(mut input: ItemFn) -> TokenStream {
 
             /// Wrapper for the device function with the original name.
             #[inline(always)]
-            #vis fn #fn_name(#(#wrapper_inputs),*) #return_type {
+            #vis fn #fn_name #generics (#(#wrapper_inputs),*) #return_type #where_clause {
                 #new_name(#(#params),*)
             }
         };

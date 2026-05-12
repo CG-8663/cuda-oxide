@@ -16,10 +16,16 @@ High-performance matrix multiplication using shared memory tiling. Reduces globa
 ### Shared Memory Tiles
 
 ```rust
+use cuda_device::thread::Runtime2DIndex;
+
 const TILE_SIZE: usize = 16;
 
 #[kernel]
-pub fn sgemm_tiled(m: u32, n: u32, k: u32, alpha: f32, a: &[f32], b: &[f32], beta: f32, mut c: DisjointSlice<f32>) {
+pub fn sgemm_tiled(
+    m: u32, n: u32, k: u32,
+    alpha: f32, a: &[f32], b: &[f32], beta: f32,
+    mut c: DisjointSlice<f32, Runtime2DIndex>,  // C is M x N, runtime stride
+) {
     // Shared memory tiles for A and B (16x16 = 256 elements each)
     static mut TILE_A: SharedArray<f32, 256> = SharedArray::UNINIT;
     static mut TILE_B: SharedArray<f32, 256> = SharedArray::UNINIT;

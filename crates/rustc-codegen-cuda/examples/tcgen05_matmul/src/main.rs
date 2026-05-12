@@ -11,7 +11,7 @@
 //!   cargo oxide run tcgen05_matmul
 
 use cuda_core::{
-    CudaContext, CudaModule, CudaStream, DeviceBuffer, LaunchConfig,
+    CudaContext, CudaStream, DeviceBuffer, LaunchConfig,
     sys::{
         self as cuda_sys, CUtensorMap, CUtensorMapDataType_enum_CU_TENSOR_MAP_DATA_TYPE_FLOAT16,
         CUtensorMapFloatOOBfill_enum_CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE,
@@ -32,7 +32,7 @@ use cuda_device::tcgen05::{
 };
 use cuda_device::tma::{TmaDescriptor, cp_async_bulk_tensor_2d_g2s};
 use cuda_device::{DisjointSlice, kernel, thread, warp};
-use cuda_host::cuda_launch;
+use cuda_host::cuda_module;
 use half::f16;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
@@ -57,168 +57,176 @@ fn build_smem_descriptor(
 
     addr_enc | (ld_enc << 16) | (stride_enc << 32) | fixed_bit | swizzle_bits
 }
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-/// 128×128×16 matmul kernel with PRE-TILED input data.
-///
-/// Input matrices A and B must be pre-tiled on the host using
-/// `cuda_host::tiling::to_k_major_f16`:
-/// - A (128×16): K-major tiled
-/// - B (128×16): K-major tiled (B is stored transposed as N×K = 128×16)
-#[kernel]
-pub unsafe fn tcgen05_matmul_128x128_tiled(
-    a_tma: *const TmaDescriptor,
-    b_tma: *const TmaDescriptor,
-    mut out: DisjointSlice<u32>,
-    tile_a_x: i32,
-    tile_a_y: i32,
-    tile_b_x: i32,
-    tile_b_y: i32,
-) {
-    // A: 128×16 f16 = 4096 bytes, B: 128×16 f16 = 4096 bytes
-    static mut SMEM_A: SharedArray<u8, 4096, 128> = SharedArray::UNINIT;
-    static mut SMEM_B: SharedArray<u8, 4096, 128> = SharedArray::UNINIT;
-    // Output: 128×128 bf16 = 16384 elements = 8192 packed u32
-    static mut SMEM_OUT: SharedArray<u32, 8192, 128> = SharedArray::UNINIT;
-    static mut TMEM_ADDR: SharedArray<u32, 1, 4> = SharedArray::UNINIT;
-    static mut TMA_BAR: Barrier = Barrier::UNINIT;
-    static mut MMA_BAR: Barrier = Barrier::UNINIT;
+    /// 128×128×16 matmul kernel with PRE-TILED input data.
+    ///
+    /// Input matrices A and B must be pre-tiled on the host using
+    /// `cuda_host::tiling::to_k_major_f16`:
+    /// - A (128×16): K-major tiled
+    /// - B (128×16): K-major tiled (B is stored transposed as N×K = 128×16)
+    #[kernel]
+    pub unsafe fn tcgen05_matmul_128x128_tiled(
+        a_tma: *const TmaDescriptor,
+        b_tma: *const TmaDescriptor,
+        mut out: DisjointSlice<u32>,
+        tile_a_x: i32,
+        tile_a_y: i32,
+        tile_b_x: i32,
+        tile_b_y: i32,
+    ) {
+        // A: 128×16 f16 = 4096 bytes, B: 128×16 f16 = 4096 bytes
+        static mut SMEM_A: SharedArray<u8, 4096, 128> = SharedArray::UNINIT;
+        static mut SMEM_B: SharedArray<u8, 4096, 128> = SharedArray::UNINIT;
+        // Output: 128×128 bf16 = 16384 elements = 8192 packed u32
+        static mut SMEM_OUT: SharedArray<u32, 8192, 128> = SharedArray::UNINIT;
+        static mut TMEM_ADDR: SharedArray<u32, 1, 4> = SharedArray::UNINIT;
+        static mut TMA_BAR: Barrier = Barrier::UNINIT;
+        static mut MMA_BAR: Barrier = Barrier::UNINIT;
 
-    const A_TILE_BYTES: u32 = 128 * 16 * 2; // 4096 bytes
-    const B_TILE_BYTES: u32 = 128 * 16 * 2; // 4096 bytes
+        const A_TILE_BYTES: u32 = 128 * 16 * 2; // 4096 bytes
+        const B_TILE_BYTES: u32 = 128 * 16 * 2; // 4096 bytes
 
-    unsafe {
-        let tid = thread::threadIdx_x();
-        let warp_id = warp::warp_id();
-        let lane_id = tid % 32;
-        let is_warp0 = warp_id == 0;
-        let is_thread0 = tid == 0;
+        unsafe {
+            let tid = thread::threadIdx_x();
+            let warp_id = warp::warp_id();
+            let lane_id = tid % 32;
+            let is_warp0 = warp_id == 0;
+            let is_thread0 = tid == 0;
 
-        // PHASE 1: Initialize barriers
-        if is_thread0 {
-            mbarrier_init(&raw mut TMA_BAR, 1);
-            mbarrier_init(&raw mut MMA_BAR, 1);
-            fence_proxy_async_shared_cta();
-        }
-        thread::sync_threads();
-
-        // PHASE 2: Allocate TMEM (warp-synchronous)
-        if is_warp0 {
-            tcgen05_alloc(&raw mut TMEM_ADDR as *mut u32, 512);
-        }
-        thread::sync_threads();
-        let tmem_addr = *(&raw const TMEM_ADDR as *const u32);
-
-        // PHASE 3: TMA load
-        if is_thread0 {
-            cp_async_bulk_tensor_2d_g2s(
-                &raw mut SMEM_A as *mut u8,
-                a_tma,
-                tile_a_x,
-                tile_a_y,
-                &raw mut TMA_BAR,
-            );
-            cp_async_bulk_tensor_2d_g2s(
-                &raw mut SMEM_B as *mut u8,
-                b_tma,
-                tile_b_x,
-                tile_b_y,
-                &raw mut TMA_BAR,
-            );
-            mbarrier_arrive_expect_tx(&raw const TMA_BAR, 1, A_TILE_BYTES + B_TILE_BYTES);
-        }
-
-        while !mbarrier_try_wait(&raw const TMA_BAR, 0) {}
-        thread::sync_threads();
-
-        // PHASE 4: Build SMEM descriptors and execute MMA
-        if is_thread0 {
-            let smem_a_addr = &raw const SMEM_A as u64;
-            let smem_b_addr = &raw const SMEM_B as u64;
-
-            const SBO_BYTES: u32 = 128; // 64 elements × 2 bytes
-            const LBO_BYTES: u32 = 2048; // 16 tiles × 64 elements × 2 bytes
-            const SWIZZLE_NONE: u8 = 0;
-
-            let a_desc = build_smem_descriptor(smem_a_addr, LBO_BYTES, SBO_BYTES, SWIZZLE_NONE);
-            let b_desc = build_smem_descriptor(smem_b_addr, LBO_BYTES, SBO_BYTES, SWIZZLE_NONE);
-
-            let idesc = Tcgen05InstructionDescriptor::builder()
-                .shape(Tcgen05MmaShape::M128_N128)
-                .element_type(Tcgen05ElementType::F16)
-                .accumulator_type(Tcgen05AccumulatorType::F32)
-                .build()
-                .raw();
-
-            tcgen05_mma_f16(tmem_addr, a_desc, b_desc, idesc, false);
-            tcgen05_commit_shared_cluster(&raw mut MMA_BAR as *mut u64);
-        }
-
-        while !mbarrier_try_wait_parity(&raw const MMA_BAR, 0) {}
-        thread::sync_threads();
-
-        // PHASE 5: Epilogue - Extract TMEM to shared memory via stmatrix
-        const N: usize = 128;
-        let warp_row_base = (warp_id * 32) as usize;
-        let row_stride_bytes = N * 2;
-
-        let row_within_8 = (lane_id % 8) as usize;
-        let is_second_matrix = lane_id >= 8 && lane_id < 16;
-        let col_offset_for_matrix2 = if is_second_matrix { 16usize } else { 0usize };
-
-        let mut tmem_row_block = 0u32;
-        while tmem_row_block < 2 {
-            let tmem_row = warp_id * 32 + tmem_row_block * 16;
-
-            let mut col_block = 0u32;
-            while col_block < 8 {
-                let col_offset = (col_block * 16) as usize;
-
-                let regs_a =
-                    tcgen05_ld_16x256b_pure(tmem_addr + (tmem_row << 16) + col_offset as u32);
-                tcgen05_load_wait();
-
-                let regs_b =
-                    tcgen05_ld_16x256b_pure(tmem_addr + (tmem_row << 16) + col_offset as u32 + 8);
-                tcgen05_load_wait();
-
-                let p0_lo = cvt_f32x2_bf16x2(regs_a[0], regs_a[1]);
-                let p1_lo = cvt_f32x2_bf16x2(regs_b[0], regs_b[1]);
-
-                let out_row_lo = warp_row_base + (tmem_row_block as usize * 16) + row_within_8;
-                let smem_addr_lo = (&raw mut SMEM_OUT as *mut u8)
-                    .add(out_row_lo * row_stride_bytes + col_offset * 2 + col_offset_for_matrix2);
-                stmatrix_m8n8_x2(smem_addr_lo, p0_lo, p1_lo);
-
-                let p0_hi = cvt_f32x2_bf16x2(regs_a[2], regs_a[3]);
-                let p1_hi = cvt_f32x2_bf16x2(regs_b[2], regs_b[3]);
-
-                let out_row_hi = warp_row_base + (tmem_row_block as usize * 16) + 8 + row_within_8;
-                let smem_addr_hi = (&raw mut SMEM_OUT as *mut u8)
-                    .add(out_row_hi * row_stride_bytes + col_offset * 2 + col_offset_for_matrix2);
-                stmatrix_m8n8_x2(smem_addr_hi, p0_hi, p1_hi);
-
-                col_block += 1;
+            // PHASE 1: Initialize barriers
+            if is_thread0 {
+                mbarrier_init(&raw mut TMA_BAR, 1);
+                mbarrier_init(&raw mut MMA_BAR, 1);
+                fence_proxy_async_shared_cta();
             }
-            tmem_row_block += 1;
-        }
+            thread::sync_threads();
 
-        thread::sync_threads();
+            // PHASE 2: Allocate TMEM (warp-synchronous)
+            if is_warp0 {
+                tcgen05_alloc(&raw mut TMEM_ADDR as *mut u32, 512);
+            }
+            thread::sync_threads();
+            let tmem_addr = *(&raw const TMEM_ADDR as *const u32);
 
-        // PHASE 6: Copy output to global memory
-        let mut idx = tid as usize;
-        while idx < 8192 {
-            *out.get_unchecked_mut(idx) = SMEM_OUT[idx];
-            idx += 128;
-        }
+            // PHASE 3: TMA load
+            if is_thread0 {
+                cp_async_bulk_tensor_2d_g2s(
+                    &raw mut SMEM_A as *mut u8,
+                    a_tma,
+                    tile_a_x,
+                    tile_a_y,
+                    &raw mut TMA_BAR,
+                );
+                cp_async_bulk_tensor_2d_g2s(
+                    &raw mut SMEM_B as *mut u8,
+                    b_tma,
+                    tile_b_x,
+                    tile_b_y,
+                    &raw mut TMA_BAR,
+                );
+                mbarrier_arrive_expect_tx(&raw const TMA_BAR, 1, A_TILE_BYTES + B_TILE_BYTES);
+            }
 
-        // PHASE 7: Cleanup
-        thread::sync_threads();
-        if is_warp0 {
-            tcgen05_dealloc(tmem_addr, 512);
-        }
-        if is_thread0 {
-            mbarrier_inval(&raw mut TMA_BAR);
-            mbarrier_inval(&raw mut MMA_BAR);
+            while !mbarrier_try_wait(&raw const TMA_BAR, 0) {}
+            thread::sync_threads();
+
+            // PHASE 4: Build SMEM descriptors and execute MMA
+            if is_thread0 {
+                let smem_a_addr = &raw const SMEM_A as u64;
+                let smem_b_addr = &raw const SMEM_B as u64;
+
+                const SBO_BYTES: u32 = 128; // 64 elements × 2 bytes
+                const LBO_BYTES: u32 = 2048; // 16 tiles × 64 elements × 2 bytes
+                const SWIZZLE_NONE: u8 = 0;
+
+                let a_desc = build_smem_descriptor(smem_a_addr, LBO_BYTES, SBO_BYTES, SWIZZLE_NONE);
+                let b_desc = build_smem_descriptor(smem_b_addr, LBO_BYTES, SBO_BYTES, SWIZZLE_NONE);
+
+                let idesc = Tcgen05InstructionDescriptor::builder()
+                    .shape(Tcgen05MmaShape::M128_N128)
+                    .element_type(Tcgen05ElementType::F16)
+                    .accumulator_type(Tcgen05AccumulatorType::F32)
+                    .build()
+                    .raw();
+
+                tcgen05_mma_f16(tmem_addr, a_desc, b_desc, idesc, false);
+                tcgen05_commit_shared_cluster(&raw mut MMA_BAR as *mut u64);
+            }
+
+            while !mbarrier_try_wait_parity(&raw const MMA_BAR, 0) {}
+            thread::sync_threads();
+
+            // PHASE 5: Epilogue - Extract TMEM to shared memory via stmatrix
+            const N: usize = 128;
+            let warp_row_base = (warp_id * 32) as usize;
+            let row_stride_bytes = N * 2;
+
+            let row_within_8 = (lane_id % 8) as usize;
+            let is_second_matrix = (8..16).contains(&lane_id);
+            let col_offset_for_matrix2 = if is_second_matrix { 16usize } else { 0usize };
+
+            let mut tmem_row_block = 0u32;
+            while tmem_row_block < 2 {
+                let tmem_row = warp_id * 32 + tmem_row_block * 16;
+
+                let mut col_block = 0u32;
+                while col_block < 8 {
+                    let col_offset = (col_block * 16) as usize;
+
+                    let regs_a =
+                        tcgen05_ld_16x256b_pure(tmem_addr + (tmem_row << 16) + col_offset as u32);
+                    tcgen05_load_wait();
+
+                    let regs_b = tcgen05_ld_16x256b_pure(
+                        tmem_addr + (tmem_row << 16) + col_offset as u32 + 8,
+                    );
+                    tcgen05_load_wait();
+
+                    let p0_lo = cvt_f32x2_bf16x2(regs_a[0], regs_a[1]);
+                    let p1_lo = cvt_f32x2_bf16x2(regs_b[0], regs_b[1]);
+
+                    let out_row_lo = warp_row_base + (tmem_row_block as usize * 16) + row_within_8;
+                    let smem_addr_lo = (&raw mut SMEM_OUT as *mut u8).add(
+                        out_row_lo * row_stride_bytes + col_offset * 2 + col_offset_for_matrix2,
+                    );
+                    stmatrix_m8n8_x2(smem_addr_lo, p0_lo, p1_lo);
+
+                    let p0_hi = cvt_f32x2_bf16x2(regs_a[2], regs_a[3]);
+                    let p1_hi = cvt_f32x2_bf16x2(regs_b[2], regs_b[3]);
+
+                    let out_row_hi =
+                        warp_row_base + (tmem_row_block as usize * 16) + 8 + row_within_8;
+                    let smem_addr_hi = (&raw mut SMEM_OUT as *mut u8).add(
+                        out_row_hi * row_stride_bytes + col_offset * 2 + col_offset_for_matrix2,
+                    );
+                    stmatrix_m8n8_x2(smem_addr_hi, p0_hi, p1_hi);
+
+                    col_block += 1;
+                }
+                tmem_row_block += 1;
+            }
+
+            thread::sync_threads();
+
+            // PHASE 6: Copy output to global memory
+            let mut idx = tid as usize;
+            while idx < 8192 {
+                *out.get_unchecked_mut(idx) = SMEM_OUT[idx];
+                idx += 128;
+            }
+
+            // PHASE 7: Cleanup
+            thread::sync_threads();
+            if is_warp0 {
+                tcgen05_dealloc(tmem_addr, 512);
+            }
+            if is_thread0 {
+                mbarrier_inval(&raw mut TMA_BAR);
+                mbarrier_inval(&raw mut MMA_BAR);
+            }
         }
     }
 }
@@ -265,6 +273,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(e.into());
         }
     };
+    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
     println!("✓ PTX loaded successfully\n");
 
     run_tiled_kernel_test(&stream, &module)?;
@@ -291,7 +300,7 @@ fn verify_ptx_only() -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_tiled_kernel_test(
     stream: &Arc<CudaStream>,
-    module: &Arc<CudaModule>,
+    module: &kernels::LoadedModule,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use cuda_host::tiling::to_k_major_f16;
 
@@ -339,8 +348,8 @@ fn run_tiled_kernel_test(
     );
 
     // Upload to GPU
-    let dev_a = DeviceBuffer::from_host(&stream, &host_a_u16)?;
-    let dev_b = DeviceBuffer::from_host(&stream, &host_b_u16)?;
+    let dev_a = DeviceBuffer::from_host(stream, &host_a_u16)?;
+    let dev_b = DeviceBuffer::from_host(stream, &host_b_u16)?;
 
     let a_ptr = dev_a.cu_deviceptr();
     let b_ptr = dev_b.cu_deviceptr();
@@ -361,8 +370,8 @@ fn run_tiled_kernel_test(
         N as u32,
     )?;
 
-    let dev_a_tma = DeviceBuffer::from_host(&stream, &a_tma.opaque[..])?;
-    let dev_b_tma = DeviceBuffer::from_host(&stream, &b_tma.opaque[..])?;
+    let dev_a_tma = DeviceBuffer::from_host(stream, &a_tma.opaque[..])?;
+    let dev_b_tma = DeviceBuffer::from_host(stream, &b_tma.opaque[..])?;
 
     // Launch kernel
     let cfg = LaunchConfig {
@@ -381,20 +390,26 @@ fn run_tiled_kernel_test(
     let tile_b_y = 0i32;
 
     println!("Launching tcgen05_matmul_128x128_tiled...");
-    let mut dev_output = DeviceBuffer::<u32>::zeroed(&stream, OUTPUT_SIZE)?;
+    let mut dev_output = DeviceBuffer::<u32>::zeroed(stream, OUTPUT_SIZE)?;
 
-    cuda_launch! {
-        kernel: tcgen05_matmul_128x128_tiled,
-        stream: stream,
-        module: module,
-        config: cfg,
-        args: [a_tma_ptr, b_tma_ptr, slice_mut(dev_output), tile_a_x, tile_a_y, tile_b_x, tile_b_y]
+    unsafe {
+        module.tcgen05_matmul_128x128_tiled(
+            (stream).as_ref(),
+            cfg,
+            a_tma_ptr,
+            b_tma_ptr,
+            &mut dev_output,
+            tile_a_x,
+            tile_a_y,
+            tile_b_x,
+            tile_b_y,
+        )
     }?;
 
     stream.synchronize()?;
 
     // Verify results
-    let host_output: Vec<u32> = dev_output.to_host_vec(&stream)?;
+    let host_output: Vec<u32> = dev_output.to_host_vec(stream)?;
 
     let mut result_f32: Vec<f32> = Vec::with_capacity(M * N);
     for &packed in &host_output {

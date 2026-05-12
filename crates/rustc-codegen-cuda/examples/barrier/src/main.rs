@@ -19,94 +19,98 @@ use cuda_device::barrier::{
     Barrier, mbarrier_arrive, mbarrier_init, mbarrier_inval, mbarrier_test_wait,
 };
 use cuda_device::{DisjointSlice, SharedArray, kernel, thread};
-use cuda_host::cuda_launch;
+use cuda_host::cuda_module;
 
 // =============================================================================
 // KERNELS
 // =============================================================================
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-/// Simple barrier test: all threads sync via mbarrier.
-#[kernel]
-pub fn barrier_sync_test(mut out: DisjointSlice<u32>) {
-    static mut BAR: Barrier = Barrier::UNINIT;
+    /// Simple barrier test: all threads sync via mbarrier.
+    #[kernel]
+    pub fn barrier_sync_test(mut out: DisjointSlice<u32>) {
+        static mut BAR: Barrier = Barrier::UNINIT;
 
-    let tid = thread::threadIdx_x();
-    let block_size = thread::blockDim_x();
-    let gid = thread::index_1d();
+        let tid = thread::threadIdx_x();
+        let block_size = thread::blockDim_x();
+        let gid = thread::index_1d();
 
-    // Thread 0 initializes the barrier
-    if tid == 0 {
+        // Thread 0 initializes the barrier
+        if tid == 0 {
+            unsafe {
+                mbarrier_init(&raw mut BAR, block_size);
+            }
+        }
+
+        // Ensure all threads see the initialized barrier
+        thread::sync_threads();
+
+        // Each thread arrives at the barrier
+        let token = unsafe { mbarrier_arrive(&raw const BAR) };
+
+        // Spin until barrier phase completes
         unsafe {
-            mbarrier_init(&raw mut BAR, block_size);
+            while !mbarrier_test_wait(&raw const BAR, token) {
+                // Spin-wait
+            }
+        }
+
+        // All threads reached here - barrier complete
+        if let Some(out_elem) = out.get_mut(gid) {
+            *out_elem = 1u32;
+        }
+
+        // Thread 0 invalidates the barrier
+        if tid == 0 {
+            unsafe {
+                mbarrier_inval(&raw mut BAR);
+            }
         }
     }
 
-    // Ensure all threads see the initialized barrier
-    thread::sync_threads();
+    /// Test with shared memory data and barrier synchronization.
+    #[kernel]
+    pub fn barrier_shared_data_test(mut out: DisjointSlice<u32>) {
+        static mut BAR: Barrier = Barrier::UNINIT;
+        static mut DATA: SharedArray<u32, 256> = SharedArray::UNINIT;
 
-    // Each thread arrives at the barrier
-    let token = unsafe { mbarrier_arrive(&raw const BAR) };
+        let tid = thread::threadIdx_x();
+        let block_size = thread::blockDim_x();
+        let gid = thread::index_1d();
 
-    // Spin until barrier phase completes
-    unsafe {
-        while !mbarrier_test_wait(&raw const BAR, token) {
-            // Spin-wait
+        // Thread 0 initializes barrier
+        if tid == 0 {
+            unsafe {
+                mbarrier_init(&raw mut BAR, block_size);
+            }
         }
-    }
+        thread::sync_threads();
 
-    // All threads reached here - barrier complete
-    if let Some(out_elem) = out.get_mut(gid) {
-        *out_elem = 1u32;
-    }
-
-    // Thread 0 invalidates the barrier
-    if tid == 0 {
+        // Write to shared memory
         unsafe {
-            mbarrier_inval(&raw mut BAR);
+            DATA[tid as usize] = tid;
         }
-    }
-}
 
-/// Test with shared memory data and barrier synchronization.
-#[kernel]
-pub fn barrier_shared_data_test(mut out: DisjointSlice<u32>) {
-    static mut BAR: Barrier = Barrier::UNINIT;
-    static mut DATA: SharedArray<u32, 256> = SharedArray::UNINIT;
+        // Arrive and wait for all threads
+        let token = unsafe { mbarrier_arrive(&raw const BAR) };
+        unsafe { while !mbarrier_test_wait(&raw const BAR, token) {} }
 
-    let tid = thread::threadIdx_x();
-    let block_size = thread::blockDim_x();
-    let gid = thread::index_1d();
+        // Read neighbor's data (with wraparound)
+        let neighbor_idx = ((tid + 1) % block_size) as usize;
+        let neighbor_val = unsafe { DATA[neighbor_idx] };
 
-    // Thread 0 initializes barrier
-    if tid == 0 {
-        unsafe {
-            mbarrier_init(&raw mut BAR, block_size);
+        // Output should be: [1, 2, 3, ..., 255, 0] for block_size=256
+        if let Some(out_elem) = out.get_mut(gid) {
+            *out_elem = neighbor_val;
         }
-    }
-    thread::sync_threads();
 
-    // Write to shared memory
-    unsafe {
-        DATA[tid as usize] = tid;
-    }
-
-    // Arrive and wait for all threads
-    let token = unsafe { mbarrier_arrive(&raw const BAR) };
-    unsafe { while !mbarrier_test_wait(&raw const BAR, token) {} }
-
-    // Read neighbor's data (with wraparound)
-    let neighbor_idx = ((tid + 1) % block_size) as usize;
-    let neighbor_val = unsafe { DATA[neighbor_idx] };
-
-    // Output should be: [1, 2, 3, ..., 255, 0] for block_size=256
-    if let Some(out_elem) = out.get_mut(gid) {
-        *out_elem = neighbor_val;
-    }
-
-    // Cleanup
-    if tid == 0 {
-        unsafe {
-            mbarrier_inval(&raw mut BAR);
+        // Cleanup
+        if tid == 0 {
+            unsafe {
+                mbarrier_inval(&raw mut BAR);
+            }
         }
     }
 }
@@ -124,6 +128,7 @@ fn main() {
     let module = ctx
         .load_module_from_file("barrier.ptx")
         .expect("Failed to load PTX module");
+    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
 
     const N: usize = 256;
 
@@ -138,14 +143,9 @@ fn main() {
     {
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: barrier_sync_test,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .barrier_sync_test((stream).as_ref(), cfg, &mut out_dev)
+            .expect("Kernel launch failed");
 
         stream.synchronize().unwrap();
         let result = out_dev.to_host_vec(&stream).unwrap();
@@ -173,14 +173,9 @@ fn main() {
     {
         let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
 
-        cuda_launch! {
-            kernel: barrier_shared_data_test,
-            stream: stream,
-            module: module,
-            config: cfg,
-            args: [slice_mut(out_dev)]
-        }
-        .expect("Kernel launch failed");
+        module
+            .barrier_shared_data_test((stream).as_ref(), cfg, &mut out_dev)
+            .expect("Kernel launch failed");
 
         stream.synchronize().unwrap();
         let result = out_dev.to_host_vec(&stream).unwrap();

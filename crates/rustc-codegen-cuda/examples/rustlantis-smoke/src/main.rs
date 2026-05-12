@@ -6,6 +6,17 @@
 #![feature(custom_mir, core_intrinsics)]
 #![allow(internal_features)]
 #![allow(unused_assignments, unused_parens, overflowing_literals)]
+// rustlantis emits fuzz-shaped Rust whose style trips clippy: similar
+// variable names, `()` arguments, `transmute<isize, isize>`, `a ^ a`,
+// and short variable names like `_0` / `_1` are all part of the test
+// corpus, not bugs to clean up.
+#![allow(
+    clippy::similar_names,
+    clippy::unit_arg,
+    clippy::useless_transmute,
+    clippy::eq_op,
+    clippy::just_underscores_and_digits
+)]
 
 //! rustlantis smoke test (Stage 1b + Stage 2a).
 //!

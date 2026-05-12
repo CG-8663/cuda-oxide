@@ -187,7 +187,7 @@ cuda-oxide/
 ├── rust-toolchain.toml     # Pinned nightly + components
 ├── crates/
 │   ├── cuda-device/          # Device intrinsics (#![no_std])
-│   ├── cuda-host/            # cuda_launch! macro
+│   ├── cuda-host/            # Host launch APIs
 │   ├── cuda-macros/          # Proc macros (#[kernel], #[device], gpu_printf!)
 │   ├── cuda-bindings/        # Raw bindgen FFI to cuda.h
 │   ├── cuda-core/            # Safe RAII wrappers (CudaContext, DeviceBuffer)

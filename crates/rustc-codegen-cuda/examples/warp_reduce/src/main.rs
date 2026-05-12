@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#![allow(clippy::needless_range_loop)]
+
 //! Unified Warp Reduction Example
 //!
 //! Demonstrates warp-level primitives: shuffle_xor, shuffle_down, shuffle (broadcast).
@@ -13,100 +15,104 @@
 
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
 use cuda_device::{DisjointSlice, kernel, thread, warp};
-use cuda_host::cuda_launch;
+use cuda_host::cuda_module;
 
 // =============================================================================
 // KERNELS
 // =============================================================================
+#[cuda_module]
+mod kernels {
+    use super::*;
 
-/// Warp reduction using shuffle_xor (butterfly pattern).
-/// All lanes end up with the complete sum.
-#[kernel]
-pub fn warp_reduce_sum(data: &[f32], mut out: DisjointSlice<f32>) {
-    let gid = thread::index_1d();
-    let lane = warp::lane_id();
+    /// Warp reduction using shuffle_xor (butterfly pattern).
+    /// All lanes end up with the complete sum.
+    #[kernel]
+    pub fn warp_reduce_sum(data: &[f32], mut out: DisjointSlice<f32>) {
+        let gid = thread::index_1d();
+        let lane = warp::lane_id();
 
-    // Load value (or 0 if out of bounds)
-    let mut val = if gid.in_bounds(out.len() * 32) {
-        data[gid.get()]
-    } else {
-        0.0
-    };
+        // Load value (or 0 if out of bounds)
+        let mut val = if gid.in_bounds(out.len() * 32) {
+            data[gid.get()]
+        } else {
+            0.0
+        };
 
-    // Butterfly reduction using shuffle_xor
-    val = val + warp::shuffle_xor_f32(val, 16);
-    val = val + warp::shuffle_xor_f32(val, 8);
-    val = val + warp::shuffle_xor_f32(val, 4);
-    val = val + warp::shuffle_xor_f32(val, 2);
-    val = val + warp::shuffle_xor_f32(val, 1);
+        // Butterfly reduction using shuffle_xor
+        val = val + warp::shuffle_xor_f32(val, 16);
+        val = val + warp::shuffle_xor_f32(val, 8);
+        val = val + warp::shuffle_xor_f32(val, 4);
+        val = val + warp::shuffle_xor_f32(val, 2);
+        val = val + warp::shuffle_xor_f32(val, 1);
 
-    // Lane 0 writes the result
-    if lane == 0 {
-        let warp_idx = gid.get() / 32;
-        unsafe {
-            *out.get_unchecked_mut(warp_idx) = val;
+        // Lane 0 writes the result
+        if lane == 0 {
+            let warp_idx = gid.get() / 32;
+            unsafe {
+                *out.get_unchecked_mut(warp_idx) = val;
+            }
         }
     }
-}
 
-/// Warp reduction using shuffle_down (sequential pattern).
-/// Only lane 0 has the complete sum.
-#[kernel]
-pub fn warp_reduce_sum_down(data: &[f32], mut out: DisjointSlice<f32>) {
-    let gid = thread::index_1d();
-    let lane = warp::lane_id();
+    /// Warp reduction using shuffle_down (sequential pattern).
+    /// Only lane 0 has the complete sum.
+    #[kernel]
+    pub fn warp_reduce_sum_down(data: &[f32], mut out: DisjointSlice<f32>) {
+        let gid = thread::index_1d();
+        let lane = warp::lane_id();
 
-    let mut val = if gid.in_bounds(out.len() * 32) {
-        data[gid.get()]
-    } else {
-        0.0
-    };
+        let mut val = if gid.in_bounds(out.len() * 32) {
+            data[gid.get()]
+        } else {
+            0.0
+        };
 
-    // Sequential reduction using shuffle_down
-    val = val + warp::shuffle_down_f32(val, 16);
-    val = val + warp::shuffle_down_f32(val, 8);
-    val = val + warp::shuffle_down_f32(val, 4);
-    val = val + warp::shuffle_down_f32(val, 2);
-    val = val + warp::shuffle_down_f32(val, 1);
+        // Sequential reduction using shuffle_down
+        val = val + warp::shuffle_down_f32(val, 16);
+        val = val + warp::shuffle_down_f32(val, 8);
+        val = val + warp::shuffle_down_f32(val, 4);
+        val = val + warp::shuffle_down_f32(val, 2);
+        val = val + warp::shuffle_down_f32(val, 1);
 
-    // Only lane 0 has the complete sum
-    if lane == 0 {
-        let warp_idx = gid.get() / 32;
-        unsafe {
-            *out.get_unchecked_mut(warp_idx) = val;
+        // Only lane 0 has the complete sum
+        if lane == 0 {
+            let warp_idx = gid.get() / 32;
+            unsafe {
+                *out.get_unchecked_mut(warp_idx) = val;
+            }
         }
     }
-}
 
-/// Broadcast kernel - shuffle lane 0's value to all lanes.
-#[kernel]
-pub fn warp_broadcast(data: &[f32], mut out: DisjointSlice<f32>) {
-    let gid = thread::index_1d();
+    /// Broadcast kernel - shuffle lane 0's value to all lanes.
+    #[kernel]
+    pub fn warp_broadcast(data: &[f32], mut out: DisjointSlice<f32>) {
+        let gid = thread::index_1d();
 
-    let my_val = if gid.in_bounds(out.len()) {
-        data[gid.get()]
-    } else {
-        0.0
-    };
+        let my_val = if gid.in_bounds(out.len()) {
+            data[gid.get()]
+        } else {
+            0.0
+        };
 
-    // Broadcast lane 0's value to all lanes
-    let broadcast_val = warp::shuffle_f32(my_val, 0);
+        // Broadcast lane 0's value to all lanes
+        let broadcast_val = warp::shuffle_f32(my_val, 0);
 
-    if let Some(out_elem) = out.get_mut(gid) {
-        *out_elem = broadcast_val;
+        if let Some(out_elem) = out.get_mut(gid) {
+            *out_elem = broadcast_val;
+        }
     }
-}
 
-/// Test lane_id() intrinsic - each thread writes its lane ID.
-#[kernel]
-pub fn test_lane_id(mut out: DisjointSlice<u32>) {
-    let gid = thread::index_1d();
-    let lane = warp::lane_id();
+    /// Test lane_id() intrinsic - each thread writes its lane ID.
+    #[kernel]
+    pub fn test_lane_id(mut out: DisjointSlice<u32>) {
+        let gid = thread::index_1d();
+        let lane = warp::lane_id();
 
-    if gid.in_bounds(out.len()) {
-        // Each thread writes its lane ID
-        unsafe {
-            *out.get_unchecked_mut(gid.get()) = lane;
+        if gid.in_bounds(out.len()) {
+            // Each thread writes its lane ID
+            unsafe {
+                *out.get_unchecked_mut(gid.get()) = lane;
+            }
         }
     }
 }
@@ -136,6 +142,7 @@ fn main() {
     let module = ctx
         .load_module_from_file("warp_reduce.ptx")
         .expect("Failed to load PTX module");
+    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
 
     let cfg = LaunchConfig {
         block_dim: (32, 1, 1),
@@ -147,14 +154,9 @@ fn main() {
     println!("\n--- Test 1: Butterfly Reduction (shuffle_xor) ---");
     let mut out_dev = DeviceBuffer::<f32>::zeroed(&stream, WARPS).unwrap();
 
-    cuda_launch! {
-        kernel: warp_reduce_sum,
-        stream: stream,
-        module: module,
-        config: cfg,
-        args: [slice(data_dev), slice_mut(out_dev)]
-    }
-    .expect("Kernel launch failed");
+    module
+        .warp_reduce_sum((stream).as_ref(), cfg, &data_dev, &mut out_dev)
+        .expect("Kernel launch failed");
 
     let out_result = out_dev.to_host_vec(&stream).unwrap();
     println!("Warp sums: {:?}", out_result);
@@ -176,14 +178,9 @@ fn main() {
     println!("\n--- Test 2: Sequential Reduction (shuffle_down) ---");
     let mut out_dev = DeviceBuffer::<f32>::zeroed(&stream, WARPS).unwrap();
 
-    cuda_launch! {
-        kernel: warp_reduce_sum_down,
-        stream: stream,
-        module: module,
-        config: cfg,
-        args: [slice(data_dev), slice_mut(out_dev)]
-    }
-    .expect("Kernel launch failed");
+    module
+        .warp_reduce_sum_down((stream).as_ref(), cfg, &data_dev, &mut out_dev)
+        .expect("Kernel launch failed");
 
     let out_result = out_dev.to_host_vec(&stream).unwrap();
     println!("Warp sums: {:?}", out_result);
@@ -205,14 +202,14 @@ fn main() {
     let broadcast_dev = DeviceBuffer::from_host(&stream, &broadcast_input).unwrap();
     let mut broadcast_out_dev = DeviceBuffer::<f32>::zeroed(&stream, N).unwrap();
 
-    cuda_launch! {
-        kernel: warp_broadcast,
-        stream: stream,
-        module: module,
-        config: cfg,
-        args: [slice(broadcast_dev), slice_mut(broadcast_out_dev)]
-    }
-    .expect("Kernel launch failed");
+    module
+        .warp_broadcast(
+            (stream).as_ref(),
+            cfg,
+            &broadcast_dev,
+            &mut broadcast_out_dev,
+        )
+        .expect("Kernel launch failed");
 
     let broadcast_result = broadcast_out_dev.to_host_vec(&stream).unwrap();
 
@@ -252,14 +249,9 @@ fn main() {
     println!("\n--- Test 4: Lane ID ---");
     let mut lane_out_dev = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
 
-    cuda_launch! {
-        kernel: test_lane_id,
-        stream: stream,
-        module: module,
-        config: cfg,
-        args: [slice_mut(lane_out_dev)]
-    }
-    .expect("Kernel launch failed");
+    module
+        .test_lane_id((stream).as_ref(), cfg, &mut lane_out_dev)
+        .expect("Kernel launch failed");
 
     let lane_result = lane_out_dev.to_host_vec(&stream).unwrap();
 

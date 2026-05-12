@@ -74,7 +74,7 @@
 //! │   │    - ptx_path: Path to generated .ptx file                              │   │
 //! │   │    - ll_path: Path to generated .ll file                                │   │
 //! │   │    - target: GPU target (e.g., "sm_80", "sm_90a")                       │   │
-//! │   │    - ptx_content: PTX as string (for embedding)                         │   │
+//! │   │    - ptx_content: PTX as string, when PTX was generated                 │   │
 //! │   └─────────────────────────────────────────────────────────────────────────┘   │
 //! │                                                                                 │
 //! └─────────────────────────────────────────────────────────────────────────────────┘
@@ -154,8 +154,8 @@ fn rustc_ty_to_llvm_type_string(ty: Ty<'_>) -> String {
 
 /// Result of device code generation.
 ///
-/// Contains paths to all generated artifacts and the PTX content
-/// for potential embedding in the host binary.
+/// Contains paths to all generated artifacts and any PTX content
+/// available for embedding in the host binary.
 pub struct DeviceCodegenResult {
     /// Path to generated PTX assembly file.
     pub ptx_path: PathBuf,
@@ -167,7 +167,9 @@ pub struct DeviceCodegenResult {
     /// `CUDA_OXIDE_TARGET` environment variable.
     pub target: String,
     /// PTX content as a string, ready for embedding in the host binary.
-    pub ptx_content: String,
+    ///
+    /// NVVM IR / LTOIR flows intentionally skip PTX generation.
+    pub ptx_content: Option<String>,
 }
 
 /// Configuration for device codegen.
@@ -413,16 +415,16 @@ pub fn generate_device_code<'tcx>(
         let stable_functions: Vec<mir_importer::CollectedFunction> = functions
             .iter()
             .zip(export_names.iter())
-            .filter_map(|(func, (export_name, is_kernel))| {
+            .map(|(func, (export_name, is_kernel))| {
                 // Use rustc_internal::stable() to convert the Instance.
                 // This is the key bridge between rustc_middle and rustc_public types.
                 let stable_instance = rustc_internal::stable(func.instance);
 
-                Some(mir_importer::CollectedFunction {
+                mir_importer::CollectedFunction {
                     instance: stable_instance,
                     is_kernel: *is_kernel,
                     export_name: export_name.clone(),
-                })
+                }
             })
             .collect();
 
@@ -468,16 +470,28 @@ pub fn generate_device_code<'tcx>(
     match result {
         Ok(pipeline_result) => match pipeline_result {
             Ok(compilation_result) => {
-                // Read PTX content for embedding in host binary
-                let ptx_content =
-                    std::fs::read_to_string(&compilation_result.ptx_path).unwrap_or_default();
+                // Read PTX content for embedding in host binaries. Some flows, notably
+                // libdevice/NVVM IR, intentionally stop at `.ll` and do not create PTX.
+                let ptx_content = match std::fs::read_to_string(&compilation_result.ptx_path) {
+                    Ok(content) => Some(content),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(e) => return Err(DeviceCodegenError::Io(e)),
+                };
 
                 if config.verbose {
-                    eprintln!(
-                        "[device_codegen] PTX generated: {} (target: {})",
-                        compilation_result.ptx_path.display(),
-                        compilation_result.target
-                    );
+                    if ptx_content.is_some() {
+                        eprintln!(
+                            "[device_codegen] PTX generated: {} (target: {})",
+                            compilation_result.ptx_path.display(),
+                            compilation_result.target
+                        );
+                    } else {
+                        eprintln!(
+                            "[device_codegen] NVVM IR generated without PTX: {} (target: {})",
+                            compilation_result.ll_path.display(),
+                            compilation_result.target
+                        );
+                    }
                 }
 
                 Ok(DeviceCodegenResult {

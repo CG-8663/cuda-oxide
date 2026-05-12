@@ -1,10 +1,10 @@
 # The DeviceOperation Model
 
 In the [Writing GPU Programs](../gpu-programming/launching-kernels.md) chapter, you
-saw two ways to launch kernels: `cuda_launch!` enqueues work on an explicit
-stream, while `cuda_launch_async!` returns a lazy handle that defers stream
-selection. This chapter digs into the abstraction behind that lazy handle --
-the **`DeviceOperation`** trait -- and explains why decoupling *what* the GPU
+saw that typed sync launches enqueue work on an explicit stream, while typed
+async launches return a lazy handle that defers stream selection. This chapter
+digs into the abstraction behind that lazy handle -- the **`DeviceOperation`**
+trait -- and explains why decoupling *what* the GPU
 should do from *which stream* it runs on is the foundation of composable async
 GPU programming in cuda-oxide.
 
@@ -28,17 +28,17 @@ collections, and only decide how to schedule them at the last moment. This is
 the same idea behind Rust's `Iterator` -- build the pipeline lazily, execute it
 eagerly at the call site.
 
-| Approach             | When is the stream chosen?                  | Composable?                                                       |
-|:---------------------|:--------------------------------------------|:------------------------------------------------------------------|
-| `cuda_launch!`       | At the call site (you pass a stream)        | No -- work is enqueued immediately                                |
-| `cuda_launch_async!` | At execution time (scheduling policy picks) | Yes -- returns a lazy `DeviceOperation` you can chain and combine |
+| Approach             | Stream chosen by  | Composable?                      |
+|:---------------------|:------------------|:---------------------------------|
+| Typed sync launch    | Caller            | No, enqueued immediately         |
+| Typed async launch   | Scheduling policy | Yes, returns `DeviceOperation`   |
 
 ```{figure} images/device-operation-lifecycle.svg
 :align: center
 :width: 100%
 
-The DeviceOperation lifecycle. Phase 1: `cuda_launch_async!` builds a lazy
-recipe (no GPU work). Phase 2: the scheduling policy picks a stream from its
+The DeviceOperation lifecycle. Phase 1: a typed async method builds a lazy recipe
+(no GPU work). Phase 2: the scheduling policy picks a stream from its
 pool. Phase 3: `execute()` submits GPU work and a `cuLaunchHostFunc` callback.
 Phase 4: the callback fires, wakes the async runtime, and delivers the result.
 Bottom: the four execution methods from simplest (`.sync()`) to most manual
@@ -69,34 +69,29 @@ run it on a specific stream, or hand it to the scheduling policy and walk away.
 
 ## Your first async launch
 
-The simplest way to create a `DeviceOperation` is the `cuda_launch_async!`
-macro. It looks almost identical to `cuda_launch!`, but without the `stream:`
-field -- and it returns a recipe instead of cooking immediately:
+The simplest way to create a `DeviceOperation` is a generated `{kernel}_async`
+method. It looks like the sync method, but without the stream argument, and it
+returns a recipe instead of cooking immediately:
 
 ```rust
 use cuda_async::device_context::init_device_contexts;
-use cuda_host::cuda_launch_async;
 use cuda_core::LaunchConfig;
 
 // One-time setup: create a stream pool for scheduling
 init_device_contexts(0, 1)?;
 
 // Build the recipe (no GPU work yet)
-let op = cuda_launch_async! {
-    kernel: vecadd,
-    module: module,
-    config: LaunchConfig::for_num_elems(1024),
-    args: [slice(a_dev), slice(b_dev), slice_mut(c_dev)]
-};
+let module = kernels::load_async(0)?;
+let op = module.vecadd_async(LaunchConfig::for_num_elems(1024), &a_dev, &b_dev, &mut c_dev)?;
 
 // Now cook it: pick a stream, launch, wait for the result
 op.sync()?;
 ```
 
-At the point where `op` is created, nothing has happened on the GPU. The macro
-builds an `AsyncKernelLaunch` value that *remembers* which function to call,
-what arguments to pass, and how to configure the grid -- but it does not touch
-any stream. It is a recipe card sitting on the counter.
+At the point where `op` is created, nothing has happened on the GPU. The method
+builds an `AsyncKernelLaunch` value that remembers which function to call, what
+arguments to pass, and how to configure the grid -- but it does not touch any
+stream. It is a recipe card sitting on the counter.
 
 When you call `.sync()`, the scheduling policy picks a stream from its pool,
 submits the kernel, and blocks until the stream is idle. That single line is
@@ -135,7 +130,7 @@ on that shortly.
 You rarely implement `DeviceOperation` yourself. The crate provides a set of
 types that implement it, and you compose them using combinators:
 
-- **`AsyncKernelLaunch`** -- produced by `cuda_launch_async!`. Launches a kernel.
+- **`AsyncKernelLaunch`** -- produced by typed async launch methods. Launches a kernel.
 - **`Value<T>`** -- wraps a host-side value. No GPU work. Returns `T` immediately.
 - **`AndThen`** -- chains two operations: run A, feed the result to B.
 - **`Zip`** -- runs two operations and returns both results as a tuple.
@@ -197,13 +192,10 @@ delivers the result:
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_device_contexts(0, 1)?;
 
-    let result = cuda_launch_async! {
-        kernel: vecadd,
-        module: module,
-        config: LaunchConfig::for_num_elems(1024),
-        args: [slice(a_dev), slice(b_dev), slice_mut(c_dev)]
-    }
-    .await?;
+    let module = kernels::load_async(0)?;
+    module
+        .vecadd_async(LaunchConfig::for_num_elems(1024), &a_dev, &b_dev, &mut c_dev)?
+        .await?;
 
     Ok(())
 }
@@ -308,9 +300,8 @@ helpers that slot cleanly into `and_then` chains.
 
 :::{tip}
 `with_context` is the escape hatch for raw driver calls that need a
-`CUstream`. For kernel launches, prefer `cuda_launch_async!` or
-`AsyncKernelLaunch` -- they handle argument marshalling and are less
-error-prone.
+`CUstream`. For kernel launches, prefer generated async launch methods because
+they handle argument marshalling and buffer lifetimes.
 :::
 
 ## How the GPU tells Rust it is done
