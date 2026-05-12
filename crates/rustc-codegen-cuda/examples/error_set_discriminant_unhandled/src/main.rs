@@ -19,7 +19,7 @@
 //!   "SetDiscriminant statements are not yet supported on the device; ..."
 
 use core::intrinsics::mir::*;
-use cuda_device::{DisjointSlice, kernel, thread};
+use cuda_device::{DisjointSlice, kernel};
 
 enum DeviceState {
     Empty,
@@ -36,10 +36,10 @@ fn force_set_discriminant(state: &mut DeviceState) {
 
 #[kernel]
 pub fn set_discriminant_kernel(mut out: DisjointSlice<u32>) {
-    let idx = thread::index_1d();
-    if let Some(slot) = out.get_mut(idx) {
-        let mut state = if idx.get() & 1 == 0 {
-            DeviceState::Full(idx.get() as u32)
+    if let Some((slot, idx)) = out.get_mut_indexed() {
+        let raw_idx = idx.get();
+        let mut state = if raw_idx & 1 == 0 {
+            DeviceState::Full(raw_idx as u32)
         } else {
             DeviceState::Empty
         };

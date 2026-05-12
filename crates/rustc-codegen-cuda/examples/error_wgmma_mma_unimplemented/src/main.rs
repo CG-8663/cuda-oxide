@@ -21,6 +21,11 @@
 use cuda_device::wgmma::wgmma_mma_m64n64k16_f32_bf16;
 use cuda_device::{DisjointSlice, kernel, thread};
 
+/// # Safety
+///
+/// This kernel intentionally calls a low-level WGMMA intrinsic with dummy
+/// descriptors so the compiler rejects the unsupported lowering before PTX
+/// execution is possible.
 #[kernel]
 pub unsafe fn unsupported_wgmma_mma_kernel(mut out: DisjointSlice<u32>) {
     let mut acc: [[f32; 8]; 4] = [[0.0f32; 8]; 4];

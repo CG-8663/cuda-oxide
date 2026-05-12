@@ -17,12 +17,11 @@
 //! Expected: build FAILS with
 //!   "core::ptr::copy_nonoverlapping is not yet supported on the device; ..."
 
-use cuda_device::{DisjointSlice, kernel, thread};
+use cuda_device::{DisjointSlice, kernel};
 
 #[kernel]
 pub fn copy_nonoverlapping_kernel(input: &[u32], mut out: DisjointSlice<u32>) {
-    let idx = thread::index_1d();
-    if let Some(slot) = out.get_mut(idx) {
+    if let Some((slot, idx)) = out.get_mut_indexed() {
         unsafe {
             let src = input.as_ptr().add(idx.get());
             let dst = slot as *mut u32;
