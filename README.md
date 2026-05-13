@@ -182,6 +182,13 @@ sudo apt install clang-21   # or libclang-common-21-dev
 `cargo oxide doctor` catches this up front; the symptom otherwise is a cryptic
 `'stddef.h' file not found` during the host build.
 
+#### Dev Container
+
+The repository includes a standard devcontainer setup in `.devcontainer/` for a
+reproducible CUDA, LLVM, Clang, and Rust environment. See the
+[installation chapter](cuda-oxide-book/getting-started/installation.md#dev-container)
+for editor and CLI usage.
+
 ### Verifying Installation
 
 ```bash
