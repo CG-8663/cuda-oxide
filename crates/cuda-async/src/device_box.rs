@@ -20,6 +20,7 @@ use crate::error::DeviceError;
 use crate::launch::{AsyncKernelLaunch, KernelArgument};
 use cuda_bindings::CUdeviceptr;
 use cuda_core::memory::free_async;
+use std::io::{self, Write};
 use std::marker::PhantomData;
 
 /// Non-owning, `Copy` handle to a typed device allocation.
@@ -104,7 +105,9 @@ impl<T: Send + ?Sized> Drop for DeviceBox<T> {
         match result {
             Ok(Ok(())) => {}
             Ok(Err(err)) | Err(err) => {
-                eprintln!(
+                let mut stderr = io::stderr().lock();
+                let _ = writeln!(
+                    stderr,
                     "cuda-async: failed to enqueue async free for device pointer on device_id={}: {}",
                     self.device_id, err
                 );
