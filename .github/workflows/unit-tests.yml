@@ -33,6 +33,7 @@ jobs:
           - dialect-nvvm
           - mir-importer
           - mir-lower
+          - oxide-artifacts
           - reserved-oxide-symbols
           - cuda-macros
           - cuda-device   # trybuild compile-fail suite for ThreadIndex / DisjointSlice safety

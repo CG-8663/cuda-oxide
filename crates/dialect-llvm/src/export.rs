@@ -2055,10 +2055,8 @@ impl<'a> ModuleExportState<'a> {
                     .0
                     .get(&nneg_key)
                     .and_then(|attr| {
-                        pliron::attribute::attr_cast::<pliron::builtin::attributes::BoolAttr>(
-                            &**attr,
-                        )
-                        .map(|b| bool::from(b.clone()))
+                        attr.downcast_ref::<pliron::builtin::attributes::BoolAttr>()
+                            .map(|b| bool::from(b.clone()))
                     })
                     .unwrap_or(false);
 
