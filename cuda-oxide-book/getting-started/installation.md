@@ -91,6 +91,14 @@ cuda-oxide uses LLVM's NVPTX backend to lower LLVM IR to PTX. Install LLVM 21 or
 sudo apt install llvm-21
 ```
 
+If your distro packages do not provide `llvm-21`, use LLVM's apt helper:
+
+```bash
+sudo apt-get install -y lsb-release wget software-properties-common gnupg
+wget https://apt.llvm.org/llvm.sh && chmod +x llvm.sh
+sudo ./llvm.sh 21
+```
+
 Verify that the NVPTX target is present:
 
 ```bash
