@@ -182,34 +182,12 @@ sudo apt install clang-21   # or libclang-common-21-dev
 `cargo oxide doctor` catches this up front; the symptom otherwise is a cryptic
 `'stddef.h' file not found` during the host build.
 
-#### Docker
+#### Dev Container
 
-A development image is documented in [`docker/docs/`](docker/docs/). It uses Ubuntu 24.04,
-CUDA Toolkit 13.0, LLVM 21, Clang 21, and the pinned Rust nightly. This is useful
-when you want a reproducible environment matching the documented setup.
-
-```bash
-docker build -f docker/Dockerfile \
-  --build-arg USER_UID="$(id -u)" \
-  --build-arg USER_GID="$(id -g)" \
-  -t cuda-oxide-dev .
-docker run --rm -it --gpus all -v "$PWD":/workspace/cuda-oxide \
-  -w /workspace/cuda-oxide cuda-oxide-dev
-```
-
-When you use the bind-mounted repo workflow, build the image with your host
-UID/GID as shown above. `cargo oxide` writes both Cargo artifacts under
-`target/` and generated kernel artifacts such as `vecadd.ptx` into the example
-directory, so a default `1000:1000` container user will fail on checkouts owned
-by a different host user. Changing only `CARGO_TARGET_DIR` is not enough
-because PTX export still writes into the example directory.
-
-Inside the container, run:
-
-```bash
-cargo oxide doctor
-cargo oxide run vecadd
-```
+The repository includes a standard devcontainer setup in `.devcontainer/` for a
+reproducible CUDA, LLVM, Clang, and Rust environment. See the
+[installation chapter](cuda-oxide-book/getting-started/installation.md#dev-container)
+for editor and CLI usage.
 
 ### Verifying Installation
 
