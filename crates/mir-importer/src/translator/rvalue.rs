@@ -125,10 +125,7 @@ fn cast_to_generic_addrspace_if_needed(
                 cast_op.insert_at_front(block_ptr, ctx);
             }
 
-            let casted_value = Value::OpResult {
-                op: cast_op,
-                res_idx: 0,
-            };
+            let casted_value = cast_op.deref(ctx).get_result(0);
             return (casted_value, Some(cast_op));
         }
     }
@@ -335,10 +332,7 @@ pub fn translate_rvalue(
                         cast_op.insert_at_front(block_ptr, ctx);
                     }
 
-                    let casted_right = Value::OpResult {
-                        op: cast_op,
-                        res_idx: 0,
-                    };
+                    let casted_right = cast_op.deref(ctx).get_result(0);
                     (casted_right, Some(cast_op))
                 } else {
                     (right_val, prev_op_after_right)
@@ -431,7 +425,7 @@ pub fn translate_rvalue(
             );
             op.deref_mut(ctx).set_loc(loc);
 
-            let result = Value::OpResult { op, res_idx: 0 };
+            let result = op.deref(ctx).get_result(0);
 
             Ok((Some(op), result, final_prev_op))
         }
@@ -467,10 +461,7 @@ pub fn translate_rvalue(
                     let extract_op = MirExtractFieldOp::new(op);
                     extract_op.set_attr_index(ctx, dialect_mir::attributes::FieldIndexAttr(1));
 
-                    let result = Value::OpResult {
-                        op: extract_op.get_operation(),
-                        res_idx: 0,
-                    };
+                    let result = extract_op.get_operation().deref(ctx).get_result(0);
 
                     Ok((
                         Some(extract_op.get_operation()),
@@ -500,7 +491,7 @@ pub fn translate_rvalue(
                         Operation::new(ctx, op_id, vec![result_type], vec![operand_val], vec![], 0);
                     op.deref_mut(ctx).set_loc(loc);
 
-                    let result = Value::OpResult { op, res_idx: 0 };
+                    let result = op.deref(ctx).get_result(0);
 
                     Ok((Some(op), result, prev_op_after_operand))
                 }
@@ -564,7 +555,7 @@ pub fn translate_rvalue(
             let cast_op = MirCastOp::new(op);
             cast_op.set_attr_cast_kind(ctx, cast_kind_attr);
 
-            let result = Value::OpResult { op, res_idx: 0 };
+            let result = op.deref(ctx).get_result(0);
 
             Ok((Some(op), result, prev_op_after_operand))
         }
@@ -619,7 +610,7 @@ pub fn translate_rvalue(
                     op.deref_mut(ctx).set_loc(loc);
 
                     // Get the result value
-                    let result = Value::OpResult { op, res_idx: 0 };
+                    let result = op.deref(ctx).get_result(0);
 
                     // Return Some(operation) - caller must insert it after field extractions
                     Ok((Some(op), result, prev_op_after_right))
@@ -848,14 +839,14 @@ pub fn translate_rvalue(
                             Some(p) => op.insert_after(ctx, p),
                             None => op.insert_at_front(block_ptr, ctx),
                         }
-                        (Value::OpResult { op, res_idx: 0 }, Some(op))
+                        (op.deref(ctx).get_result(0), Some(op))
                     } else {
                         let op = create_zst_aggregate(ctx, ty_ptr, loc.clone());
                         match prev_op {
                             Some(p) => op.insert_after(ctx, p),
                             None => op.insert_at_front(block_ptr, ctx),
                         }
-                        (Value::OpResult { op, res_idx: 0 }, Some(op))
+                        (op.deref(ctx).get_result(0), Some(op))
                     };
                 let ptr_ty = dialect_mir::types::MirPtrType::get_generic(ctx, ty_ptr, is_mutable);
                 let ref_op = Operation::new(
@@ -1156,7 +1147,7 @@ pub fn translate_rvalue(
                                 );
                                 op.deref_mut(ctx).set_loc(loc);
 
-                                let result = Value::OpResult { op, res_idx: 0 };
+                                let result = op.deref(ctx).get_result(0);
 
                                 Ok((Some(op), result, prev_after_casts))
                             }
@@ -1200,7 +1191,7 @@ pub fn translate_rvalue(
                                 dialect_mir::attributes::VariantIndexAttr(variant_index_val as u32),
                             );
 
-                            let result = Value::OpResult { op, res_idx: 0 };
+                            let result = op.deref(ctx).get_result(0);
 
                             Ok((Some(op), result, prev_after_casts))
                         }
@@ -1255,7 +1246,7 @@ pub fn translate_rvalue(
                     );
                     op.deref_mut(ctx).set_loc(loc);
 
-                    let result = Value::OpResult { op, res_idx: 0 };
+                    let result = op.deref(ctx).get_result(0);
 
                     Ok((Some(op), result, current_prev_op))
                 }
@@ -1306,7 +1297,7 @@ pub fn translate_rvalue(
                     );
                     op.deref_mut(ctx).set_loc(loc);
 
-                    let result = Value::OpResult { op, res_idx: 0 };
+                    let result = op.deref(ctx).get_result(0);
 
                     Ok((Some(op), result, current_prev_op))
                 }
@@ -1351,7 +1342,7 @@ pub fn translate_rvalue(
                             0,
                         );
                         op.deref_mut(ctx).set_loc(loc);
-                        let result = Value::OpResult { op, res_idx: 0 };
+                        let result = op.deref(ctx).get_result(0);
                         Ok((Some(op), result, current_prev_op))
                     } else {
                         // Closure with captures - create struct with captured values
@@ -1375,7 +1366,7 @@ pub fn translate_rvalue(
                             0,
                         );
                         op.deref_mut(ctx).set_loc(loc);
-                        let result = Value::OpResult { op, res_idx: 0 };
+                        let result = op.deref(ctx).get_result(0);
                         Ok((Some(op), result, prev_after_casts))
                     }
                 }
@@ -1439,10 +1430,7 @@ pub fn translate_rvalue(
                 0,
             );
             get_disc_op.deref_mut(ctx).set_loc(loc.clone());
-            let native_result = Value::OpResult {
-                op: get_disc_op,
-                res_idx: 0,
-            };
+            let native_result = get_disc_op.deref(ctx).get_result(0);
 
             // Ask stable-MIR what the declared discriminant type of this
             // place is. For well-formed MIR on an enum place this should
@@ -1502,10 +1490,7 @@ pub fn translate_rvalue(
             MirCastOp::new(cast_op).set_attr_cast_kind(ctx, MirCastKindAttr::IntToInt);
             cast_op.insert_after(ctx, get_disc_op);
 
-            let result = Value::OpResult {
-                op: cast_op,
-                res_idx: 0,
-            };
+            let result = cast_op.deref(ctx).get_result(0);
             Ok((None, result, Some(cast_op)))
         }
         mir::Rvalue::Repeat(operand, count) => {
@@ -1557,7 +1542,7 @@ pub fn translate_rvalue(
             );
             op.deref_mut(ctx).set_loc(loc);
 
-            let result = Value::OpResult { op, res_idx: 0 };
+            let result = op.deref(ctx).get_result(0);
 
             Ok((Some(op), result, prev_op_after_operand))
         }
@@ -1653,10 +1638,7 @@ pub fn translate_operand(
                     shared_alloc.get_operation().insert_at_front(block_ptr, ctx);
                 }
 
-                let val = Value::OpResult {
-                    op: shared_alloc.get_operation(),
-                    res_idx: 0,
-                };
+                let val = shared_alloc.get_operation().deref(ctx).get_result(0);
 
                 return Ok((val, Some(shared_alloc.get_operation())));
             }
@@ -1714,10 +1696,7 @@ pub fn translate_operand(
                     shared_alloc.get_operation().insert_at_front(block_ptr, ctx);
                 }
 
-                let val = Value::OpResult {
-                    op: shared_alloc.get_operation(),
-                    res_idx: 0,
-                };
+                let val = shared_alloc.get_operation().deref(ctx).get_result(0);
 
                 return Ok((val, Some(shared_alloc.get_operation())));
             }
@@ -1760,10 +1739,7 @@ pub fn translate_operand(
                     global_alloc.get_operation().insert_at_front(block_ptr, ctx);
                 }
 
-                let val = Value::OpResult {
-                    op: global_alloc.get_operation(),
-                    res_idx: 0,
-                };
+                let val = global_alloc.get_operation().deref(ctx).get_result(0);
 
                 return Ok((val, Some(global_alloc.get_operation())));
             }
@@ -1810,7 +1786,7 @@ pub fn translate_operand(
                     op.insert_at_front(block_ptr, ctx);
                 }
 
-                let val = Value::OpResult { op, res_idx: 0 };
+                let val = op.deref(ctx).get_result(0);
                 return Ok((val, Some(op)));
             }
 
@@ -1929,10 +1905,7 @@ pub fn translate_operand(
                         float_op.get_operation().insert_at_front(block_ptr, ctx);
                     }
 
-                    let val = Value::OpResult {
-                        op: float_op.get_operation(),
-                        res_idx: 0,
-                    };
+                    let val = float_op.get_operation().deref(ctx).get_result(0);
 
                     Ok((val, Some(float_op.get_operation())))
                 } else if is_float_64 {
@@ -1991,10 +1964,7 @@ pub fn translate_operand(
                         float_op.get_operation().insert_at_front(block_ptr, ctx);
                     }
 
-                    let val = Value::OpResult {
-                        op: float_op.get_operation(),
-                        res_idx: 0,
-                    };
+                    let val = float_op.get_operation().deref(ctx).get_result(0);
 
                     Ok((val, Some(float_op.get_operation())))
                 } else {
@@ -2053,10 +2023,7 @@ pub fn translate_operand(
                         float_op.get_operation().insert_at_front(block_ptr, ctx);
                     }
 
-                    let val = Value::OpResult {
-                        op: float_op.get_operation(),
-                        res_idx: 0,
-                    };
+                    let val = float_op.get_operation().deref(ctx).get_result(0);
 
                     Ok((val, Some(float_op.get_operation())))
                 }
@@ -2156,10 +2123,7 @@ pub fn translate_operand(
                         mir_ref.get_operation().insert_at_front(block_ptr, ctx);
                     }
 
-                    let ptr_val = Value::OpResult {
-                        op: mir_ref.get_operation(),
-                        res_idx: 0,
-                    };
+                    let ptr_val = mir_ref.get_operation().deref(ctx).get_result(0);
                     return Ok((ptr_val, Some(mir_ref.get_operation())));
                 }
 
@@ -2227,10 +2191,7 @@ pub fn translate_operand(
                     const_op.get_operation().insert_at_front(block_ptr, ctx);
                 }
 
-                let int_val = Value::OpResult {
-                    op: const_op.get_operation(),
-                    res_idx: 0,
-                };
+                let int_val = const_op.get_operation().deref(ctx).get_result(0);
 
                 // Cast integer to pointer type using MirCastOp
                 let cast_op = Operation::new(
@@ -2247,10 +2208,7 @@ pub fn translate_operand(
 
                 cast_op.insert_after(ctx, const_op.get_operation());
 
-                let ptr_val_result = Value::OpResult {
-                    op: cast_op,
-                    res_idx: 0,
-                };
+                let ptr_val_result = cast_op.deref(ctx).get_result(0);
 
                 Ok((ptr_val_result, Some(cast_op)))
             } else if const_ty_ptr.deref(ctx).is::<IntegerType>() {
@@ -2308,10 +2266,7 @@ pub fn translate_operand(
                     const_op.get_operation().insert_at_front(block_ptr, ctx);
                 }
 
-                let val = Value::OpResult {
-                    op: const_op.get_operation(),
-                    res_idx: 0,
-                };
+                let val = const_op.get_operation().deref(ctx).get_result(0);
 
                 Ok((val, Some(const_op.get_operation())))
             } else {
@@ -2364,10 +2319,7 @@ pub fn translate_operand(
                 None => op.insert_at_front(block_ptr, ctx),
             }
 
-            let val = Value::OpResult {
-                op: const_op.get_operation(),
-                res_idx: 0,
-            };
+            let val = const_op.get_operation().deref(ctx).get_result(0);
 
             Ok((val, Some(const_op.get_operation())))
         }
@@ -2427,7 +2379,7 @@ pub fn translate_place(
                 Some(p) => op.insert_after(ctx, p),
                 None => op.insert_at_front(block_ptr, ctx),
             }
-            let val = Value::OpResult { op, res_idx: 0 };
+            let val = op.deref(ctx).get_result(0);
             return Ok((val, Some(op)));
         }
         if types::is_zst_type(ctx, ty_ptr) {
@@ -2436,7 +2388,7 @@ pub fn translate_place(
                 Some(p) => op.insert_after(ctx, p),
                 None => op.insert_at_front(block_ptr, ctx),
             }
-            let val = Value::OpResult { op, res_idx: 0 };
+            let val = op.deref(ctx).get_result(0);
             return Ok((val, Some(op)));
         }
         input_err!(
@@ -2525,10 +2477,7 @@ pub fn translate_place(
                         load_op.get_operation().insert_at_front(block_ptr, ctx);
                     }
 
-                    let loaded_val = Value::OpResult {
-                        op: load_op.get_operation(),
-                        res_idx: 0,
-                    };
+                    let loaded_val = load_op.get_operation().deref(ctx).get_result(0);
 
                     Ok((loaded_val, Some(load_op.get_operation())))
                 }
@@ -2580,10 +2529,7 @@ pub fn translate_place(
                         extract_op.get_operation().insert_at_front(block_ptr, ctx);
                     }
 
-                    let field_value = Value::OpResult {
-                        op: extract_op.get_operation(),
-                        res_idx: 0,
-                    };
+                    let field_value = extract_op.get_operation().deref(ctx).get_result(0);
                     Ok((field_value, Some(extract_op.get_operation())))
                 }
                 ProjectionElem::Downcast(_variant_idx) => {
@@ -2680,10 +2626,7 @@ pub fn translate_place(
                     }
                     current_prev = Some(addr_op);
 
-                    let elem_ptr = Value::OpResult {
-                        op: addr_op,
-                        res_idx: 0,
-                    };
+                    let elem_ptr = addr_op.deref(ctx).get_result(0);
 
                     // Load the element value
                     use dialect_mir::ops::MirLoadOp;
@@ -2703,10 +2646,7 @@ pub fn translate_place(
                         load_op.insert_at_front(block_ptr, ctx);
                     }
 
-                    let result = Value::OpResult {
-                        op: load_op,
-                        res_idx: 0,
-                    };
+                    let result = load_op.deref(ctx).get_result(0);
                     Ok((result, Some(load_op)))
                 }
                 ProjectionElem::ConstantIndex {
@@ -2794,10 +2734,7 @@ pub fn translate_place(
                             extract_op.get_operation().insert_at_front(block_ptr, ctx);
                         }
 
-                        let result = Value::OpResult {
-                            op: extract_op.get_operation(),
-                            res_idx: 0,
-                        };
+                        let result = extract_op.get_operation().deref(ctx).get_result(0);
                         return Ok((result, Some(extract_op.get_operation())));
                     };
 
@@ -2853,10 +2790,7 @@ pub fn translate_place(
                         const_op_ptr.insert_at_front(block_ptr, ctx);
                     }
                     current_prev = Some(const_op_ptr);
-                    let index_value = Value::OpResult {
-                        op: const_op_ptr,
-                        res_idx: 0,
-                    };
+                    let index_value = const_op_ptr.deref(ctx).get_result(0);
 
                     let elem_ptr_ty =
                         dialect_mir::types::MirPtrType::get(ctx, element_ty, false, address_space)
@@ -2878,10 +2812,7 @@ pub fn translate_place(
                         addr_op.insert_at_front(block_ptr, ctx);
                     }
                     current_prev = Some(addr_op);
-                    let elem_ptr = Value::OpResult {
-                        op: addr_op,
-                        res_idx: 0,
-                    };
+                    let elem_ptr = addr_op.deref(ctx).get_result(0);
 
                     let load_op = Operation::new(
                         ctx,
@@ -2898,10 +2829,7 @@ pub fn translate_place(
                         load_op.insert_at_front(block_ptr, ctx);
                     }
 
-                    let result = Value::OpResult {
-                        op: load_op,
-                        res_idx: 0,
-                    };
+                    let result = load_op.deref(ctx).get_result(0);
                     Ok((result, Some(load_op)))
                 }
                 _ => input_err!(
@@ -3004,10 +2932,7 @@ fn apply_deref_projection(
             }
 
             Ok((
-                Value::OpResult {
-                    op: load_op.get_operation(),
-                    res_idx: 0,
-                },
+                load_op.get_operation().deref(ctx).get_result(0),
                 Some(load_op.get_operation()),
             ))
         }
@@ -3038,10 +2963,7 @@ fn apply_deref_projection(
             }
 
             Ok((
-                Value::OpResult {
-                    op: extract.get_operation(),
-                    res_idx: 0,
-                },
+                extract.get_operation().deref(ctx).get_result(0),
                 Some(extract.get_operation()),
             ))
         }
@@ -3082,10 +3004,7 @@ fn apply_field_projection(
         extract_op.get_operation().insert_at_front(block_ptr, ctx);
     }
 
-    let field_value = Value::OpResult {
-        op: extract_op.get_operation(),
-        res_idx: 0,
-    };
+    let field_value = extract_op.get_operation().deref(ctx).get_result(0);
 
     Ok((field_value, Some(extract_op.get_operation())))
 }
@@ -3151,10 +3070,7 @@ fn apply_enum_field_projection(
         payload_op.get_operation().insert_at_front(block_ptr, ctx);
     }
 
-    let payload_value = Value::OpResult {
-        op: payload_op.get_operation(),
-        res_idx: 0,
-    };
+    let payload_value = payload_op.get_operation().deref(ctx).get_result(0);
 
     Ok((payload_value, Some(payload_op.get_operation())))
 }
@@ -3254,10 +3170,7 @@ fn translate_place_addr_from_slot(
                     None => const_op_ptr.insert_at_front(block_ptr, ctx),
                 }
                 current_prev_op = Some(const_op_ptr);
-                let index_val = Value::OpResult {
-                    op: const_op_ptr,
-                    res_idx: 0,
-                };
+                let index_val = const_op_ptr.deref(ctx).get_result(0);
 
                 let elem_ptr_ty =
                     dialect_mir::types::MirPtrType::get(ctx, element_ty, is_mutable, addr_space)
@@ -3356,10 +3269,7 @@ pub fn translate_place_iterative(
                     Some(p) => synth_op.insert_after(ctx, p),
                     None => synth_op.insert_at_front(block_ptr, ctx),
                 }
-                let val = Value::OpResult {
-                    op: synth_op,
-                    res_idx: 0,
-                };
+                let val = synth_op.deref(ctx).get_result(0);
                 (val, Some(synth_op))
             }
         };
@@ -3491,7 +3401,7 @@ pub fn translate_place_iterative(
                             op.insert_at_front(block_ptr, ctx);
                         }
 
-                        current_value = Value::OpResult { op, res_idx: 0 };
+                        current_value = op.deref(ctx).get_result(0);
                         current_prev_op = Some(op);
                     }
                     Ok(IndexableKind::Ptr { element_ty, ptr_ty }) => {
@@ -3510,10 +3420,7 @@ pub fn translate_place_iterative(
                             offset_op.insert_at_front(block_ptr, ctx);
                         }
                         current_prev_op = Some(offset_op);
-                        let offset_ptr = Value::OpResult {
-                            op: offset_op,
-                            res_idx: 0,
-                        };
+                        let offset_ptr = offset_op.deref(ctx).get_result(0);
 
                         let load_op = Operation::new(
                             ctx,
@@ -3531,10 +3438,7 @@ pub fn translate_place_iterative(
                             load.get_operation().insert_at_front(block_ptr, ctx);
                         }
 
-                        current_value = Value::OpResult {
-                            op: load.get_operation(),
-                            res_idx: 0,
-                        };
+                        current_value = load.get_operation().deref(ctx).get_result(0);
                         current_prev_op = Some(load.get_operation());
                     }
                     Err(ty_dbg) => {
@@ -3629,10 +3533,7 @@ pub fn translate_place_iterative(
                             extract_op.get_operation().insert_at_front(block_ptr, ctx);
                         }
 
-                        current_value = Value::OpResult {
-                            op: extract_op.get_operation(),
-                            res_idx: 0,
-                        };
+                        current_value = extract_op.get_operation().deref(ctx).get_result(0);
                         current_prev_op = Some(extract_op.get_operation());
                     }
                     Ok(ConstIndexKind::Ptr { element_ty, ptr_ty }) => {
@@ -3659,10 +3560,7 @@ pub fn translate_place_iterative(
                             const_mir.get_operation().insert_at_front(block_ptr, ctx);
                         }
                         current_prev_op = Some(const_mir.get_operation());
-                        let index_value = Value::OpResult {
-                            op: const_mir.get_operation(),
-                            res_idx: 0,
-                        };
+                        let index_value = const_mir.get_operation().deref(ctx).get_result(0);
 
                         // Pointer offset
                         let offset_op = Operation::new(
@@ -3680,10 +3578,7 @@ pub fn translate_place_iterative(
                             offset_op.insert_at_front(block_ptr, ctx);
                         }
                         current_prev_op = Some(offset_op);
-                        let offset_ptr = Value::OpResult {
-                            op: offset_op,
-                            res_idx: 0,
-                        };
+                        let offset_ptr = offset_op.deref(ctx).get_result(0);
 
                         // Load element
                         let load_op = Operation::new(
@@ -3702,10 +3597,7 @@ pub fn translate_place_iterative(
                             load.get_operation().insert_at_front(block_ptr, ctx);
                         }
 
-                        current_value = Value::OpResult {
-                            op: load.get_operation(),
-                            res_idx: 0,
-                        };
+                        current_value = load.get_operation().deref(ctx).get_result(0);
                         current_prev_op = Some(load.get_operation());
                     }
                     Err(ty_dbg) => {
@@ -3954,10 +3846,7 @@ fn translate_ptr_to_array_constant(
                     float_op.get_operation().insert_at_front(block_ptr, ctx);
                 }
                 (
-                    Value::OpResult {
-                        op: float_op.get_operation(),
-                        res_idx: 0,
-                    },
+                    float_op.get_operation().deref(ctx).get_result(0),
                     Some(float_op.get_operation()),
                 )
             }
@@ -3986,10 +3875,7 @@ fn translate_ptr_to_array_constant(
                     float_op.get_operation().insert_at_front(block_ptr, ctx);
                 }
                 (
-                    Value::OpResult {
-                        op: float_op.get_operation(),
-                        res_idx: 0,
-                    },
+                    float_op.get_operation().deref(ctx).get_result(0),
                     Some(float_op.get_operation()),
                 )
             }
@@ -4016,10 +3902,7 @@ fn translate_ptr_to_array_constant(
                     float_op.get_operation().insert_at_front(block_ptr, ctx);
                 }
                 (
-                    Value::OpResult {
-                        op: float_op.get_operation(),
-                        res_idx: 0,
-                    },
+                    float_op.get_operation().deref(ctx).get_result(0),
                     Some(float_op.get_operation()),
                 )
             }
@@ -4050,10 +3933,7 @@ fn translate_ptr_to_array_constant(
                     const_op.get_operation().insert_at_front(block_ptr, ctx);
                 }
                 (
-                    Value::OpResult {
-                        op: const_op.get_operation(),
-                        res_idx: 0,
-                    },
+                    const_op.get_operation().deref(ctx).get_result(0),
                     Some(const_op.get_operation()),
                 )
             }
@@ -4082,10 +3962,7 @@ fn translate_ptr_to_array_constant(
     }
     last_op = Some(construct_op);
 
-    let array_val = Value::OpResult {
-        op: construct_op,
-        res_idx: 0,
-    };
+    let array_val = construct_op.deref(ctx).get_result(0);
 
     // Create reference operation to get pointer to the array
     use dialect_mir::ops::MirRefOp;
@@ -4112,10 +3989,7 @@ fn translate_ptr_to_array_constant(
         ref_op.insert_at_front(block_ptr, ctx);
     }
 
-    let ptr_val = Value::OpResult {
-        op: ref_op,
-        res_idx: 0,
-    };
+    let ptr_val = ref_op.deref(ctx).get_result(0);
 
     Ok((ptr_val, Some(ref_op)))
 }
@@ -4296,7 +4170,7 @@ fn translate_struct_constant(
                 }
 
                 current_prev_op = Some(op);
-                field_values.push(Value::OpResult { op, res_idx: 0 });
+                field_values.push(op.deref(ctx).get_result(0));
                 // ZST takes no bytes
             }
 
@@ -4322,7 +4196,7 @@ fn translate_struct_constant(
                 }
 
                 current_prev_op = Some(op);
-                field_values.push(Value::OpResult { op, res_idx: 0 });
+                field_values.push(op.deref(ctx).get_result(0));
                 // ZST takes no bytes
             }
 
@@ -4376,10 +4250,7 @@ fn translate_struct_constant(
                 }
 
                 current_prev_op = Some(const_op.get_operation());
-                field_values.push(Value::OpResult {
-                    op: const_op.get_operation(),
-                    res_idx: 0,
-                });
+                field_values.push(const_op.get_operation().deref(ctx).get_result(0));
 
                 byte_offset += byte_size;
             }
@@ -4423,10 +4294,7 @@ fn translate_struct_constant(
                 }
 
                 current_prev_op = Some(float_op.get_operation());
-                field_values.push(Value::OpResult {
-                    op: float_op.get_operation(),
-                    res_idx: 0,
-                });
+                field_values.push(float_op.get_operation().deref(ctx).get_result(0));
 
                 byte_offset += byte_size;
             }
@@ -4479,10 +4347,7 @@ fn translate_struct_constant(
                 }
 
                 current_prev_op = Some(float_op.get_operation());
-                field_values.push(Value::OpResult {
-                    op: float_op.get_operation(),
-                    res_idx: 0,
-                });
+                field_values.push(float_op.get_operation().deref(ctx).get_result(0));
 
                 byte_offset += byte_size;
             }
@@ -4537,14 +4402,12 @@ fn translate_struct_constant(
 
                 // Cast to pointer type
                 use dialect_mir::ops::MirCastOp;
+                let const_value = const_op.get_operation().deref(ctx).get_result(0);
                 let cast_op = Operation::new(
                     ctx,
                     MirCastOp::get_concrete_op_info(),
                     vec![field_ty_ptr],
-                    vec![Value::OpResult {
-                        op: const_op.get_operation(),
-                        res_idx: 0,
-                    }],
+                    vec![const_value],
                     vec![],
                     0,
                 );
@@ -4554,10 +4417,7 @@ fn translate_struct_constant(
                 cast_op.insert_after(ctx, const_op.get_operation());
 
                 current_prev_op = Some(cast_op);
-                field_values.push(Value::OpResult {
-                    op: cast_op,
-                    res_idx: 0,
-                });
+                field_values.push(cast_op.deref(ctx).get_result(0));
 
                 byte_offset += byte_size;
             }
@@ -4602,7 +4462,7 @@ fn translate_struct_constant(
         op.insert_at_front(block_ptr, ctx);
     }
 
-    let val = Value::OpResult { op, res_idx: 0 };
+    let val = op.deref(ctx).get_result(0);
     Ok((val, Some(op)))
 }
 
@@ -4725,7 +4585,7 @@ fn translate_tuple_constant(
         op.insert_at_front(block_ptr, ctx);
     }
 
-    Ok((Value::OpResult { op, res_idx: 0 }, Some(op)))
+    Ok((op.deref(ctx).get_result(0), Some(op)))
 }
 
 fn constant_storage_size(ctx: &Context, ty_ptr: Ptr<TypeObj>) -> Option<usize> {
@@ -4921,10 +4781,7 @@ fn translate_enum_constant_from_bytes(
         enum_op.get_operation().insert_at_front(block_ptr, ctx);
     }
 
-    let val = Value::OpResult {
-        op: enum_op.get_operation(),
-        res_idx: 0,
-    };
+    let val = enum_op.get_operation().deref(ctx).get_result(0);
 
     Ok((val, Some(enum_op.get_operation())))
 }
@@ -5028,10 +4885,7 @@ fn translate_constant_value_from_bytes(
             }
 
             Ok((
-                Value::OpResult {
-                    op: const_op.get_operation(),
-                    res_idx: 0,
-                },
+                const_op.get_operation().deref(ctx).get_result(0),
                 Some(const_op.get_operation()),
             ))
         }
@@ -5069,10 +4923,7 @@ fn translate_constant_value_from_bytes(
             }
 
             Ok((
-                Value::OpResult {
-                    op: float_op.get_operation(),
-                    res_idx: 0,
-                },
+                float_op.get_operation().deref(ctx).get_result(0),
                 Some(float_op.get_operation()),
             ))
         }
@@ -5115,10 +4966,7 @@ fn translate_constant_value_from_bytes(
             }
 
             Ok((
-                Value::OpResult {
-                    op: float_op.get_operation(),
-                    res_idx: 0,
-                },
+                float_op.get_operation().deref(ctx).get_result(0),
                 Some(float_op.get_operation()),
             ))
         }
@@ -5161,10 +5009,7 @@ fn translate_constant_value_from_bytes(
             }
 
             Ok((
-                Value::OpResult {
-                    op: float_op.get_operation(),
-                    res_idx: 0,
-                },
+                float_op.get_operation().deref(ctx).get_result(0),
                 Some(float_op.get_operation()),
             ))
         }
@@ -5205,14 +5050,12 @@ fn translate_constant_value_from_bytes(
                 const_op.get_operation().insert_at_front(block_ptr, ctx);
             }
 
+            let const_value = const_op.get_operation().deref(ctx).get_result(0);
             let cast_op = Operation::new(
                 ctx,
                 MirCastOp::get_concrete_op_info(),
                 vec![ty_ptr],
-                vec![Value::OpResult {
-                    op: const_op.get_operation(),
-                    res_idx: 0,
-                }],
+                vec![const_value],
                 vec![],
                 0,
             );
@@ -5221,13 +5064,7 @@ fn translate_constant_value_from_bytes(
                 .set_attr_cast_kind(ctx, MirCastKindAttr::PointerWithExposedProvenance);
             cast_op.insert_after(ctx, const_op.get_operation());
 
-            Ok((
-                Value::OpResult {
-                    op: cast_op,
-                    res_idx: 0,
-                },
-                Some(cast_op),
-            ))
+            Ok((cast_op.deref(ctx).get_result(0), Some(cast_op)))
         }
         ValueKind::Unsupported(ty_name) => input_err!(
             loc,
@@ -5306,7 +5143,7 @@ fn translate_zero_sized_constant_value(
         op.insert_at_front(block_ptr, ctx);
     }
 
-    Ok((Value::OpResult { op, res_idx: 0 }, Some(op)))
+    Ok((op.deref(ctx).get_result(0), Some(op)))
 }
 
 /// Translate ADT aggregate operands, synthesizing omitted runtime-ZST fields when

@@ -784,7 +784,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 [[package]]
 name = "pliron"
 version = "0.14.0"
-source = "git+https://github.com/vaivaswatha/pliron#536d7a9b245b79d70b47d0fb84e500b4c6858e4a"
+source = "git+https://github.com/vaivaswatha/pliron#9891be40345f1a6a06a784b5cc11ccd56ac88b52"
 dependencies = [
  "awint",
  "combine",
@@ -806,7 +806,7 @@ dependencies = [
 [[package]]
 name = "pliron-derive"
 version = "0.14.0"
-source = "git+https://github.com/vaivaswatha/pliron#536d7a9b245b79d70b47d0fb84e500b4c6858e4a"
+source = "git+https://github.com/vaivaswatha/pliron#9891be40345f1a6a06a784b5cc11ccd56ac88b52"
 dependencies = [
  "combine",
  "convert_case",

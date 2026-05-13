@@ -26,7 +26,6 @@ use pliron::input_err;
 use pliron::location::{Located, Location};
 use pliron::op::Op;
 use pliron::operation::Operation;
-use pliron::value::Value;
 use rustc_public::mir;
 /// Emits `clock()`: Read 32-bit GPU clock counter.
 ///
@@ -68,10 +67,7 @@ pub fn emit_clock(
         clock_op.insert_at_front(block_ptr, ctx);
     }
 
-    let result_value = Value::OpResult {
-        op: clock_op,
-        res_idx: 0,
-    };
+    let result_value = clock_op.deref(ctx).get_result(0);
     emit_store_result_and_goto(
         ctx,
         destination,
@@ -126,10 +122,7 @@ pub fn emit_clock64(
         clock_op.insert_at_front(block_ptr, ctx);
     }
 
-    let result_value = Value::OpResult {
-        op: clock_op,
-        res_idx: 0,
-    };
+    let result_value = clock_op.deref(ctx).get_result(0);
     emit_store_result_and_goto(
         ctx,
         destination,
@@ -362,10 +355,7 @@ pub fn emit_vprintf(
     }
 
     // Store the result (i32) in the destination
-    let result_value = Value::OpResult {
-        op: vprintf_op,
-        res_idx: 0,
-    };
+    let result_value = vprintf_op.deref(ctx).get_result(0);
     emit_store_result_and_goto(
         ctx,
         destination,
