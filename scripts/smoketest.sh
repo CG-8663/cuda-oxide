@@ -212,6 +212,10 @@ verdict_standard() {
     local log="$1" ec="$2"
     if [[ ${ec} -gt 128 ]]; then echo "FAIL (crashed, signal $((ec - 128)))"; return 1; fi
     if [[ ${ec} -ne 0 ]]; then   echo "FAIL (exit=${ec})";                    return 1; fi
+    if grep -qE '(^|[[:space:]])(✗[[:space:]]+FAILED|FAILED:|FAILED!|FAIL[[:space:]:])' "${log}"; then
+        echo "FAIL (failure marker in output)"
+        return 1
+    fi
     if grep -qE 'SUCCESS|PASS|Complete' "${log}"; then echo "PASS"; return 0; fi
     echo "FAIL (no success marker)"
     return 1
