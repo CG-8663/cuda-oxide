@@ -81,4 +81,24 @@ jobs:
           sysroot="$(rustc --print sysroot)"
           export LIBRARY_PATH="${sysroot}/lib:${LIBRARY_PATH:-}"
           export LD_LIBRARY_PATH="${sysroot}/lib:${LD_LIBRARY_PATH:-}"
+
+          # cuda-bindings emits `cargo:rustc-link-lib=dylib=cuda`, and the
+          # linker stamps the stub's SONAME (`libcuda.so.1`) into the test
+          # binary's DT_NEEDED. The `cudart-dev` sub-package only ships the
+          # link-time stub named `libcuda.so`, with no `libcuda.so.1` alias.
+          # Binaries that actually reference `cu*` symbols (cuda-core,
+          # cuda-async) keep the NEEDED entry and fail to load at runtime
+          # on a GPU-less runner. Binaries whose `cu*` calls were pruned by
+          # `--as-needed` (e.g. cuda-host's tests) load fine without it.
+          # Create a writable shadow with the `libcuda.so.1` filename
+          # pointing at the stub, and prepend it to LD_LIBRARY_PATH. The
+          # stub returns errors for any real driver call, which is fine
+          # because the unit tests selected here never invoke one.
+          if [ -n "${CUDA_TOOLKIT_PATH:-}" ] && [ -f "${CUDA_TOOLKIT_PATH}/lib64/stubs/libcuda.so" ]; then
+            stub_shadow="${RUNNER_TEMP}/libcuda-stub"
+            mkdir -p "${stub_shadow}"
+            ln -sf "${CUDA_TOOLKIT_PATH}/lib64/stubs/libcuda.so" "${stub_shadow}/libcuda.so.1"
+            export LD_LIBRARY_PATH="${stub_shadow}:${LD_LIBRARY_PATH}"
+          fi
+
           cargo test -p ${{ matrix.package }} ${{ matrix.test_args || '--all-targets' }}
