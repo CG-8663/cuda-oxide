@@ -102,26 +102,31 @@ The codegen backend:
 ### Generic Kernel Naming
 
 Each monomorphization gets a unique PTX name derived from rustc's stable
-128-bit type-id hash:
+128-bit type-id hash. The on-wire name is one fixed-length hex chunk per
+kernel, regardless of how many generic parameters the kernel takes —
+the hash is taken over the *tuple* of generic args, not each arg
+separately:
 
-| Rust Code      | PTX Entry Point                                    |
-|----------------|----------------------------------------------------|
-| `scale::<f32>` | `scale_TID_068dd2e224a3411487a6e9e8d506443e`       |
-| `scale::<i32>` | `scale_TID_56ced5e4a15bd89050bb9674fa2df013`       |
-| `add::<f32>`   | `add_TID_068dd2e224a3411487a6e9e8d506443e`         |
+| Rust Code      | PTX Entry Point (hash of `(T,)`)             |
+|----------------|----------------------------------------------|
+| `scale::<f32>` | `scale_TID_<32 hex chars for `(f32,)`>`      |
+| `scale::<i32>` | `scale_TID_<32 hex chars for `(i32,)`>`      |
+| `add::<f32>`   | `add_TID_<32 hex chars for `(f32,)`>`        |
 
-The hex values shown are illustrative — they reflect rustc's
-`tcx.type_id_hash(ty)` output for those types on `nightly-2026-04-03`.
-Same toolchain, same Rust types, same hex.
+The actual hex values come from rustc's
+`tcx.type_id_hash(Ty::new_tup(tcx, &args))` on the toolchain pinned in
+`rust-toolchain.toml`. Same toolchain, same Rust types, same hex.
 
 The naming scheme:
 - Base name extracted from `cuda_oxide_kernel_<hash>_<name>` via
-  `reserved_oxide_symbols::kernel_base_name`
-- Suffix: `_TID_` + 32 lowercase hex chars per generic type argument,
-  joined with `_`. Each chunk is `tcx.type_id_hash(arg).as_u128()` on
-  the backend and `cuda_host::type_id_u128::<P>()` on the host — both
-  produce the same value for the same Rust type within one rustc
-  invocation.
+  `reserved_oxide_symbols::kernel_base_name`.
+- Suffix: `_TID_` + 32 lowercase hex chars.
+- Backend computes the hash as
+  `tcx.type_id_hash(Ty::new_tup(tcx, &generic_args)).as_u128()`.
+- Host computes the same hash as
+  `cuda_host::type_id_u128::<(T0, T1, ...,)>()`.
+- Both go through `erase_and_anonymize_regions` + stable hash within
+  one rustc invocation, so the values match byte-for-byte.
 
 ### Cross-Crate Intrinsic Handling
 

@@ -156,17 +156,22 @@ cuda_launch! {
 
 ### PTX Name Resolution
 
-| Kernel Kind   | PTX Name                                                                   |
-|:--------------|:---------------------------------------------------------------------------|
-| Non-generic   | Original function name (`vecadd`)                                          |
-| Generic       | `{name}_TID_{hex32}[_{hex32}...]` (one hex chunk per generic type arg)     |
-| Closure-only  | Same as Generic — the closure type contributes one of the `{hex32}` chunks |
+| Kernel Kind   | PTX Name                                                |
+|:--------------|:--------------------------------------------------------|
+| Non-generic   | Original function name (`vecadd`)                       |
+| Generic       | `{name}_TID_{hex32}` (fixed length regardless of arity) |
+| Closure-only  | Same as Generic — closure type is in the hashed tuple   |
 
-Each `{hex32}` is rustc's stable 128-bit type-id hash for the
-corresponding generic argument, rendered as 32 lowercase hex chars. The
-backend computes the hash via `tcx.type_id_hash(ty).as_u128()`; the host
-side computes the same value via `cuda_host::type_id_u128::<T>()`. Both
-sides share a single rustc invocation, so the strings match byte-for-byte.
+`{hex32}` is rustc's stable 128-bit type-id hash for the *tuple* of
+generic arguments `(T0, T1, ...)`, rendered as 32 lowercase hex chars.
+The backend computes it via
+`tcx.type_id_hash(Ty::new_tup(tcx, &args)).as_u128()`; the host computes
+the same value via `cuda_host::type_id_u128::<(T0, T1, ...,)>()`. Both
+sides share a single rustc invocation and go through the same
+`erase_and_anonymize_regions` + stable-hash pipeline, so the strings
+match byte-for-byte. Hashing the tuple (not each arg separately) keeps
+the on-wire name a fixed `base.len() + 37` chars regardless of how many
+generic parameters the kernel takes.
 
 For generics, the macro forces monomorphization with a volatile pointer
 trick so the kernel appears in the codegen unit even without a host-side

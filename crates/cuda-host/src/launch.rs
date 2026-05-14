@@ -71,8 +71,8 @@ pub trait CudaKernel {
 ///
 /// impl<T: Copy + Mul<Output = T>> GenericCudaKernel for __scale_CudaKernel<T> {
 ///     fn ptx_name() -> &'static str {
-///         // "scale_TID_<hex32>" — one 32-char hex chunk per generic type
-///         // parameter, joined with '_'. The hash matches what the backend
+///         // "scale_TID_<hex32>" — one 32-char hex chunk for the entire
+///         // tuple of generic args. The hash matches what the backend
 ///         // wrote into the .ptx for the same monomorphization.
 ///     }
 /// }
@@ -80,11 +80,15 @@ pub trait CudaKernel {
 ///
 /// # PTX Naming Scheme
 ///
-/// Generic kernels are named `<base>_TID_<hex32>[_<hex32>...]`, where each
-/// `<hex32>` is `cuda_host::type_id_u128::<P>()` formatted as 32 lowercase
-/// hex chars for one generic type parameter `P`. The backend computes the
-/// same hash via `tcx.type_id_hash(ty).as_u128()`, so both ends of a
-/// single rustc invocation produce the same string for the same type.
+/// Generic kernels are named `<base>_TID_<hex32>`, where `<hex32>` is
+/// `cuda_host::type_id_u128::<(T0, T1, ...,)>()` for the *tuple* of the
+/// kernel's generic type parameters, rendered as 32 lowercase hex chars.
+/// The backend computes the same hash via
+/// `tcx.type_id_hash(Ty::new_tup(tcx, &args)).as_u128()`, so both ends of
+/// a single rustc invocation produce the same string for the same types.
+/// Hashing the tuple keeps the name fixed-length regardless of generic
+/// arity — PTX identifiers can be ~1024 chars but the name is repeated
+/// per kernel parameter, so a per-arg layout would blow up quickly.
 ///
 /// The bound on `ptx_name` is intentionally just whatever the kernel
 /// itself declared — typically `Copy` on the value-passed generics. No

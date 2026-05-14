@@ -15,6 +15,11 @@
 //! 128-bit value that `tcx.type_id_hash` does for that type, because both go
 //! through the same `erase_and_anonymize_regions` + stable-hash pipeline.
 //!
+//! In practice the macro layer calls this with a *tuple* type
+//! `(T0, T1, ...,)` so the on-wire PTX name is a single 32-char hex chunk
+//! regardless of the kernel's generic arity (see
+//! `crates/cuda-macros/src/lib.rs::generate_generic_cuda_kernel_impl`).
+//!
 //! Framing note for future contributors: `core::intrinsics::type_id` is an
 //! internal API and requires `#![feature(core_intrinsics)]` on the owning
 //! crate. cuda-oxide already ships against `rustc_private` and pins a
@@ -80,5 +85,26 @@ mod tests {
             type_id_u128::<T>()
         }
         assert_ne!(id(&cl1), id(&cl2));
+    }
+
+    #[test]
+    fn singleton_tuple_is_not_bare_type() {
+        // Locks in the macro contract: `(T,)` must hash differently from
+        // `T`, because the macro side relies on the trailing comma to keep
+        // the 1-tuple a real tuple. If this regresses, the host's
+        // ptx_name will silently drift from the backend's
+        // Ty::new_tup(tcx, &[T]).
+        assert_ne!(type_id_u128::<f32>(), type_id_u128::<(f32,)>());
+        assert_ne!(type_id_u128::<i32>(), type_id_u128::<(i32,)>());
+    }
+
+    #[test]
+    fn tuple_hash_changes_with_any_component() {
+        // Confirms the per-tuple hash is sensitive to each generic
+        // argument — necessary for the typed launch path to distinguish
+        // monomorphizations.
+        assert_ne!(type_id_u128::<(f32, i32)>(), type_id_u128::<(f32, u32)>());
+        assert_ne!(type_id_u128::<(f32, i32)>(), type_id_u128::<(i32, i32)>());
+        assert_ne!(type_id_u128::<(f32, i32)>(), type_id_u128::<(i32, f32)>()); // order matters
     }
 }

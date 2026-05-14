@@ -185,6 +185,10 @@ fn generated_cuda_module_api_typechecks() {
 // output. The backend's `compute_kernel_export_name` in
 // `crates/rustc-codegen-cuda/src/collector.rs` follows the same scheme, so
 // any drift here is the canary that the two sides have diverged again.
+//
+// On-wire shape: `<base>_TID_<hex32>`. The single `<hex32>` is the hash of
+// the tuple of generic args, not one hash per arg — so the length stays
+// constant regardless of generic arity.
 // =============================================================================
 
 use cuda_host::GenericCudaKernel;
@@ -193,13 +197,10 @@ fn is_lowercase_hex_32(s: &str) -> bool {
     s.len() == 32 && s.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
 }
 
-fn split_tid_name<'a>(name: &'a str, base: &str) -> Vec<&'a str> {
-    // "<base>_TID_<32hex>(_<32hex>)*" -> Vec of the hex chunks
+fn split_tid_name<'a>(name: &'a str, base: &str) -> &'a str {
     let expected_prefix = format!("{base}_TID_");
-    let suffix = name
-        .strip_prefix(&expected_prefix)
-        .unwrap_or_else(|| panic!("expected `{name}` to start with `{expected_prefix}`"));
-    suffix.split('_').collect()
+    name.strip_prefix(&expected_prefix)
+        .unwrap_or_else(|| panic!("expected `{name}` to start with `{expected_prefix}`"))
 }
 
 #[test]
@@ -211,16 +212,10 @@ fn ptx_name_for_closure_generic_matches_tid_scheme() {
     }
 
     let name = name_for(op);
-    let chunks = split_tid_name(name, "copy_closure");
-    assert_eq!(
-        chunks.len(),
-        1,
-        "copy_closure has 1 generic param (F); got `{name}` with chunks {chunks:?}"
-    );
+    let hex = split_tid_name(name, "copy_closure");
     assert!(
-        is_lowercase_hex_32(chunks[0]),
-        "expected 32 lowercase hex chars for the F hash; got `{}`",
-        chunks[0]
+        is_lowercase_hex_32(hex),
+        "expected `<base>_TID_<32hex>`; got `{name}` (suffix `{hex}`)"
     );
 }
 

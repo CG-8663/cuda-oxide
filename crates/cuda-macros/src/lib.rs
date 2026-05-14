@@ -1472,18 +1472,20 @@ fn generate_simple_kernel(mut input: ItemFn) -> TokenStream {
 /// pub struct __scale_CudaKernel<T>(PhantomData<T>);
 /// impl<T> GenericCudaKernel for __scale_CudaKernel<T> {
 ///     fn ptx_name() -> &'static str {
-///         // "scale_TID_<hex32>" — one 32-char hex chunk per generic
-///         // type parameter, concatenated with '_'.
+///         // "scale_TID_<hex32>" — one 32-char hex chunk for the
+///         // 1-tuple `(T,)`. For an N-generic kernel we hash the
+///         // N-tuple `(T0, T1, ...)` so the name length is constant
+///         // regardless of arity.
 ///     }
 /// }
 /// ```
 ///
 /// The body computes the same string the backend writes into the PTX:
-/// `<base>_TID_<hex32>[_<hex32>...]`, with each chunk being
-/// `cuda_host::type_id_u128::<P>()` for one of the kernel's generic
-/// type parameters. The backend's `compute_kernel_export_name` uses
-/// `tcx.type_id_hash(ty).as_u128()` for the same hash, so the two
-/// strings match byte-for-byte.
+/// `<base>_TID_<hex32>`, where `<hex32>` is
+/// `cuda_host::type_id_u128::<(T0, T1, ...,)>()` rendered as 32
+/// lowercase hex chars. The backend's `compute_kernel_export_name`
+/// computes the same hash via `Ty::new_tup(tcx, &[T0, T1, ...])` +
+/// `tcx.type_id_hash(...)`, so the two strings match byte-for-byte.
 ///
 /// Bound on the impl is `where_clause` verbatim — typically `Copy` on
 /// each value-passed generic. We deliberately do not add `'static`:
@@ -1521,18 +1523,14 @@ fn generate_generic_cuda_kernel_impl(
             }
         }
     } else {
+        // Trailing comma in the tuple type expression keeps the
+        // arity-1 case `(T,)` a real 1-tuple — without it,
+        // `(T)` would just be a parenthesized type and the hash
+        // would differ from the backend's `Ty::new_tup(tcx, &[T])`.
         quote! {
             fn ptx_name() -> &'static str {
-                use core::fmt::Write as _;
-                let mut name = String::with_capacity(#base_name.len() + 5 + 33 * 4);
-                name.push_str(#base_name);
-                name.push_str("_TID");
-                #(
-                    {
-                        let __hash = ::cuda_host::type_id_u128::<#type_param_names>();
-                        let _ = write!(&mut name, "_{:032x}", __hash);
-                    }
-                )*
+                let __hash = ::cuda_host::type_id_u128::<( #(#type_param_names,)* )>();
+                let name = format!("{}_TID_{:032x}", #base_name, __hash);
                 Box::leak(name.into_boxed_str())
             }
         }

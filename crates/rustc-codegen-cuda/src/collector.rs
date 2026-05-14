@@ -178,20 +178,28 @@ pub fn sanitize_ptx_name(name: &str) -> String {
 ///
 /// Naming scheme:
 /// - Non-generic kernel (no type args)  -> `base_name`
-/// - Generic kernel with N type args    -> `base_name + "_TID_" + hex32(arg0) + "_" + ... + hex32(argN-1)`
+/// - Generic kernel with N type args    -> `base_name + "_TID_" + hex32`
 ///
-/// Each `hex32(arg)` is `tcx.type_id_hash(arg).as_u128()` formatted as 32
-/// lowercase hex chars. This matches `cuda_host::type_id_u128::<T>()` on
-/// the host side: both go through the same `erase_and_anonymize_regions`
-/// + stable-hash pipeline, so the same Rust type produces the same hex
-/// chunk on both sides.
+/// where `hex32` is the lowercase hex form of
+/// `tcx.type_id_hash(tuple_ty).as_u128()` and `tuple_ty` is
+/// `Ty::new_tup(tcx, &[arg0, arg1, ...])`. We hash the tuple — not each
+/// arg separately — so the on-wire name stays at a fixed length
+/// (`base.len() + 37`) regardless of generic arity. PTX identifiers can
+/// be ~1024 chars, but the name shows up many times per kernel
+/// (`<name>_param_N`) and a per-arg layout would grow linearly with the
+/// number of generic parameters.
 ///
-/// The scheme is uniform — closures, named types, integers, references —
-/// all funnel through one path. That intentionally collapses the older
-/// closure-special-case (`_L<line>C<col>`) and the older named-type case
-/// (`_Debug-formatted_name`) into the same shape, so closure-generic
-/// kernels (`map<T, F: Fn(T) -> T + Copy>`) can finally be launched
-/// through the typed `module.<kernel>(...)` API. The host-side
+/// The host computes the same value via
+/// `cuda_host::type_id_u128::<(T0, T1, ...)>()`. Both sides go through
+/// `erase_and_anonymize_regions` + the same stable-hash pipeline, so the
+/// 1-tuple `(T,)` from the macro matches `Ty::new_tup(tcx, &[T])` here.
+///
+/// The scheme is uniform — closures, named types, integers, references
+/// — all funnel through one path. That intentionally collapses the
+/// older closure-special-case (`_L<line>C<col>`) and the older named-
+/// type case (`_Debug-formatted_name`) into the same shape, so closure-
+/// generic kernels (`map<T, F: Fn(T) -> T + Copy>`) can finally be
+/// launched through the typed `module.<kernel>(...)` API. The host-side
 /// `GenericCudaKernel::ptx_name` impl emitted by `#[kernel]` /
 /// `#[cuda_module]` produces the exact same string from the type
 /// parameters it sees at the call site.
@@ -210,15 +218,9 @@ fn compute_kernel_export_name<'tcx>(
         return base_name.to_string();
     }
 
-    let mut out = String::with_capacity(base_name.len() + 5 + type_args.len() * 33);
-    out.push_str(base_name);
-    out.push_str("_TID");
-    for ty in &type_args {
-        let hash = tcx.type_id_hash(*ty).as_u128();
-        use std::fmt::Write as _;
-        write!(&mut out, "_{:032x}", hash).expect("writing to String is infallible");
-    }
-    out
+    let tuple_ty = Ty::new_tup(tcx, &type_args);
+    let hash = tcx.type_id_hash(tuple_ty).as_u128();
+    format!("{}_TID_{:032x}", base_name, hash)
 }
 
 /// A function collected for GPU compilation.
@@ -478,9 +480,10 @@ pub fn collect_device_functions<'tcx>(
                 // Compute a unique export name for this kernel monomorphization.
                 // Non-generic kernels keep the base name (e.g. "vecadd").
                 // Generic kernels (including closure-generic) get
-                // "<base>_TID_<hex32>[_<hex32>...]" with one chunk per generic
-                // type argument. The host-side `ptx_name()` emitted by
-                // `#[kernel]` / `#[cuda_module]` computes the same string.
+                // "<base>_TID_<hex32>", where <hex32> is the hash of the
+                // *tuple* of generic args (constant length regardless of
+                // arity). The host-side `ptx_name()` emitted by `#[kernel]`
+                // / `#[cuda_module]` computes the same string.
                 let export_name = compute_kernel_export_name(tcx, *instance, &base_name);
 
                 if verbose {
