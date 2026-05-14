@@ -124,9 +124,22 @@ impl<T: Copy> KernelScalar for T {}
 /// The pointed-to value must remain alive until the launch submission call has
 /// returned. The generated `#[cuda_module]` launch methods create stack locals
 /// for this purpose before calling this helper.
+///
+/// # Zero-sized values
+///
+/// `T` is allowed to be zero-sized (e.g. a closure with no captures, a unit
+/// struct). When `size_of::<T>() == 0` the backend drops the corresponding
+/// `.param` entirely from the kernel's PTX entry point — the CUDA driver
+/// reads no bytes for it — so we must also skip the host push to keep the
+/// driver's `kernelParams[]` indices aligned with the kernel's declared
+/// parameters. The check is a `const`-fold for monomorphized types and
+/// disappears in release builds for non-ZSTs.
 #[inline]
 #[doc(hidden)]
 pub fn push_kernel_scalar<T: KernelScalar>(args: &mut Vec<*mut c_void>, value: &mut T) {
+    if std::mem::size_of::<T>() == 0 {
+        return;
+    }
     args.push(value as *mut T as *mut c_void);
 }
 

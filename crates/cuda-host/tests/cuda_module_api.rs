@@ -194,7 +194,9 @@ fn generated_cuda_module_api_typechecks() {
 use cuda_host::GenericCudaKernel;
 
 fn is_lowercase_hex_32(s: &str) -> bool {
-    s.len() == 32 && s.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+    s.len() == 32
+        && s.chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
 }
 
 fn split_tid_name<'a>(name: &'a str, base: &str) -> &'a str {
