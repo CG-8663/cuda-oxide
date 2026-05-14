@@ -93,25 +93,35 @@ The codegen backend:
 1. Finds `cuda_oxide_kernel_<hash>_scale` marked with `#[kernel]` attribute (the
    `<hash>` is the fixed `246e25db_` suffix owned by `crates/reserved-oxide-symbols/`)
 2. Discovers all monomorphizations: `scale::<f32>`, `scale::<i32>`, etc.
-3. Generates unique PTX entry points: `scale__f32`, `scale__i32`
+3. Generates unique PTX entry points: `scale_TID_<hex32>`, one entry per
+   monomorphization (see "Generic Kernel Naming" below)
 4. Collects device helper functions transitively
 
 ## Key Implementation Details
 
 ### Generic Kernel Naming
 
-Each monomorphization gets a unique PTX name:
+Each monomorphization gets a unique PTX name derived from rustc's stable
+128-bit type-id hash:
 
-| Rust Code      | PTX Entry Point |
-|----------------|-----------------|
-| `scale::<f32>` | `scale__f32`    |
-| `scale::<i32>` | `scale__i32`    |
-| `add::<f32>`   | `add__f32`      |
+| Rust Code      | PTX Entry Point                                    |
+|----------------|----------------------------------------------------|
+| `scale::<f32>` | `scale_TID_068dd2e224a3411487a6e9e8d506443e`       |
+| `scale::<i32>` | `scale_TID_56ced5e4a15bd89050bb9674fa2df013`       |
+| `add::<f32>`   | `add_TID_068dd2e224a3411487a6e9e8d506443e`         |
+
+The hex values shown are illustrative — they reflect rustc's
+`tcx.type_id_hash(ty)` output for those types on `nightly-2026-04-03`.
+Same toolchain, same Rust types, same hex.
 
 The naming scheme:
 - Base name extracted from `cuda_oxide_kernel_<hash>_<name>` via
   `reserved_oxide_symbols::kernel_base_name`
-- Type suffix appended: `__<type_name>`
+- Suffix: `_TID_` + 32 lowercase hex chars per generic type argument,
+  joined with `_`. Each chunk is `tcx.type_id_hash(arg).as_u128()` on
+  the backend and `cuda_host::type_id_u128::<P>()` on the host — both
+  produce the same value for the same Rust type within one rustc
+  invocation.
 
 ### Cross-Crate Intrinsic Handling
 

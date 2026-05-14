@@ -177,3 +177,77 @@ fn generated_cuda_module_api_typechecks() {
     #[cfg(feature = "async")]
     let _ = generated_owned_async_methods_accept_owned_buffers;
 }
+
+// =============================================================================
+// PTX naming contract
+//
+// These tests pin down the shape of the host-side `GenericCudaKernel::ptx_name`
+// output. The backend's `compute_kernel_export_name` in
+// `crates/rustc-codegen-cuda/src/collector.rs` follows the same scheme, so
+// any drift here is the canary that the two sides have diverged again.
+// =============================================================================
+
+use cuda_host::GenericCudaKernel;
+
+fn is_lowercase_hex_32(s: &str) -> bool {
+    s.len() == 32 && s.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+}
+
+fn split_tid_name<'a>(name: &'a str, base: &str) -> Vec<&'a str> {
+    // "<base>_TID_<32hex>(_<32hex>)*" -> Vec of the hex chunks
+    let expected_prefix = format!("{base}_TID_");
+    let suffix = name
+        .strip_prefix(&expected_prefix)
+        .unwrap_or_else(|| panic!("expected `{name}` to start with `{expected_prefix}`"));
+    suffix.split('_').collect()
+}
+
+#[test]
+fn ptx_name_for_closure_generic_matches_tid_scheme() {
+    let offset = 5u32;
+    let op = move |x: u32| x + offset;
+    fn name_for<F: Fn(u32) -> u32 + Copy>(_f: F) -> &'static str {
+        <kernels::__copy_closure_CudaKernel<F> as GenericCudaKernel>::ptx_name()
+    }
+
+    let name = name_for(op);
+    let chunks = split_tid_name(name, "copy_closure");
+    assert_eq!(
+        chunks.len(),
+        1,
+        "copy_closure has 1 generic param (F); got `{name}` with chunks {chunks:?}"
+    );
+    assert!(
+        is_lowercase_hex_32(chunks[0]),
+        "expected 32 lowercase hex chars for the F hash; got `{}`",
+        chunks[0]
+    );
+}
+
+#[test]
+fn ptx_name_is_stable_per_closure_type() {
+    let offset = 7u32;
+    let op = move |x: u32| x + offset;
+    fn name_for<F: Fn(u32) -> u32 + Copy>(_f: F) -> &'static str {
+        <kernels::__copy_closure_CudaKernel<F> as GenericCudaKernel>::ptx_name()
+    }
+    let a = name_for(op);
+    let b = name_for(op);
+    assert_eq!(a, b, "same closure type must produce the same PTX name");
+}
+
+#[test]
+fn ptx_name_separates_distinct_closure_types() {
+    let factor = 2u32;
+    let op1 = move |x: u32| x + factor;
+    let op2 = move |x: u32| x * factor;
+    fn name_for<F: Fn(u32) -> u32 + Copy>(_f: F) -> &'static str {
+        <kernels::__copy_closure_CudaKernel<F> as GenericCudaKernel>::ptx_name()
+    }
+    let n1 = name_for(op1);
+    let n2 = name_for(op2);
+    assert_ne!(
+        n1, n2,
+        "two distinct closure literals must produce different PTX names ({n1} vs {n2})"
+    );
+}

@@ -71,17 +71,28 @@ pub trait CudaKernel {
 ///
 /// impl<T: Copy + Mul<Output = T>> GenericCudaKernel for __scale_CudaKernel<T> {
 ///     fn ptx_name() -> &'static str {
-///         // Hash-based name that matches what the backend generates
-///         // e.g., "scale_a1b2c3d4" for scale::<f32>
+///         // "scale_TID_<hex32>" — one 32-char hex chunk per generic type
+///         // parameter, joined with '_'. The hash matches what the backend
+///         // wrote into the .ptx for the same monomorphization.
 ///     }
 /// }
 /// ```
 ///
 /// # PTX Naming Scheme
 ///
-/// Generic kernels use a hash of `std::any::type_name::<Self>()` to generate
-/// a stable, unique PTX name for each instantiation. The backend uses the same
-/// scheme when generating PTX.
+/// Generic kernels are named `<base>_TID_<hex32>[_<hex32>...]`, where each
+/// `<hex32>` is `cuda_host::type_id_u128::<P>()` formatted as 32 lowercase
+/// hex chars for one generic type parameter `P`. The backend computes the
+/// same hash via `tcx.type_id_hash(ty).as_u128()`, so both ends of a
+/// single rustc invocation produce the same string for the same type.
+///
+/// The bound on `ptx_name` is intentionally just whatever the kernel
+/// itself declared — typically `Copy` on the value-passed generics. No
+/// `'static` is added: the helper `cuda_host::type_id_u128` uses
+/// `core::intrinsics::type_id`, which is bound `T: ?Sized` rather than
+/// `T: 'static`, so closures that borrow non-`'static` data still go
+/// through the typed launch path (just like they did under the legacy
+/// `type_name`-based scheme).
 pub trait GenericCudaKernel {
     /// Get the PTX entry point name for this specific instantiation.
     ///

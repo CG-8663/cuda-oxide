@@ -156,13 +156,21 @@ cuda_launch! {
 
 ### PTX Name Resolution
 
-| Kernel Kind    | PTX Name                                          |
-|----------------|---------------------------------------------------|
-| Non-generic    | Original function name (`vecadd`)                 |
-| Generic        | `{name}__{sanitized_types}` via `type_name::<T>`  |
-| Closure        | `{name}_L{line}C{col}` via source location        |
+| Kernel Kind   | PTX Name                                                                   |
+|:--------------|:---------------------------------------------------------------------------|
+| Non-generic   | Original function name (`vecadd`)                                          |
+| Generic       | `{name}_TID_{hex32}[_{hex32}...]` (one hex chunk per generic type arg)     |
+| Closure-only  | Same as Generic — the closure type contributes one of the `{hex32}` chunks |
 
-For generics, the macro forces monomorphization with a volatile pointer trick so the kernel appears in the codegen unit even without a host-side call.
+Each `{hex32}` is rustc's stable 128-bit type-id hash for the
+corresponding generic argument, rendered as 32 lowercase hex chars. The
+backend computes the hash via `tcx.type_id_hash(ty).as_u128()`; the host
+side computes the same value via `cuda_host::type_id_u128::<T>()`. Both
+sides share a single rustc invocation, so the strings match byte-for-byte.
+
+For generics, the macro forces monomorphization with a volatile pointer
+trick so the kernel appears in the codegen unit even without a host-side
+call.
 
 ## `cuda_launch_async!` -- Lower-Level Async Kernel Launch
 

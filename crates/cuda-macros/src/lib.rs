@@ -1335,44 +1335,40 @@ fn generate_generic_kernel_no_instantiation(mut input: ItemFn) -> TokenStream {
         })
         .collect();
 
-    // Generate the instantiate helper only if we found a closure parameter
+    let marker_name = format_ident!("__{}_CudaKernel", fn_name);
     let instantiate_helper = if let Some(closure_type_name) = closure_generic {
-        // Find which parameter uses the closure type
         if let Some((_closure_idx, (_closure_name, closure_type))) =
             find_closure_param(&args_info, &closure_type_name)
         {
-            // Build the function type for the kernel (for the function pointer)
             let arg_types: Vec<TokenStream2> =
                 args_info.iter().map(|(_, ty)| quote! { #ty }).collect();
 
             quote! {
                 /// Auto-generated helper to force kernel monomorphization.
-                /// Takes the closure and its source location, returns the PTX export name.
-                /// This forces rustc to monomorphize the kernel with the closure type
-                /// WITHOUT actually calling the kernel (which would panic on host).
                 ///
-                /// The line/col parameters come from the proc-macro's span, ensuring the
-                /// export name matches what the backend generates.
+                /// Takes the closure by value so its anonymous type is bound
+                /// to the generic parameter `F` at the call site, then forces
+                /// rustc to generate a CGU entry for the concrete
+                /// `#kernel_name::<...>` instantiation. Returns the PTX
+                /// export name produced by the kernel's
+                /// `GenericCudaKernel::ptx_name()` impl, which is the single
+                /// source of truth for the on-wire name on the host side.
+                ///
+                /// Bound is intentionally not `'static`: closures that
+                /// borrow non-`'static` data (e.g. capture `&[T]`) still
+                /// monomorphize cleanly. The caller is responsible for
+                /// keeping that borrow alive across the asynchronous launch
+                /// — `cuda_host::type_id_u128` does not enforce this.
                 #[doc(hidden)]
                 #[inline(never)]
-                #vis fn #instantiate_name #generics (_f: #closure_type, line: u32, col: u32) -> &'static str #where_clause {
-                    // Force monomorphization by referencing the kernel with explicit type params
-                    // CRITICAL: Use volatile write/read to prevent optimization from eliminating
-                    // the function pointer reference. Without this, the `let _ = ...` gets DCE'd
-                    // and rustc doesn't generate the CGU entry.
+                #vis fn #instantiate_name #generics (_f: #closure_type) -> &'static str #where_clause {
                     let __kernel_ptr = #kernel_name::<#(#generic_param_names),*> as fn(#(#arg_types),*) as *const ();
                     unsafe {
                         let mut __force_mono: *const () = core::ptr::null();
                         core::ptr::write_volatile(&mut __force_mono, __kernel_ptr);
                         let _ = core::ptr::read_volatile(&__force_mono);
                     }
-                    // Return the PTX export name - based on source location
-                    // The backend uses the same naming scheme: "{kernel}_L{line}C{col}"
-                    // Leak a formatted string (only happens once per monomorphization)
-                    let name = std::boxed::Box::leak(
-                        format!("{}_L{}C{}", stringify!(#fn_name), line, col).into_boxed_str()
-                    );
-                    name
+                    <#marker_name::<#(#generic_param_names),*> as cuda_host::GenericCudaKernel>::ptx_name()
                 }
             }
         } else {
@@ -1470,16 +1466,33 @@ fn generate_simple_kernel(mut input: ItemFn) -> TokenStream {
 
 /// Generate the GenericCudaKernel trait implementation for a generic kernel.
 ///
-/// For generic kernels like `fn scale<T>()`, we generate:
+/// For generic kernels like `fn scale<T>()`, emits:
+///
 /// ```ignore
 /// pub struct __scale_CudaKernel<T>(PhantomData<T>);
 /// impl<T> GenericCudaKernel for __scale_CudaKernel<T> {
-///     fn ptx_name() -> &'static str { ... }
+///     fn ptx_name() -> &'static str {
+///         // "scale_TID_<hex32>" — one 32-char hex chunk per generic
+///         // type parameter, concatenated with '_'.
+///     }
 /// }
 /// ```
 ///
-/// The PTX name is computed at runtime based on `std::any::type_name::<Self>()`.
-/// The backend uses the same naming scheme when generating PTX.
+/// The body computes the same string the backend writes into the PTX:
+/// `<base>_TID_<hex32>[_<hex32>...]`, with each chunk being
+/// `cuda_host::type_id_u128::<P>()` for one of the kernel's generic
+/// type parameters. The backend's `compute_kernel_export_name` uses
+/// `tcx.type_id_hash(ty).as_u128()` for the same hash, so the two
+/// strings match byte-for-byte.
+///
+/// Bound on the impl is `where_clause` verbatim — typically `Copy` on
+/// each value-passed generic. We deliberately do not add `'static`:
+/// `type_id_u128` has bound `T: ?Sized`, so closure types that borrow
+/// non-`'static` data still satisfy the marker's bounds and can be
+/// launched through the typed `module.<kernel>(...)` path. Keeping the
+/// borrow alive across `stream.synchronize()` remains the caller's
+/// responsibility, exactly as it was under the previous `type_name`
+/// scheme.
 fn generate_generic_cuda_kernel_impl(
     fn_name: &Ident,
     generics: &syn::Generics,
@@ -1488,7 +1501,6 @@ fn generate_generic_cuda_kernel_impl(
     let marker_name = format_ident!("__{}_CudaKernel", fn_name);
     let base_name = fn_name.to_string();
 
-    // Extract just the type parameters (for PhantomData and impl)
     let type_params: Vec<_> = generics.params.iter().collect();
     let type_param_names: Vec<_> = generics
         .params
@@ -1502,9 +1514,33 @@ fn generate_generic_cuda_kernel_impl(
         })
         .collect();
 
+    let ptx_name_body = if type_param_names.is_empty() {
+        quote! {
+            fn ptx_name() -> &'static str {
+                #base_name
+            }
+        }
+    } else {
+        quote! {
+            fn ptx_name() -> &'static str {
+                use core::fmt::Write as _;
+                let mut name = String::with_capacity(#base_name.len() + 5 + 33 * 4);
+                name.push_str(#base_name);
+                name.push_str("_TID");
+                #(
+                    {
+                        let __hash = ::cuda_host::type_id_u128::<#type_param_names>();
+                        let _ = write!(&mut name, "_{:032x}", __hash);
+                    }
+                )*
+                Box::leak(name.into_boxed_str())
+            }
+        }
+    };
+
     quote! {
-        /// Marker type for generic kernel, implements GenericCudaKernel trait.
-        /// The type parameters match the kernel's generic parameters.
+        /// Marker type for a generic kernel; implements `GenericCudaKernel`.
+        /// The type parameters mirror the kernel's generic parameters.
         #[doc(hidden)]
         #[allow(non_camel_case_types)]
         pub struct #marker_name<#(#type_params),*>(
@@ -1514,42 +1550,7 @@ fn generate_generic_cuda_kernel_impl(
         impl<#(#type_params),*> cuda_host::GenericCudaKernel for #marker_name<#(#type_param_names),*>
         #where_clause
         {
-            fn ptx_name() -> &'static str {
-                // Generate a unique PTX name for this specific monomorphization.
-                // Uses type_name to distinguish e.g. scale::<f32> from scale::<i32>.
-                //
-                // The naming scheme must match the collector's compute_generic_kernel_name()
-                // which uses the same approach: base_name + sanitized type params.
-                //
-                // We use a const fn to compute this at compile time, leaking a String
-                // to get a &'static str. This is acceptable as kernel names are few.
-                const BASE: &str = #base_name;
-
-                // Get the full type name which includes generic params
-                // e.g., "cross_crate_kernel::__scale_CudaKernel<f32>"
-                let full_name = core::any::type_name::<Self>();
-
-                // Extract just the type params from the angle brackets
-                // e.g., "<f32>" or "<i32, SomeType>"
-                if let Some(start) = full_name.find('<') {
-                    if let Some(end) = full_name.rfind('>') {
-                        let type_params = &full_name[start + 1..end];
-                        // Sanitize: replace invalid PTX chars with underscores
-                        let sanitized: String = type_params
-                            .chars()
-                            .map(|c| match c {
-                                'a'..='z' | 'A'..='Z' | '0'..='9' | '_' => c,
-                                _ => '_',
-                            })
-                            .collect();
-                        // Combine: "scale" + "__" + "f32" = "scale__f32"
-                        let name = format!("{}__{}", BASE, sanitized);
-                        return Box::leak(name.into_boxed_str());
-                    }
-                }
-                // Fallback: no type params, use base name
-                BASE
-            }
+            #ptx_name_body
         }
     }
 }
@@ -2841,16 +2842,25 @@ pub fn cuda_launch(input: TokenStream) -> TokenStream {
     let expanded = if has_closure {
         let (closure_expr, _captures) = closure_info.expect("has_closure but no closure_info");
 
-        let closure_span = closure_expr.span();
-        let start = closure_span.start();
-        let line = start.line as u32;
-        let col = start.column as u32;
+        // The on-wire PTX name now comes from the kernel's
+        // GenericCudaKernel::ptx_name() impl (via the instantiate helper),
+        // not from the closure literal's source span. The helper takes the
+        // closure by value purely to bind the anonymous closure type to the
+        // kernel's generic `F` parameter, forcing rustc to monomorphize.
+        let _ = closure_expr.span();
 
         quote! {
             {
                 let __closure = #closure_expr;
-                let __ptx_name: &'static str = #instantiate_name(__closure, #line, #col);
-                let __func = #module.load_function(__ptx_name).expect("Failed to load kernel function");
+                let __ptx_name: &'static str = #instantiate_name(__closure);
+                let __func = #module.load_function(__ptx_name).unwrap_or_else(|err| {
+                    panic!(
+                        "Failed to load kernel `{}` (expected PTX entry `{}`): {:?}",
+                        stringify!(#kernel_base),
+                        __ptx_name,
+                        err,
+                    )
+                });
 
                 let mut __args: Vec<*mut std::ffi::c_void> = Vec::new();
                 #(#arg_code)*
@@ -2871,7 +2881,14 @@ pub fn cuda_launch(input: TokenStream) -> TokenStream {
                 }
 
                 let __ptx_name = <#marker_name #generics as cuda_host::GenericCudaKernel>::ptx_name();
-                let __func = #module.load_function(__ptx_name).expect("Failed to load kernel function");
+                let __func = #module.load_function(__ptx_name).unwrap_or_else(|err| {
+                    panic!(
+                        "Failed to load kernel `{}` (expected PTX entry `{}`): {:?}",
+                        stringify!(#kernel_base),
+                        __ptx_name,
+                        err,
+                    )
+                });
 
                 let mut __args: Vec<*mut std::ffi::c_void> = Vec::new();
                 #(#arg_code)*
@@ -2885,7 +2902,14 @@ pub fn cuda_launch(input: TokenStream) -> TokenStream {
         quote! {
             {
                 const __PTX_NAME: &str = <#marker_name as cuda_host::CudaKernel>::PTX_NAME;
-                let __func = #module.load_function(__PTX_NAME).expect("Failed to load kernel function");
+                let __func = #module.load_function(__PTX_NAME).unwrap_or_else(|err| {
+                    panic!(
+                        "Failed to load kernel `{}` (expected PTX entry `{}`): {:?}",
+                        stringify!(#kernel_base),
+                        __PTX_NAME,
+                        err,
+                    )
+                });
 
                 let mut __args: Vec<*mut std::ffi::c_void> = Vec::new();
                 #(#arg_code)*
@@ -3122,8 +3146,14 @@ pub fn cuda_launch_async(input: TokenStream) -> TokenStream {
                     let _ = core::ptr::read_volatile(&__force_mono);
                 }
                 let __ptx_name = <#marker_name #generics as cuda_host::GenericCudaKernel>::ptx_name();
-                let __func = #module.load_function(__ptx_name)
-                    .expect("Failed to load kernel function");
+                let __func = #module.load_function(__ptx_name).unwrap_or_else(|err| {
+                    panic!(
+                        "Failed to load kernel `{}` (expected PTX entry `{}`): {:?}",
+                        stringify!(#kernel_base),
+                        __ptx_name,
+                        err,
+                    )
+                });
                 let mut __launch = cuda_async::launch::AsyncKernelLaunch::new(
                     std::sync::Arc::new(__func),
                 );
@@ -3137,8 +3167,14 @@ pub fn cuda_launch_async(input: TokenStream) -> TokenStream {
             {
                 const __PTX_NAME: &str =
                     <#marker_name as cuda_host::CudaKernel>::PTX_NAME;
-                let __func = #module.load_function(__PTX_NAME)
-                    .expect("Failed to load kernel function");
+                let __func = #module.load_function(__PTX_NAME).unwrap_or_else(|err| {
+                    panic!(
+                        "Failed to load kernel `{}` (expected PTX entry `{}`): {:?}",
+                        stringify!(#kernel_base),
+                        __PTX_NAME,
+                        err,
+                    )
+                });
                 let mut __launch = cuda_async::launch::AsyncKernelLaunch::new(
                     std::sync::Arc::new(__func),
                 );

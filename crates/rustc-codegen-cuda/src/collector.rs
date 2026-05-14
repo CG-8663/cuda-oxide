@@ -174,74 +174,51 @@ pub fn sanitize_ptx_name(name: &str) -> String {
     name.replace(['$', '.'], "_")
 }
 
-/// Compute the export name for a kernel, handling closure type parameters specially.
+/// Compute the export name for a kernel.
 ///
-/// For kernels with closure type parameters (e.g., `map<F: Fn(f32) -> f32>`),
-/// we generate a unique export name based on the closure's source location.
-/// This must match the naming scheme used by the `cuda_launch!` macro at runtime.
+/// Naming scheme:
+/// - Non-generic kernel (no type args)  -> `base_name`
+/// - Generic kernel with N type args    -> `base_name + "_TID_" + hex32(arg0) + "_" + ... + hex32(argN-1)`
 ///
-/// The naming scheme uses line number from the closure's definition, which is
-/// available to both the proc-macro (via Span) and the backend (via DefId span).
+/// Each `hex32(arg)` is `tcx.type_id_hash(arg).as_u128()` formatted as 32
+/// lowercase hex chars. This matches `cuda_host::type_id_u128::<T>()` on
+/// the host side: both go through the same `erase_and_anonymize_regions`
+/// + stable-hash pipeline, so the same Rust type produces the same hex
+/// chunk on both sides.
 ///
-/// For generic kernels with type parameters (like `scale::<f32>`), we append
-/// the sanitized type names to distinguish monomorphizations.
-///
-/// For non-closure, non-generic kernels, we just return the base name (e.g., "vecadd").
+/// The scheme is uniform — closures, named types, integers, references —
+/// all funnel through one path. That intentionally collapses the older
+/// closure-special-case (`_L<line>C<col>`) and the older named-type case
+/// (`_Debug-formatted_name`) into the same shape, so closure-generic
+/// kernels (`map<T, F: Fn(T) -> T + Copy>`) can finally be launched
+/// through the typed `module.<kernel>(...)` API. The host-side
+/// `GenericCudaKernel::ptx_name` impl emitted by `#[kernel]` /
+/// `#[cuda_module]` produces the exact same string from the type
+/// parameters it sees at the call site.
 fn compute_kernel_export_name<'tcx>(
     tcx: TyCtxt<'tcx>,
     instance: Instance<'tcx>,
     base_name: &str,
 ) -> String {
-    // Check if any type argument is a closure
-    for arg in instance.args.iter() {
-        if let Some(ty) = arg.as_type()
-            && ty.is_closure()
-        {
-            let closure_def_id = match ty.kind() {
-                rustc_middle::ty::TyKind::Closure(def_id, _) => *def_id,
-                _ => continue,
-            };
-
-            let span = tcx.def_span(closure_def_id);
-            let loc = tcx.sess.source_map().lookup_char_pos(span.lo());
-            let line = loc.line;
-            let col = loc.col.0;
-
-            return format!("{}_L{}C{}", base_name, line, col);
-        }
-    }
-
-    // Check if there are non-closure type parameters (generic kernel)
-    // This handles scale::<f32> vs scale::<i32>
-    let type_args: Vec<_> = instance
+    let type_args: Vec<Ty<'tcx>> = instance
         .args
         .iter()
         .filter_map(|arg| arg.as_type())
         .collect();
 
-    if !type_args.is_empty() {
-        // Build a sanitized suffix from type names
-        // e.g., [f32, i32] -> "f32__i32"
-        let type_suffix: String = type_args
-            .iter()
-            .map(|ty| {
-                // Get short type name and sanitize
-                let name = format!("{:?}", ty);
-                name.chars()
-                    .map(|c| match c {
-                        'a'..='z' | 'A'..='Z' | '0'..='9' | '_' => c,
-                        _ => '_',
-                    })
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("__");
-
-        return format!("{}__{}", base_name, type_suffix);
+    if type_args.is_empty() {
+        return base_name.to_string();
     }
 
-    // No closure or generic type parameters - use base name
-    base_name.to_string()
+    let mut out = String::with_capacity(base_name.len() + 5 + type_args.len() * 33);
+    out.push_str(base_name);
+    out.push_str("_TID");
+    for ty in &type_args {
+        let hash = tcx.type_id_hash(*ty).as_u128();
+        use std::fmt::Write as _;
+        write!(&mut out, "_{:032x}", hash).expect("writing to String is infallible");
+    }
+    out
 }
 
 /// A function collected for GPU compilation.
@@ -499,8 +476,11 @@ pub fn collect_device_functions<'tcx>(
                     .unwrap_or_else(|| name.rsplit("::").next().unwrap_or(&name).to_string());
 
                 // Compute a unique export name for this kernel monomorphization.
-                // For closures: uses source location (line/col)
-                // For generics: uses sanitized type names (e.g., "scale__f32")
+                // Non-generic kernels keep the base name (e.g. "vecadd").
+                // Generic kernels (including closure-generic) get
+                // "<base>_TID_<hex32>[_<hex32>...]" with one chunk per generic
+                // type argument. The host-side `ptx_name()` emitted by
+                // `#[kernel]` / `#[cuda_module]` computes the same string.
                 let export_name = compute_kernel_export_name(tcx, *instance, &base_name);
 
                 if verbose {
