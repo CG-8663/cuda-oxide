@@ -27,14 +27,14 @@ roadmap, **N/A** = not applicable or no identified need.
 | Struct Construction and Field Access | **Full** | Struct literals, field access, pass-by-value and return values. User-defined structs supported without annotations. |
 | Array Types (`[T; N]`) | **Full** | Static array construction, constant-index and runtime-index access. Mutable arrays auto-promoted to memory-backed. |
 | `CuSimd<T, N>` SIMD Type | **Full** | Generic SIMD register type with named accessors (`x`/`y`/`z`/`w`), runtime and compile-time indexing, `to_array` conversion. |
-| ABI Scalarization | **Full** | Composite types (slices, structs) are scalarized at kernel boundaries. `&[T]` becomes `(ptr, len)` pair, reconstructed inside the function. |
+| ABI Scalarization | **Full** | Slices are scalarized at kernel boundaries (`&[T]` -> `(ptr, len)`, reconstructed inside the function). Structs and closures pass by value as one byval `.param`; field flattening still applies on internal device-to-device calls. |
 
 ## Compiler: Closures
 
 | Feature | Status | Description |
 |:--------|:-------|:------------|
-| Move Closures (`FnOnce`) | **Full** | Closures that capture by value. Captures are passed as kernel arguments. `move \|x\| x * factor` pattern. |
-| Reference Closures (`Fn`/`FnMut`) | **Full** | Non-move closures that capture by reference. GPU reads host addresses via HMM. |
+| Move Closures (`FnOnce`) | **Full** | Closures that capture by value. The whole closure struct is pushed as one byval kernel argument. `move \|x\| x * factor` pattern. |
+| Reference Closures (`Fn`/`FnMut`) | **Full** | Non-move closures that capture by reference. The closure struct (containing host pointers) still travels as one byval argument; the GPU reads through those pointers via HMM. |
 | Host-to-Device Closures | **Full** | Closures defined on host passed to generic kernels. Polynomial evaluation with captured coefficients tested. |
 | Device-Internal Closures | **Full** | Closures created and used entirely on device, including closures passed to device functions. |
 

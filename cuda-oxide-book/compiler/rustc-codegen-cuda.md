@@ -211,7 +211,12 @@ For generic or complex names (angle brackets, closures), the mangled symbol
 name is used instead -- this is unique and already a valid identifier.
 
 Kernel entry points follow a separate path: `compute_kernel_export_name`
-derives human-readable names from the `#[kernel]` macro's base name.
+takes the `#[kernel]` macro's base name and, for generic and closure-
+generic instantiations, appends `_TID_<hex32>` where `<hex32>` is
+rustc's 128-bit type-id hash of the tuple of generic arguments. The
+host launcher computes the same hash through the `core::intrinsics::type_id`
+intrinsic (wrapped by `cuda_host::type_id_u128`), so both sides agree
+byte-for-byte. Non-generic kernels keep their bare base name.
 
 ```{note}
 This FQDN alignment strategy will be replaced by pliron's `Legaliser` when

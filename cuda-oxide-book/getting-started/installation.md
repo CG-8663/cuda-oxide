@@ -21,6 +21,47 @@ cuda-oxide currently targets **Linux only**. Windows is not supported.
 
 ---
 
+## Dev Container
+
+The repository includes a standard devcontainer setup in `.devcontainer/`.
+Using it is the quickest way to get a reproducible development environment with
+CUDA Toolkit 13.0, LLVM 21, Clang 21, and the pinned Rust nightly already
+installed.
+
+The host does not need the CUDA Toolkit installed. It does need:
+
+- an NVIDIA GPU
+- an NVIDIA driver compatible with CUDA 13.0
+- Docker with the NVIDIA Container Toolkit installed
+
+With a devcontainer-aware editor, open the repository and choose "Reopen in
+Container" when prompted. The editor reads `.devcontainer/devcontainer.json`,
+builds the image, requests GPU access with `--gpus=all`, and opens the checkout
+inside the container.
+
+For CLI-only usage, start the container with:
+
+```bash
+npx -y @devcontainers/cli up --workspace-folder .
+```
+
+Then run commands inside it with:
+
+```bash
+npx -y @devcontainers/cli exec --workspace-folder . cargo oxide doctor
+npx -y @devcontainers/cli exec --workspace-folder . cargo oxide run vecadd
+```
+
+If the host driver is too old, GPU commands such as `nvidia-smi`,
+`cargo oxide doctor`, or `cargo oxide run vecadd` will fail inside the
+container. Update the host NVIDIA driver rather than installing a different
+CUDA Toolkit in the container.
+
+If you use the devcontainer, you can skip the manual CUDA, LLVM, Clang, and
+Rust setup sections below.
+
+---
+
 ## CUDA Toolkit
 
 Install the CUDA Toolkit from the [NVIDIA CUDA Downloads](https://developer.nvidia.com/cuda-downloads) page, then make sure it is on your `PATH`:
@@ -48,6 +89,14 @@ cuda-oxide uses LLVM's NVPTX backend to lower LLVM IR to PTX. Install LLVM 21 or
 ```bash
 # Ubuntu / Debian
 sudo apt install llvm-21
+```
+
+If your distro packages do not provide `llvm-21`, use LLVM's apt helper:
+
+```bash
+sudo apt-get install -y lsb-release wget software-properties-common gnupg
+wget https://apt.llvm.org/llvm.sh && chmod +x llvm.sh
+sudo ./llvm.sh 21
 ```
 
 Verify that the NVPTX target is present:

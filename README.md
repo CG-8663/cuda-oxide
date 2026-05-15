@@ -161,7 +161,17 @@ nvcc --version
 ```bash
 # Ubuntu/Debian
 sudo apt install llvm-21
+```
 
+If your distro packages do not provide `llvm-21`, use LLVM's apt helper:
+
+```bash
+sudo apt-get install -y lsb-release wget software-properties-common gnupg
+wget https://apt.llvm.org/llvm.sh && chmod +x llvm.sh
+sudo ./llvm.sh 21
+```
+
+```bash
 # Verify NVPTX support
 llc-21 --version | grep nvptx
 ```
@@ -181,6 +191,13 @@ sudo apt install clang-21   # or libclang-common-21-dev
 
 `cargo oxide doctor` catches this up front; the symptom otherwise is a cryptic
 `'stddef.h' file not found` during the host build.
+
+#### Dev Container
+
+The repository includes a standard devcontainer setup in `.devcontainer/` for a
+reproducible CUDA, LLVM, Clang, and Rust environment. See the
+[installation chapter](cuda-oxide-book/getting-started/installation.md#dev-container)
+for editor and CLI usage.
 
 ### Verifying Installation
 
